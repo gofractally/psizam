@@ -23,6 +23,14 @@ case "$cmd" in
       out_json="${@: -1}"   # last arg is output path
       # Drop the last arg from the wast2json argv:
       argv=("${@:1:$#-1}")
+      # Parse the original bytes first. The legacy text filter below cannot
+      # preserve binary/control bytes in comment syntax tests, and most inputs
+      # do not need any compatibility filtering at all.
+      json_name=$(basename "$out_json")
+      if "$wast2json_bin" "${argv[@]}" -o "$json_name" 2>/dev/null; then
+         [ "$(pwd)/$json_name" != "$out_json" ] && mv "$json_name" "$out_json"
+         exit 0
+      fi
       # Preprocess the .wast (last arg of argv) to strip constructs newer
       # wabt can't parse: `(module definition ...)` forms and any assert_*
       # block containing `0x1_0000_0000` (post-Memory64 oversize-validation
@@ -69,7 +77,6 @@ case "$cmd" in
       # -o argument. Tests read .wasm from ${CMAKE_BINARY_DIR}/wasms/, which
       # cmake sets as our CWD — so emit with a bare basename (→ files land in
       # CWD) and then move just the .json to its final location.
-      json_name=$(basename "$out_json")
       if "$wast2json_bin" "${argv[@]}" -o "$json_name" 2>/dev/null; then
          [ "$(pwd)/$json_name" != "$out_json" ] && mv "$json_name" "$out_json"
          exit 0

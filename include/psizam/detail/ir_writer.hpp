@@ -78,7 +78,10 @@ namespace psizam::detail {
          }
       }
       ~compile_reactor() {
-         _phase.store(PHASE_SHUTDOWN, std::memory_order_release);
+         {
+            std::lock_guard<std::mutex> lk(_mu);
+            _phase.store(PHASE_SHUTDOWN, std::memory_order_release);
+         }
          _phase_cv.notify_all();
          for (auto tid : _pthreads) pthread_join(tid, nullptr);
       }
@@ -102,7 +105,13 @@ namespace psizam::detail {
 
          // Phase 1: compile
          _workers_done.store(0, std::memory_order_relaxed);
-         _phase.store(PHASE_COMPILE, std::memory_order_release);
+         {
+            // The condition-variable predicate must change under its mutex.
+            // An atomic alone permits notify to fall between a worker's
+            // predicate check and wait, leaving the whole batch asleep.
+            std::lock_guard<std::mutex> lk(_mu);
+            _phase.store(PHASE_COMPILE, std::memory_order_release);
+         }
          _phase_cv.notify_all();
          {
             std::unique_lock<std::mutex> lk(_mu);
@@ -114,7 +123,10 @@ namespace psizam::detail {
 
          // Phase 2: merge
          _workers_done.store(0, std::memory_order_relaxed);
-         _phase.store(PHASE_MERGE, std::memory_order_release);
+         {
+            std::lock_guard<std::mutex> lk(_mu);
+            _phase.store(PHASE_MERGE, std::memory_order_release);
+         }
          _phase_cv.notify_all();
          {
             std::unique_lock<std::mutex> lk(_mu);
@@ -122,7 +134,10 @@ namespace psizam::detail {
          }
 
          // Park workers
-         _phase.store(PHASE_IDLE, std::memory_order_release);
+         {
+            std::lock_guard<std::mutex> lk(_mu);
+            _phase.store(PHASE_IDLE, std::memory_order_release);
+         }
          _phase_cv.notify_all();
       }
 

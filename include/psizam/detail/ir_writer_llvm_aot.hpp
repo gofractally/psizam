@@ -232,7 +232,7 @@ namespace psizam::detail {
                   auto llvm_mod = translator.take_module();
                   auto llvm_ctx = translator.take_context();
                   auto result = llvm_aot_compile(std::move(llvm_ctx), std::move(llvm_mod),
-                                                  get_ir_module(), target_triple);
+                                                  get_ir_module(), target_triple, topts.opt_level);
 
                   if (!result.error.empty()) {
                      ws.had_error = true;
@@ -386,7 +386,7 @@ namespace psizam::detail {
             auto llvm_mod = translator.take_module();
             auto llvm_ctx = translator.take_context();
             auto func_result = llvm_aot_compile(std::move(llvm_ctx), std::move(llvm_mod),
-                                                 get_ir_module(), _compile_result->target_triple);
+                                                 get_ir_module(), _compile_result->target_triple, topts.opt_level);
 
             if (!func_result.error.empty()) {
                _compile_result->error = std::move(func_result.error);

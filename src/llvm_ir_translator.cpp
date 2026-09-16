@@ -5495,6 +5495,22 @@ namespace psizam::detail {
          throw wasm_parse_exception("LLVM module verification failed: " + err);
       }
 
+      // Lower our alloca-per-virtual-register representation to SSA at every
+      // level. This is part of translation: retaining thousands of synthetic
+      // stack slots at O0 causes pathological instruction selection and huge
+      // native frames even though the Wasm operand stack is modest.
+      if (_impl->opts.opt_level == 0) {
+         llvm::FunctionAnalysisManager fam;
+         fam.registerPass([&] { return llvm::DominatorTreeAnalysis(); });
+         fam.registerPass([&] { return llvm::AssumptionAnalysis(); });
+         fam.registerPass([&] { return llvm::TargetIRAnalysis(); });
+         fam.registerPass([&] { return llvm::PassInstrumentationAnalysis(); });
+         llvm::FunctionPassManager fpm;
+         fpm.addPass(llvm::PromotePass());
+         for (auto& fn : *_impl->llvm_mod)
+            if (!fn.isDeclaration()) fpm.run(fn, fam);
+      }
+
       // Run optimization passes.
       // Manual analysis registration instead of PassBuilder to avoid pulling in
       // all 65+ analyses from PassRegistry.def (IPO, Vectorize, Coroutines, etc.)

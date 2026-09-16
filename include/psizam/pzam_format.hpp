@@ -40,6 +40,7 @@ namespace psizam {
       llvm_O1 = 2,
       llvm_O2 = 3,
       llvm_O3 = 4,
+      llvm_O0 = 5, // Appended to preserve existing tier numbers; requires an O0-aware reader.
    };
 
    // ---- Per-function entry in compiled code ----

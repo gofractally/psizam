@@ -116,11 +116,20 @@ namespace psizam::compliance {
       return results;
    }
 
-   /// Compare raw i64 bits of operand_stack_elem (type-punned comparison).
-   inline uint64_t result_bits(const operand_stack_elem& elem) {
-      uint64_t bits = 0;
-      std::memcpy(&bits, &elem, sizeof(uint64_t));
-      return bits;
+   /// Compare the active payload, never the variant's tag/padding/storage bytes.
+   inline bool same_value(const operand_stack_elem& a, const operand_stack_elem& b) {
+      if (a.index() != b.index()) return false;
+      switch (a.index()) {
+         case 0: return a.to_ui32() == b.to_ui32();
+         case 1: return a.to_ui64() == b.to_ui64();
+         case 2: return a.to_fui32() == b.to_fui32();
+         case 3: return a.to_fui64() == b.to_fui64();
+         case 4: {
+            const auto av = a.to_v128(), bv = b.to_v128();
+            return std::memcmp(&av, &bv, sizeof(av)) == 0;
+         }
+         default: return false;
+      }
    }
 
    /// Check that all engine results agree.
@@ -152,13 +161,9 @@ namespace psizam::compliance {
 
          if (!ref_has) continue;
 
-         uint64_t ref_bits   = result_bits(*ref.value);
-         uint64_t other_bits = result_bits(*other.value);
-         if (ref_bits != other_bits) {
-            return ref.engine_name + " returned 0x" +
-                   std::to_string(ref_bits) +
-                   " but " + other.engine_name + " returned 0x" +
-                   std::to_string(other_bits);
+         if (!same_value(*ref.value, *other.value)) {
+            return ref.engine_name + " and " + other.engine_name +
+                   " returned different value types or payload bits";
          }
       }
 

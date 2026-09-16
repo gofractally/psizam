@@ -422,8 +422,13 @@ int pzam_run_main(int argc, char** argv) {
    profile.mark("ADRP overflow diagnostic scan");
 #endif
 
-   apply_relocations(static_cast<char*>(exec_code), relocs.data(),
-                     static_cast<uint32_t>(relocs.size()), symbol_table);
+   try {
+      apply_relocations(static_cast<char*>(exec_code), relocs.data(),
+                        static_cast<uint32_t>(relocs.size()), symbol_table);
+   } catch (const std::exception& e) {
+      std::cerr << "Error: PZAM relocation failed: " << e.what() << "\n";
+      return 1;
+   }
 
    profile.mark("apply_relocations");
 
@@ -510,7 +515,8 @@ int pzam_run_main(int argc, char** argv) {
    // produced overlapping malloc regions, which ultimately OOB-crashed
    // deep in startup (issue #0016).
    const bool is_llvm_pzam =
-      cs->opt_tier == static_cast<uint8_t>(pzam_opt_tier::llvm_O1) ||
+      cs->opt_tier == static_cast<uint8_t>(pzam_opt_tier::llvm_O0) ||
+                        cs->opt_tier == static_cast<uint8_t>(pzam_opt_tier::llvm_O1) ||
       cs->opt_tier == static_cast<uint8_t>(pzam_opt_tier::llvm_O2) ||
       cs->opt_tier == static_cast<uint8_t>(pzam_opt_tier::llvm_O3);
    std::vector<host_trampoline_t> trampoline_ptrs(mod.import_functions.size());

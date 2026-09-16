@@ -43,6 +43,7 @@
 #include <unistd.h>
 
 #include <cstdint>
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 #include <unordered_map>
@@ -130,7 +131,8 @@ inline void init_symbol_table(void** symbol_table) {
 // it from `opt_tier` (the bug fixed by commit 960c425 was caused by
 // inconsistent re-derivation at one of two write sites).
 inline bool derive_reverse_host_args(uint8_t opt_tier) noexcept {
-   const bool is_llvm = opt_tier == static_cast<uint8_t>(pzam_opt_tier::llvm_O1) ||
+   const bool is_llvm = opt_tier == static_cast<uint8_t>(pzam_opt_tier::llvm_O0) ||
+                        opt_tier == static_cast<uint8_t>(pzam_opt_tier::llvm_O1) ||
                         opt_tier == static_cast<uint8_t>(pzam_opt_tier::llvm_O2) ||
                         opt_tier == static_cast<uint8_t>(pzam_opt_tier::llvm_O3);
    return !is_llvm;
@@ -186,8 +188,10 @@ inline pzam_load_result load_pzam(const pzam_file& pzam)
 #endif
 
    const std::size_t page_size      = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
-   const std::size_t code_alloc_size = (total_code_size + page_size - 1) &
-                                       ~(page_size - 1);
+   // Valid modules can contain no defined functions. Still reserve a real
+   // allocation; splitting a zero-byte jit_allocator block is not meaningful.
+   const std::size_t code_alloc_size = std::max(page_size,
+      (total_code_size + page_size - 1) & ~(page_size - 1));
 
    void* exec_code = jit_allocator::instance().alloc(code_alloc_size);
    if (mprotect(exec_code, code_alloc_size, PROT_READ | PROT_WRITE) != 0) {

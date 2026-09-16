@@ -39,6 +39,7 @@ namespace psizam::detail {
          std::unique_ptr<llvm::LLVMContext> llvm_ctx,
          std::unique_ptr<llvm::Module> llvm_mod,
          const module& mod,
-         const std::string& target_triple);
+         const std::string& target_triple,
+         unsigned opt_level = 2);
 
 } // namespace psizam::detail

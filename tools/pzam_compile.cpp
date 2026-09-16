@@ -7,7 +7,7 @@
 // The .pzam file can later be loaded and relocated at runtime, skipping
 // the compilation step.
 
-#include <psizam/detail/parser.hpp>
+#include <psizam/pzam_compile.hpp>
 #include <psizam/detail/ir_writer.hpp>
 #include <psizam/pzam_cache.hpp>
 #include <psizam/pzam_format.hpp>
@@ -34,7 +34,7 @@ struct compile_options : default_options {
 };
 
 static void usage(const char* prog) {
-   std::cerr << "Usage: " << prog << " --target=x86_64|aarch64 [--backend=jit2|llvm] [--opt-level=0|1|2] [--softfloat] [--backtrace] [-jN] [--dump-layout=FILE] [-o output.pzam] input.wasm\n";
+   std::cerr << "Usage: " << prog << " --target=x86_64|aarch64 [--backend=jit2|llvm] [--opt-level=0|1|2|3] [--softfloat] [--backtrace] [-jN] [--dump-layout=FILE] [-o output.pzam] input.wasm\n";
 }
 
 static std::vector<char> write_pzam(
@@ -44,66 +44,14 @@ static std::vector<char> write_pzam(
       std::span<const uint8_t> wasm_bytes,
       pzam_arch target_arch,
       bool use_softfloat,
-      bool use_backtrace) {
+      bool use_backtrace, pzam_opt_tier tier) {
 
    pzam_file file;
    file.input_hash = pzam_cache::hash_wasm(wasm_bytes);
    file.metadata = extract_metadata(mod);
 
-   bool llvm_aot = !result.code_blob.empty();
-
-   // Build a single code section
-   pzam_code_section cs;
-   cs.arch = static_cast<uint8_t>(target_arch);
-   cs.opt_tier = static_cast<uint8_t>(llvm_aot ? pzam_opt_tier::llvm_O3 : pzam_opt_tier::jit2);
-   cs.instrumentation.softfloat = use_softfloat ? 1 : 0;
-   cs.instrumentation.async_backtrace = use_backtrace ? 1 : 0;
-   cs.stack_limit_mode = mod.stack_limit_is_bytes ? 1 : 0;
-   cs.page_size = static_cast<uint32_t>(wasm_allocator::table_size());
-   cs.max_stack = static_cast<uint32_t>(mod.maximum_stack);
-   cs.compiler.compiler_name = llvm_aot ? "psizam-llvm" : "psizam-jit2";
-   cs.compiler.compiler_version = "0.1.0";
-   cs.compiler.compiler_hash = pzam_cache::compiler_identity(target_arch);
-
-   // Function table
-   cs.functions.resize(mod.code.size());
-   for (size_t i = 0; i < mod.code.size(); i++) {
-      if (llvm_aot && i < result.function_offsets.size()) {
-         cs.functions[i].code_offset = result.function_offsets[i].first;
-         cs.functions[i].code_size   = result.function_offsets[i].second;
-      } else {
-         cs.functions[i].code_offset = static_cast<uint32_t>(mod.code[i].jit_code_offset);
-         cs.functions[i].code_size   = mod.code[i].jit_code_size;
-      }
-      cs.functions[i].stack_size = mod.code[i].stack_size;
-   }
-
-   // Relocations
-   cs.relocations.resize(result.relocs.size());
-   for (size_t i = 0; i < result.relocs.size(); i++) {
-      cs.relocations[i].code_offset = result.relocs[i].code_offset;
-      cs.relocations[i].symbol      = static_cast<uint16_t>(result.relocs[i].symbol);
-      cs.relocations[i].type        = static_cast<uint8_t>(result.relocs[i].type);
-      cs.relocations[i].addend      = result.relocs[i].addend;
-   }
-
-   // Code blob — use actual size (no page-alignment padding)
-   if (llvm_aot) {
-      cs.code_blob = result.code_blob;
-   } else {
-      auto code_start = reinterpret_cast<const uint8_t*>(alloc.get_code_start());
-      size_t actual_size = alloc.get_actual_code_size();
-      cs.code_blob.assign(code_start, code_start + actual_size);
-   }
-
-   // Canonicalize reloc sites so byte-level output is deterministic
-   // regardless of where the code was laid out in memory at compile time.
-   // The bits cleared here are overwritten by apply_relocations at load time.
-   if (!cs.code_blob.empty() && !result.relocs.empty()) {
-      canonicalize_reloc_sites(reinterpret_cast<char*>(cs.code_blob.data()),
-                               result.relocs.data(),
-                               static_cast<uint32_t>(result.relocs.size()));
-   }
+   auto cs = make_pzam_code_section(mod, result, target_arch, tier,
+                                    use_softfloat, use_backtrace);
 
    file.code_sections.push_back(std::move(cs));
 
@@ -159,7 +107,9 @@ static bool compile_wasm(
 
    auto pzam_bytes = write_pzam(mod, mod.allocator, compile_result,
                                  wasm_bytes, target_arch, use_softfloat,
-                                 use_backtrace);
+                                 use_backtrace, std::is_same_v<IrWriter, ir_writer_x64> ||
+                                    std::is_same_v<IrWriter, ir_writer_a64>
+                                    ? pzam_opt_tier::jit2 : llvm_pzam_tier(opt_level));
 
    std::ofstream out(output_file, std::ios::binary);
    if (!out.is_open()) {
@@ -263,6 +213,11 @@ int pzam_compile_main(int argc, char** argv) {
 
    if (input_file.empty() || target_str.empty()) {
       usage(argv[0]);
+      return 1;
+   }
+
+   if (opt_level < 0 || opt_level > 3) {
+      std::cerr << "Error: optimization level must be 0..3\n";
       return 1;
    }
 

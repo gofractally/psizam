@@ -7,6 +7,8 @@
 // At load time, these recorded relocations are patched to the current process's
 // function addresses, allowing cached code to be loaded at any base address.
 
+#include <psizam/exceptions.hpp>
+
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -262,7 +264,10 @@ namespace psizam::detail {
             case reloc_type::aarch64_call26: {
                // 26-bit PC-relative branch offset (BL/B instruction)
                int64_t pc = reinterpret_cast<int64_t>(patch_site);
-               int64_t offset = (static_cast<int64_t>(target) - pc + r.addend) >> 2;
+               const int64_t distance = static_cast<int64_t>(target) - pc + r.addend;
+               PSIZAM_ASSERT((distance & 3) == 0 && distance >= -(1LL << 27) && distance < (1LL << 27),
+                             wasm_parse_exception, "AArch64 branch relocation out of range; recompile with branch islands");
+               int64_t offset = distance >> 2;
                uint32_t insn;
                std::memcpy(&insn, patch_site, 4);
                insn = (insn & 0xFC000000u) | (static_cast<uint32_t>(offset) & 0x03FFFFFFu);

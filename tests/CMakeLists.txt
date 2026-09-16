@@ -9,6 +9,11 @@ endif()
 
 enable_testing()
 
+add_executable(psizam_compile_reactor_test compile_reactor_test.cpp)
+target_link_libraries(psizam_compile_reactor_test PRIVATE psizam psizam-exec)
+add_test(NAME psizam_compile_reactor_test COMMAND psizam_compile_reactor_test)
+set_tests_properties(psizam_compile_reactor_test PROPERTIES TIMEOUT 30)
+
 # ── Spec tests ─────────────────────────────────────────────────────────────────
 
 set(WASM_TESTSUITE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/spec/testsuite)
@@ -97,24 +102,17 @@ foreach(testcase address align binary binary-leb128 block br br_if br_table call
 endforeach()
 
 
-# Tail-call tests — pre-generated .cpp, generate .wasm from proposals/tail-call/
-set(TAIL_CALL_WAST_DIR ${WASM_TESTSUITE_DIR}/proposals/tail-call)
+# Tail-call tests moved into the testsuite root. Regenerate both assertions and
+# fixtures from the same pinned source, as for the other spec tests.
 foreach(testcase return_call return_call_indirect)
-   list(APPEND SPEC_TESTS ${CMAKE_CURRENT_SOURCE_DIR}/spec/${testcase}_tests.cpp)
-   if(EXISTS ${TAIL_CALL_WAST_DIR}/${testcase}.wast)
-      add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/wasms/${testcase}.wasm_marker
-         COMMAND ${WAST2JSON} ${WAST2JSON_FEATURES} --no-check ${TAIL_CALL_WAST_DIR}/${testcase}.wast -o ${testcase}.json
-         COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_BINARY_DIR}/wasms/${testcase}.wasm_marker
-         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/wasms
-         DEPENDS ${TAIL_CALL_WAST_DIR}/${testcase}.wast
-         COMMENT "Generating tail-call wasms: ${testcase}"
-      )
-      list(APPEND TAIL_CALL_WASM_MARKERS ${CMAKE_BINARY_DIR}/wasms/${testcase}.wasm_marker)
+   if(EXISTS ${WASM_TESTSUITE_DIR}/${testcase}.wast)
+      add_spec_test(${testcase})
+   elseif(EXISTS ${WASM_TESTSUITE_DIR}/proposals/tail-call/${testcase}.wast)
+      add_spec_test_impl(${testcase} ${WASM_TESTSUITE_DIR}/proposals/tail-call/${testcase}.wast)
+   else()
+      message(FATAL_ERROR "Missing tail-call spec source: ${testcase}.wast")
    endif()
 endforeach()
-if(TAIL_CALL_WASM_MARKERS)
-   add_custom_target(tail_call_test_wasms DEPENDS ${TAIL_CALL_WASM_MARKERS})
-endif()
 
 add_spec_test_impl(e_block ${CMAKE_CURRENT_SOURCE_DIR}/spec/extra/block.wast)
 add_spec_test_impl(e_function ${CMAKE_CURRENT_SOURCE_DIR}/spec/extra/function.wast)
@@ -125,6 +123,7 @@ add_spec_test_impl(e_table ${CMAKE_CURRENT_SOURCE_DIR}/spec/extra/table.wast)
 add_spec_test_impl(e_simd ${CMAKE_CURRENT_SOURCE_DIR}/spec/extra/simd.wast)
 
 add_executable(psizam_spec_tests main.cpp ${SPEC_TESTS})
+set(SCALAR_SPEC_SOURCES ${SPEC_TESTS})
 target_link_libraries(psizam_spec_tests psizam psizam-exec Catch2::Catch2)
 target_include_directories(psizam_spec_tests PUBLIC
    ${CMAKE_CURRENT_SOURCE_DIR}
@@ -134,9 +133,6 @@ target_include_directories(psizam_spec_tests PUBLIC
 target_compile_definitions(psizam_spec_tests PUBLIC CATCH_CONFIG_NO_POSIX_SIGNALS)
 if(PSIZAM_ENABLE_LLVM)
    target_link_libraries(psizam_spec_tests psizam-llvm)
-endif()
-if(TARGET tail_call_test_wasms)
-   add_dependencies(psizam_spec_tests tail_call_test_wasms)
 endif()
 catch_discover_tests(psizam_spec_tests)
 
@@ -215,6 +211,25 @@ if(TARGET simd_test_wasms)
    add_dependencies(psizam_simd_tests simd_test_wasms)
 endif()
 catch_discover_tests(psizam_simd_tests)
+
+option(PSIZAM_ENABLE_AOT_SPEC_TESTS "Build saved-PZAM LLVM O2 spec executables" OFF)
+if(PSIZAM_ENABLE_AOT_SPEC_TESTS)
+   add_library(psizam_aot_spec_support STATIC aot_spec_backend.cpp)
+   target_link_libraries(psizam_aot_spec_support PUBLIC psizam psizam-exec)
+   foreach(suite scalar simd smoke)
+      if(suite STREQUAL "scalar")
+         set(_aot_sources ${SCALAR_SPEC_SOURCES})
+      elseif(suite STREQUAL "simd")
+         set(_aot_sources ${SPEC_TESTS})
+      else()
+         set(_aot_sources aot_spec_smoke.cpp)
+      endif()
+      add_executable(psizam_${suite}_aot_o2_tests main.cpp ${_aot_sources})
+      target_link_libraries(psizam_${suite}_aot_o2_tests PRIVATE psizam_aot_spec_support Catch2::Catch2)
+      target_include_directories(psizam_${suite}_aot_o2_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/spec)
+      target_compile_definitions(psizam_${suite}_aot_o2_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS PSIZAM_TEST_AOT_O2)
+   endforeach()
+endif()
 
 endif(PSIZAM_ENABLE_SPEC_TESTS)
 
@@ -316,6 +331,7 @@ add_executable(psizam_compliance_tests main.cpp
    compliance/pzam_attestation_tests.cpp
    compliance/wit_tests.cpp
    compliance/memory64_tests.cpp
+   compliance/wasi_path_tests.cpp
    exception_handling_tests.cpp
 )
 target_link_libraries(psizam_compliance_tests psizam psizam-exec Catch2::Catch2)
@@ -362,7 +378,7 @@ target_include_directories(composition_tests PUBLIC
 )
 target_compile_definitions(composition_tests PUBLIC
    CATCH_CONFIG_NO_POSIX_SIGNALS
-   COMPOSITION_WASM_DIR="${CMAKE_BINARY_DIR}/libraries/psizam/examples/composition"
+   COMPOSITION_WASM_DIR="${PSIZAM_BINARY_DIR}/examples/composition"
 )
 if(NOT TARGET composition_provider_guest OR NOT TARGET composition_consumer_guest)
    message(FATAL_ERROR
@@ -378,7 +394,7 @@ catch_discover_tests(composition_tests)
 
 add_executable(runtime_parity_tests main.cpp
    runtime_parity_tests.cpp
-   ${CMAKE_SOURCE_DIR}/libraries/psizam/src/runtime.cpp
+   ${PSIZAM_SOURCE_DIR}/src/runtime.cpp
 )
 target_link_libraries(runtime_parity_tests psizam psizam-exec Catch2::Catch2)
 if(PSIZAM_ENABLE_LLVM)
@@ -391,7 +407,7 @@ target_include_directories(runtime_parity_tests PUBLIC
 )
 target_compile_definitions(runtime_parity_tests PUBLIC
    CATCH_CONFIG_NO_POSIX_SIGNALS
-   COMPOSITION_WASM_DIR="${CMAKE_BINARY_DIR}/libraries/psizam/examples/composition"
+   COMPOSITION_WASM_DIR="${PSIZAM_BINARY_DIR}/examples/composition"
 )
 add_dependencies(runtime_parity_tests composition_provider_guest composition_consumer_guest)
 catch_discover_tests(runtime_parity_tests)
@@ -407,9 +423,9 @@ target_include_directories(mem64_debug PUBLIC
 add_executable(bench_composition bench_composition.cpp)
 target_link_libraries(bench_composition psizam psizam-exec)
 target_include_directories(bench_composition PRIVATE
-   ${CMAKE_SOURCE_DIR}/libraries/psizam/examples/composition)
+   ${PSIZAM_SOURCE_DIR}/examples/composition)
 target_compile_definitions(bench_composition PRIVATE
-   COMPOSITION_WASM_DIR="${CMAKE_BINARY_DIR}/libraries/psizam/examples/composition")
+   COMPOSITION_WASM_DIR="${PSIZAM_BINARY_DIR}/examples/composition")
 if(TARGET psizam-llvm)
    target_link_libraries(bench_composition psizam-llvm)
    target_compile_definitions(bench_composition PRIVATE PSIZAM_ENABLE_LLVM_BACKEND)
@@ -417,3 +433,13 @@ endif()
 if(TARGET psizam-llvm-jit)
    target_link_libraries(bench_composition psizam-llvm-jit)
 endif()
+
+# Exercise the public compile API with and without the optional LLVM dependency.
+add_executable(psizam_pzam_compile_tests pzam_compile_tests.cpp)
+target_link_libraries(psizam_pzam_compile_tests PRIVATE psizam psizam-exec Catch2::Catch2)
+if(PSIZAM_ENABLE_LLVM)
+   target_link_libraries(psizam_pzam_compile_tests PRIVATE psizam-llvm)
+endif()
+target_compile_definitions(psizam_pzam_compile_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS)
+add_test(NAME pzam_compile_api COMMAND psizam_pzam_compile_tests)
+set_tests_properties(pzam_compile_api PROPERTIES TIMEOUT 60)

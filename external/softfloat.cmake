@@ -329,6 +329,7 @@ target_compile_definitions(softfloat PUBLIC
    SOFTFLOAT_FAST_DIV32TO16
    SOFTFLOAT_FAST_DIV64TO32
 )
-target_include_directories(softfloat
-                           PUBLIC ${SOFTFLOAT_SRC}/include ${SOFTFLOAT_SRC}/8086-SSE
-                                  ${SOFTFLOAT_PLATFORM_DIR})
+target_include_directories(softfloat PUBLIC
+   $<BUILD_INTERFACE:${SOFTFLOAT_SRC}/include>
+   $<INSTALL_INTERFACE:include/psizam/external/softfloat>
+   PRIVATE ${SOFTFLOAT_SRC}/8086-SSE ${SOFTFLOAT_PLATFORM_DIR})

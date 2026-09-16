@@ -42,3 +42,7 @@ build/
 compile_commands.json
 Testing/build-spec-tests/
 build-simd-test/
+
+# Python tooling
+__pycache__/
+*.pyc

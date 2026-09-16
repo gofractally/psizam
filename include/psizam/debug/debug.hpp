@@ -209,7 +209,7 @@ namespace psizam::debug
    std::shared_ptr<debugger_registration> enable_debug(std::vector<uint8_t>& code,
                                                               Backend&              backend,
                                                               info&                 dwarf_info,
-                                                              psio::input_stream    wasm_source)
+                                                              psio1::input_stream    wasm_source)
    {
       auto& module = backend.get_module();
       auto& alloc  = module.allocator;

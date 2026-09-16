@@ -126,3 +126,19 @@ TEST_CASE("pzam: invalid data rejected", "[pzam]") {
    std::vector<char> too_small(10, 0);
    CHECK_FALSE(pzam_validate(too_small));
 }
+
+TEST_CASE("pzam: ARM branch relocation rejects overflow and misalignment", "[pzam][relocation]") {
+   alignas(8) char code[4]{};
+   void* symbols[static_cast<unsigned>(reloc_symbol::unknown) + 1]{};
+   const auto index = static_cast<unsigned>(reloc_symbol::code_blob_self);
+   code_relocation relocation{0, reloc_symbol::code_blob_self, reloc_type::aarch64_call26};
+   const auto base = reinterpret_cast<std::uintptr_t>(code);
+   for (auto distance : {-(1LL << 27), (1LL << 27) - 4}) {
+      symbols[index] = reinterpret_cast<void*>(base + distance);
+      REQUIRE_NOTHROW(apply_relocations(code, &relocation, 1, symbols));
+   }
+   for (auto distance : {-(1LL << 27) - 4, (1LL << 27), 1LL}) {
+      symbols[index] = reinterpret_cast<void*>(base + distance);
+      REQUIRE_THROWS_AS(apply_relocations(code, &relocation, 1, symbols), wasm_parse_exception);
+   }
+}

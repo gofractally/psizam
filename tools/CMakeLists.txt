@@ -5,11 +5,11 @@
 if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
    # WASI build: only pzam-compile, no runtime library needed
    add_executable(pzam-compile pzam_compile.cpp ../src/wasi_cxa_stubs.cpp
-      ${CMAKE_SOURCE_DIR}/cmake/llvm-wasi/wasi_llvm_stubs.c)
+      ${PSIZAM_SOURCE_DIR}/cmake/llvm-wasi/wasi_llvm_stubs.c)
    target_compile_definitions(pzam-compile PRIVATE
       PSIZAM_COMPILE_ONLY
       PZAM_STANDALONE_COMPILE)
-   target_include_directories(pzam-compile PRIVATE ${CMAKE_SOURCE_DIR}/cmake/llvm-wasi/wasi_compat)
+   target_include_directories(pzam-compile PRIVATE ${PSIZAM_SOURCE_DIR}/cmake/llvm-wasi/wasi_compat)
    target_link_libraries(pzam-compile psizam)
    if(TARGET psizam-llvm)
       target_link_libraries(pzam-compile psizam-llvm)

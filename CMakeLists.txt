@@ -3,8 +3,11 @@
 
 # Standalone guard: only set project-level settings when building psizam alone
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-   cmake_minimum_required(VERSION 3.16)
+   cmake_minimum_required(VERSION 3.20)
    project(psizam VERSION 1.0.0 LANGUAGES C CXX)
+   set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+   set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+   set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
    set(CMAKE_CXX_STANDARD 23)
    set(CMAKE_CXX_EXTENSIONS ON)
    set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -52,7 +55,7 @@ option(PSIZAM_ENABLE_TESTS
 option(PSIZAM_ENABLE_BENCHMARKS
    "Build comparative benchmark suite" OFF)
 option(PSIZAM_ENABLE_EXAMPLES
-   "Build psizam examples (authoring-pipeline walkthroughs)" ${PSIZAM_IS_TOPLEVEL})
+   "Build psizam examples (requires wasi-sdk)" OFF)
 
 cmake_dependent_option(PSIZAM_ENABLE_SPEC_TESTS
    "Enable wasm spec tests" ON "PSIZAM_ENABLE_TESTS" ON)
@@ -60,6 +63,12 @@ cmake_dependent_option(PSIZAM_ENABLE_FUZZ_TESTS
    "Enable fuzz testing" OFF "PSIZAM_ENABLE_TESTS" ON)
 option(PSIZAM_ENABLE_WASM3
    "Build wasm3 reference interpreter for differential fuzzing" OFF)
+
+# Dependencies are explicit and available without a surrounding psiserve tree.
+set(PSIZAM_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+set(PSIZAM_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}")
+include(cmake/PsizamDependencies.cmake)
+include(cmake/PsiWasmModule.cmake)
 
 # ── Build utilities (sanitizers, profiling) ────────────────────────────────────
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/modules")
@@ -77,9 +86,8 @@ add_library(psizam::psizam ALIAS psizam)
 target_include_directories(psizam INTERFACE
    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/softfloat/source/include>
-   # ucc::typed_int header dependency for gas_units in gas.hpp. Pulled
-   # from psitri — header-only, no separate target.
-   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../external/psitri/libraries/ucc/include>
+   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/ucc/include>
+   $<INSTALL_INTERFACE:include>
 )
 
 target_compile_options(psizam INTERFACE
@@ -93,13 +101,7 @@ else()
    target_link_libraries(psizam INTERFACE Threads::Threads psio psio1)
 endif()
 
-# ucc::typed_int is the type-safe int primitive used by gas_units and the
-# runtime_limits typed aliases. Available when psizam builds inside the
-# psiserve tree (psitri provides ucc as a subdirectory target). Standalone
-# psizam builds must vendor an equivalent header at the same path.
-if(TARGET ucc)
-   target_link_libraries(psizam INTERFACE ucc)
-endif()
+# ucc::typed_int is vendored independently of the database.
 
 if(PSIZAM_ENABLE_SOFTFLOAT)
    target_compile_definitions(psizam INTERFACE PSIZAM_SOFTFLOAT)
@@ -176,41 +178,38 @@ if(PSIZAM_ENABLE_LLVM)
       message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}")
    endif()
 
-   # ── Per-arch LLVM compile targets ──────────────────────────────────────────
-   # Each produces a STATIC library with AOT compilation for one architecture.
-   set(_LLVM_AOT_SOURCES
-      src/llvm_ir_translator.cpp
-      src/llvm_aot_compiler.cpp
-   )
-
-   if("X86" IN_LIST PSIZAM_LLVM_TARGETS)
-      set(_LLVM_X86_COMPONENTS core support instcombine scalaropts object
-         x86codegen x86asmparser x86desc x86info)
-      llvm_map_components_to_libnames(_LLVM_X86_LIBS ${_LLVM_X86_COMPONENTS})
-
-      add_library(psizam-llvm-x86 STATIC ${_LLVM_AOT_SOURCES})
-      target_link_libraries(psizam-llvm-x86 PUBLIC psizam ${_LLVM_X86_LIBS})
-      target_include_directories(psizam-llvm-x86 PUBLIC ${LLVM_INCLUDE_DIRS})
-      target_compile_definitions(psizam-llvm-x86 PUBLIC PSIZAM_ENABLE_LLVM_BACKEND)
-      target_compile_definitions(psizam-llvm-x86 PRIVATE PSIZAM_LLVM_TARGET_X86)
-      if(NOT LLVM_ENABLE_RTTI)
-         target_compile_options(psizam-llvm-x86 PRIVATE -fno-rtti)
+   # Compile the AOT implementation once. Architecture facade targets share the
+   # implementation and its selected LLVM libraries, avoiding duplicate symbols
+   # whose target-initialization behavior depended on static-library link order.
+   set(_LLVM_AOT_COMPONENTS core support instcombine scalaropts object)
+   set(_LLVM_AOT_DEFINITIONS)
+   foreach(_arch IN LISTS PSIZAM_LLVM_TARGETS)
+      if(_arch STREQUAL "X86")
+         list(APPEND _LLVM_AOT_COMPONENTS x86codegen x86asmparser x86desc x86info)
+         list(APPEND _LLVM_AOT_DEFINITIONS PSIZAM_LLVM_TARGET_X86)
+      elseif(_arch STREQUAL "AArch64")
+         list(APPEND _LLVM_AOT_COMPONENTS aarch64codegen aarch64asmparser aarch64desc aarch64info)
+         list(APPEND _LLVM_AOT_DEFINITIONS PSIZAM_LLVM_TARGET_AARCH64)
+      else()
+         message(FATAL_ERROR "Unsupported PSIZAM_LLVM_TARGETS entry: ${_arch}")
       endif()
+   endforeach()
+   llvm_map_components_to_libnames(_LLVM_AOT_LIBS ${_LLVM_AOT_COMPONENTS})
+   add_library(psizam-llvm-aot STATIC src/llvm_ir_translator.cpp src/llvm_aot_compiler.cpp)
+   target_link_libraries(psizam-llvm-aot PUBLIC psizam ${_LLVM_AOT_LIBS})
+   target_include_directories(psizam-llvm-aot PUBLIC ${LLVM_INCLUDE_DIRS})
+   target_compile_definitions(psizam-llvm-aot PUBLIC PSIZAM_ENABLE_LLVM_BACKEND
+      PRIVATE ${_LLVM_AOT_DEFINITIONS})
+   if(NOT LLVM_ENABLE_RTTI)
+      target_compile_options(psizam-llvm-aot PRIVATE -fno-rtti)
    endif()
-
+   if("X86" IN_LIST PSIZAM_LLVM_TARGETS)
+      add_library(psizam-llvm-x86 INTERFACE)
+      target_link_libraries(psizam-llvm-x86 INTERFACE psizam-llvm-aot)
+   endif()
    if("AArch64" IN_LIST PSIZAM_LLVM_TARGETS)
-      set(_LLVM_ARM_COMPONENTS core support instcombine scalaropts object
-         aarch64codegen aarch64asmparser aarch64desc aarch64info)
-      llvm_map_components_to_libnames(_LLVM_ARM_LIBS ${_LLVM_ARM_COMPONENTS})
-
-      add_library(psizam-llvm-arm STATIC ${_LLVM_AOT_SOURCES})
-      target_link_libraries(psizam-llvm-arm PUBLIC psizam ${_LLVM_ARM_LIBS})
-      target_include_directories(psizam-llvm-arm PUBLIC ${LLVM_INCLUDE_DIRS})
-      target_compile_definitions(psizam-llvm-arm PUBLIC PSIZAM_ENABLE_LLVM_BACKEND)
-      target_compile_definitions(psizam-llvm-arm PRIVATE PSIZAM_LLVM_TARGET_AARCH64)
-      if(NOT LLVM_ENABLE_RTTI)
-         target_compile_options(psizam-llvm-arm PRIVATE -fno-rtti)
-      endif()
+      add_library(psizam-llvm-arm INTERFACE)
+      target_link_libraries(psizam-llvm-arm INTERFACE psizam-llvm-aot)
    endif()
 
    # ── LLVM JIT runtime (native only) ────────────────────────────────────────
@@ -290,11 +289,49 @@ endif()
 # ── Install ────────────────────────────────────────────────────────────────────
 if(PSIZAM_ENABLE_INSTALL)
    include(GNUInstallDirs)
-   install(TARGETS psizam
-      LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT Libraries
-      PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT Headers
-   )
-   install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/psizam
-      DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-   )
+   include(CMakePackageConfigHelpers)
+   set(_psizam_export_targets psizam psizam-jit1-x86 psizam-jit1-arm
+      psizam-jit2-x86 psizam-jit2-arm psio1 wasi-cpp)
+   foreach(_target psizam-exec psizam-debug softfloat)
+      if(TARGET ${_target})
+         list(APPEND _psizam_export_targets ${_target})
+      endif()
+   endforeach()
+   install(TARGETS ${_psizam_export_targets} EXPORT psizamTargets
+      ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+      LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+   if(PSIZAM_ENABLE_LLVM)
+      set(_psizam_llvm_exports psizam-llvm psizam-llvm-aot)
+      foreach(_target psizam-llvm-x86 psizam-llvm-arm psizam-llvm-jit)
+         if(TARGET ${_target})
+            list(APPEND _psizam_llvm_exports ${_target})
+         endif()
+      endforeach()
+      install(TARGETS ${_psizam_llvm_exports} EXPORT psizamLLVMTargets
+         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+      install(EXPORT psizamLLVMTargets NAMESPACE psizam::
+         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/psizam)
+   endif()
+   install(DIRECTORY include/psizam DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+   install(DIRECTORY external/psio1/include/psio1
+      external/psio1/rapidjson/include/rapidjson external/ucc/include/ucc
+      external/wasi/include/wasi DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+   install(DIRECTORY external/softfloat/source/include/
+      DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/psizam/external/softfloat)
+   install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/psizam)
+   foreach(_tool pzam-compile pzam-run psizam-wasi)
+      if(TARGET ${_tool})
+         install(TARGETS ${_tool} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+      endif()
+   endforeach()
+   configure_package_config_file(cmake/psizamConfig.cmake.in
+      ${CMAKE_CURRENT_BINARY_DIR}/psizamConfig.cmake
+      INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/psizam)
+   write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/psizamConfigVersion.cmake
+      VERSION 1.0.0 COMPATIBILITY SameMajorVersion)
+   install(EXPORT psizamTargets NAMESPACE psizam::
+      DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/psizam)
+   install(FILES ${CMAKE_CURRENT_BINARY_DIR}/psizamConfig.cmake
+      ${CMAKE_CURRENT_BINARY_DIR}/psizamConfigVersion.cmake
+      DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/psizam)
 endif()

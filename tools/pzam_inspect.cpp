@@ -24,6 +24,7 @@ static const char* tier_name(uint8_t tier) {
    switch (static_cast<pzam_opt_tier>(tier)) {
       case pzam_opt_tier::jit1:    return "jit1";
       case pzam_opt_tier::jit2:    return "jit2";
+      case pzam_opt_tier::llvm_O0: return "llvm-O0";
       case pzam_opt_tier::llvm_O1: return "llvm-O1";
       case pzam_opt_tier::llvm_O2: return "llvm-O2";
       case pzam_opt_tier::llvm_O3: return "llvm-O3";

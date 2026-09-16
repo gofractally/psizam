@@ -13,11 +13,7 @@
 #include <llvm/Object/ObjectFile.h>
 #include <llvm/Support/TargetSelect.h>
 
-// Explicit target initialization — always declare both targets.
-// Both psizam-llvm-x86 and psizam-llvm-arm link this file with different
-// PSIZAM_LLVM_TARGET_* defines, but the linker merges the duplicate
-// llvm_aot_compile() symbol (ODR). Unconditionally declaring both avoids
-// the init function being absent in whichever copy the linker picks.
+// Initialize only the architectures linked into the shared AOT library.
 extern "C" {
    void LLVMInitializeX86TargetInfo();
    void LLVMInitializeX86Target();
@@ -43,14 +39,18 @@ namespace psizam::detail {
 
    static bool ensure_llvm_targets() {
       static bool done = [] {
+#ifdef PSIZAM_LLVM_TARGET_X86
          LLVMInitializeX86TargetInfo();
          LLVMInitializeX86Target();
          LLVMInitializeX86TargetMC();
          LLVMInitializeX86AsmPrinter();
+#endif
+#ifdef PSIZAM_LLVM_TARGET_AARCH64
          LLVMInitializeAArch64TargetInfo();
          LLVMInitializeAArch64Target();
          LLVMInitializeAArch64TargetMC();
          LLVMInitializeAArch64AsmPrinter();
+#endif
          return true;
       }();
       return done;
@@ -176,7 +176,8 @@ namespace psizam::detail {
          std::unique_ptr<llvm::LLVMContext> llvm_ctx,
          std::unique_ptr<llvm::Module> llvm_mod,
          const module& mod,
-         const std::string& target_triple) {
+         const std::string& target_triple,
+         unsigned opt_level) {
 
       ensure_llvm_targets();
 
@@ -194,6 +195,9 @@ namespace psizam::detail {
          return llvm_aot_result{.error = "LLVM target lookup failed: " + error};
       }
 
+      if (opt_level > 3)
+         return llvm_aot_result{.error = "LLVM optimization level must be 0 through 3"};
+      const auto codegen_level = static_cast<llvm::CodeGenOptLevel>(opt_level);
       llvm::TargetOptions opts;
       auto rm = llvm::Reloc::Static;
       // aarch64: Small code model uses ADRP+ADD (8 bytes per reference, ±4GB
@@ -213,14 +217,20 @@ namespace psizam::detail {
       auto tm = std::unique_ptr<llvm::TargetMachine>(
 #if LLVM_VERSION_MAJOR >= 22
          target->createTargetMachine(triple, cpu, features, opts, rm, cm,
-                                     llvm::CodeGenOptLevel::Default));
+                                     codegen_level));
 #else
          target->createTargetMachine(triple.str(), cpu, features, opts, rm, cm,
-                                     llvm::CodeGenOptLevel::Default));
+                                     codegen_level));
 #endif
       if (!tm) {
          return llvm_aot_result{.error = "Failed to create LLVM TargetMachine"};
       }
+
+      // AArch64 enables GlobalISel implicitly at O0. Its local CSE dominance
+      // scans become quadratic on the large blocks produced by translated
+      // compiler workloads. Use SelectionDAG for this diagnostic level too.
+      if (!is_x86_64 && opt_level == 0)
+         tm->setGlobalISel(false);
 
       llvm_mod->setDataLayout(tm->createDataLayout());
 #if LLVM_VERSION_MAJOR >= 22
@@ -418,7 +428,10 @@ namespace psizam::detail {
 
                            if (mapped_type == reloc_type::aarch64_call26) {
                               // BL/B imm26: (target - pc + addend) >> 2
-                              int64_t offset = (target - pc + addend) >> 2;
+                              const int64_t distance = target - pc + addend;
+                              if ((distance & 3) || distance < -(1LL << 27) || distance >= (1LL << 27))
+                                 return llvm_aot_result{.error = "AArch64 intra-batch branch exceeds range"};
+                              int64_t offset = distance >> 2;
                               uint32_t insn;
                               std::memcpy(&insn, result.code.data() + reloc_off, 4);
                               insn = (insn & 0xFC000000u) |
@@ -532,6 +545,38 @@ namespace psizam::detail {
                }
             }
          }
+      }
+
+      if (!is_x86_64) {
+         // Keep every unresolved BL/B close to a batch-local trampoline.
+         // Appending a single island at the end of the final multi-hundred-MB
+         // module cannot reach early callers. A literal-address trampoline
+         // also handles cross-batch function calls, not just host symbols.
+         std::unordered_map<uint64_t, uint32_t> veneers;
+         std::vector<code_relocation> literals;
+         for (auto& reloc : result.relocations) {
+            if (reloc.type != reloc_type::aarch64_call26) continue;
+            const uint64_t key = (uint64_t(static_cast<uint16_t>(reloc.symbol)) << 32) |
+                                 static_cast<uint32_t>(reloc.addend);
+            auto [it, inserted] = veneers.try_emplace(key, 0);
+            if (inserted) {
+               const auto offset = (result.code.size() + 7) & ~size_t(7);
+               if (offset + 16 > INT32_MAX)
+                  return llvm_aot_result{.error = "AArch64 AOT batch exceeds PZAM offset range"};
+               it->second = static_cast<uint32_t>(offset);
+               result.code.resize(offset + 16, 0);
+               const uint32_t instructions[] = {0x58000050u, 0xD61F0200u}; // ldr x16, +8; br x16
+               std::memcpy(result.code.data() + offset, instructions, sizeof(instructions));
+               literals.push_back({static_cast<uint32_t>(offset + 8), reloc.symbol,
+                                   reloc_type::abs64, 0, reloc.addend});
+            }
+            const int64_t distance = int64_t(it->second) - reloc.code_offset;
+            if (distance < -(1LL << 27) || distance >= (1LL << 27))
+               return llvm_aot_result{.error = "AArch64 AOT batch too large for branch island; reduce batch size"};
+            reloc.symbol = reloc_symbol::code_blob_self;
+            reloc.addend = static_cast<int32_t>(it->second);
+         }
+         result.relocations.insert(result.relocations.end(), literals.begin(), literals.end());
       }
 
       // Module must be destroyed before Context (Module references its Context)

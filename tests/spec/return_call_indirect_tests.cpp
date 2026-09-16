@@ -113,3 +113,15 @@ BACKEND_TEST_CASE( "Testing wasm <return_call_indirect_27_wasm>", "[return_call_
    CHECK_THROWS_AS(backend_t(code, nullptr), std::exception);
 }
 
+BACKEND_TEST_CASE( "Testing wasm <return_call_indirect_28_wasm>", "[return_call_indirect_28_wasm_tests]" ) {
+   using backend_t = backend<standalone_function_t, TestType>;
+   auto code = read_wasm( std::string(wasm_directory) + "return_call_indirect.28.wasm");
+   CHECK_THROWS_AS(backend_t(code, nullptr), std::exception);
+}
+
+BACKEND_TEST_CASE( "Testing wasm <return_call_indirect_29_wasm>", "[return_call_indirect_29_wasm_tests]" ) {
+   using backend_t = backend<standalone_function_t, TestType>;
+   auto code = read_wasm( std::string(wasm_directory) + "return_call_indirect.29.wasm");
+   CHECK_THROWS_AS(backend_t(code, nullptr), std::exception);
+}
+

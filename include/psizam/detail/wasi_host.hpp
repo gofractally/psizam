@@ -200,7 +200,7 @@ namespace psizam::detail {
       // Resolve a guest path to a host path using preopens.
       // Returns empty string on invalid fd or path traversal attempt.
       std::string resolve_path(uint32_t dir_fd, const char* path, uint32_t path_len) const {
-         if (dir_fd < 3 || dir_fd >= fds.size() || !fds[dir_fd].is_preopen)
+         if (dir_fd < 3 || !valid_fd(dir_fd) || !fds[dir_fd].is_preopen)
             return "";
          uint32_t preopen_idx = dir_fd - 3;
          if (preopen_idx >= preopens.size()) return "";
@@ -208,8 +208,10 @@ namespace psizam::detail {
          const auto& po = preopens[preopen_idx];
          if (guest.empty() || guest == ".") return po.host_path;
 
-         // Reject path traversal: no ".." components allowed
-         if (guest.find("..") != std::string::npos)
+         // Parent components are valid inside a preopen (e.g.
+         // llvm/../third-party). Check the resolved target below, rather than
+         // rejecting their spelling. Embedded NULs must not truncate a path.
+         if (guest.find('\0') != std::string::npos)
             return "";
          // Reject absolute paths
          if (!guest.empty() && guest[0] == '/')
@@ -224,15 +226,18 @@ namespace psizam::detail {
          if (!::realpath(po.host_path.c_str(), real_root))
             return "";
          std::string root_prefix(real_root);
+         auto is_contained = [&](const std::string& candidate) {
+            return root_prefix == "/" || candidate == root_prefix ||
+                   (candidate.size() > root_prefix.size() &&
+                    candidate.compare(0, root_prefix.size(), root_prefix) == 0 &&
+                    candidate[root_prefix.size()] == '/');
+         };
 
          // Try to resolve the full path; if the file doesn't exist yet,
          // resolve the parent directory instead
          if (::realpath(resolved.c_str(), real)) {
             std::string real_str(real);
-            if (real_str.compare(0, root_prefix.size(), root_prefix) != 0)
-               return "";
-            // Must be exactly the root or followed by '/'
-            if (real_str.size() > root_prefix.size() && real_str[root_prefix.size()] != '/')
+            if (!is_contained(real_str))
                return "";
          } else {
             // File doesn't exist — resolve parent to check containment
@@ -243,9 +248,7 @@ namespace psizam::detail {
                if (!::realpath(parent.c_str(), real))
                   return "";
                std::string real_parent(real);
-               if (real_parent.compare(0, root_prefix.size(), root_prefix) != 0)
-                  return "";
-               if (real_parent.size() > root_prefix.size() && real_parent[root_prefix.size()] != '/')
+               if (!is_contained(real_parent))
                   return "";
             }
          }
@@ -440,8 +443,12 @@ namespace psizam::detail {
             uint32_t len = read_u32(iovs_ptr + i * 8 + 4);
             ssize_t n = ::write(fds[fd].host_fd, mem(buf), len);
             if (n < 0) {
+               const int write_errno = errno;
+               if (std::getenv("PSIZAM_TRACE_WASI"))
+                  std::cerr << "[wasi] fd_write fd=" << fd << " len=" << len
+                            << " errno=" << write_errno << '\n';
                if (total > 0) break;
-               return errno_to_wasi(errno);
+               return errno_to_wasi(write_errno);
             }
             total += n;
             if (static_cast<uint32_t>(n) < len) break;
@@ -452,6 +459,9 @@ namespace psizam::detail {
 
       // fd_seek
       uint32_t fd_seek(uint32_t fd, int64_t offset, uint32_t whence, uint32_t newoffset_ptr) {
+         if (std::getenv("PSIZAM_TRACE_WASI"))
+            std::cerr << "[wasi] fd_seek fd=" << fd << " offset=" << offset
+                      << " whence=" << whence << '\n';
          if (fd >= fds.size() || fds[fd].host_fd < 0) return WASI_EBADF;
          int host_whence;
          switch (whence) {
@@ -461,7 +471,12 @@ namespace psizam::detail {
             default: return WASI_EINVAL;
          }
          off_t result = ::lseek(fds[fd].host_fd, offset, host_whence);
-         if (result < 0) return errno_to_wasi(errno);
+         if (result < 0) {
+            const int seek_errno = errno;
+            if (std::getenv("PSIZAM_TRACE_WASI"))
+               std::cerr << "[wasi] fd_seek errno=" << seek_errno << '\n';
+            return errno_to_wasi(seek_errno);
+         }
          write_u64(newoffset_ptr, static_cast<uint64_t>(result));
          return WASI_ESUCCESS;
       }

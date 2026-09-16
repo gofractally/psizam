@@ -5,12 +5,12 @@
 //   // Defaults: host arch, jit2 tier, no instrumentation
 //   psizam::pzam_compile_file("module.wasm", "module.pzam");
 //
-//   // Cross-compile for both architectures with softfloat:
+//   // Cross-compile with LLVM softfloat (requires psizam-llvm):
 //   using enum psizam::pzam_arch_flags;
 //   using enum psizam::pzam_tier_flags;
 //   using enum psizam::pzam_compile_flags;
 //   psizam::pzam_compile_file("module.wasm", "module.pzam",
-//                             {.arch = x86_64 | aarch64, .tier = jit2 | llvm_O3,
+//                             {.arch = x86_64 | aarch64, .tier = llvm_O3,
 //                              .flags = softfloat});
 
 #include <psizam/detail/parser.hpp>
@@ -102,98 +102,128 @@ namespace psizam {
       };
    }
 
-   /// Compile WASM bytes to a .pzam byte vector.
-   /// Produces one code section per arch×tier combination set in opts.
-   inline std::vector<char> pzam_compile(std::span<const uint8_t> wasm_bytes,
-                                         const pzam_compile_options& opts = {}) {
-      using namespace detail;
-
-      bool do_softfloat  = !!(opts.flags & pzam_compile_flags::softfloat);
-      bool do_backtrace  = !!(opts.flags & pzam_compile_flags::backtrace);
-
-      // Parse once, reuse for all code sections
-      module mod;
-      mod.allocator.use_default_memory();
-
-      pzam_compile_result compile_result;
-      compile_result.softfloat = do_softfloat;
-      compile_result.backtrace = do_backtrace;
-      null_debug_info debug;
-
-      using parser_t = binary_parser<ir_writer, default_options, null_debug_info>;
-      parser_t parser(mod.allocator, default_options{}, do_backtrace, false);
-      parser.set_compile_result(&compile_result);
-
-      std::vector<uint8_t> wasm_copy(wasm_bytes.begin(), wasm_bytes.end());
-      parser.parse_module(wasm_copy, mod, debug);
-      mod.finalize();
-
-      if (!compile_result.error.empty())
-         throw std::runtime_error("pzam_compile: " + compile_result.error);
-
-      // Build pzam_file with metadata
-      pzam_file file;
-      file.input_hash = pzam_cache::hash_wasm(wasm_copy);
-      file.metadata = extract_metadata(mod);
-
-      bool llvm_aot = !compile_result.code_blob.empty();
-
-      // Generate a code section for each arch×tier combination
-      for (auto [arch_flag, arch_val] : arch_map) {
-         if (!(opts.arch & arch_flag)) continue;
-         for (auto [tier_flag, tier_val] : tier_map) {
-            if (!(opts.tier & tier_flag)) continue;
-
-            // TODO: re-compile for each arch×tier when cross-compilation
-            // backends are wired up. For now, use the single compile result
-            // and tag it with the requested arch/tier.
-
-            pzam_code_section cs;
-            cs.arch = static_cast<uint8_t>(arch_val);
-            cs.opt_tier = static_cast<uint8_t>(llvm_aot ? pzam_opt_tier::llvm_O3 : tier_val);
-            cs.instrumentation.softfloat = do_softfloat ? 1 : 0;
-            cs.instrumentation.async_backtrace = do_backtrace ? 1 : 0;
-            cs.instrumentation.gas_metering = !!(opts.flags & pzam_compile_flags::gas_meter) ? 1 : 0;
-            cs.instrumentation.debug_info = !!(opts.flags & pzam_compile_flags::debug_info) ? 1 : 0;
-            cs.stack_limit_mode = mod.stack_limit_is_bytes ? 1 : 0;
-            cs.page_size = 4096;
-            cs.max_stack = static_cast<uint32_t>(mod.maximum_stack);
-            cs.compiler.compiler_name = llvm_aot ? "psizam-llvm" : "psizam-jit2";
-            cs.compiler.compiler_version = "0.1.0";
-            cs.compiler.compiler_hash = pzam_cache::compiler_identity(arch_val);
-
-            cs.functions.resize(mod.code.size());
-            for (size_t i = 0; i < mod.code.size(); i++) {
-               if (llvm_aot && i < compile_result.function_offsets.size()) {
-                  cs.functions[i].code_offset = compile_result.function_offsets[i].first;
-                  cs.functions[i].code_size   = compile_result.function_offsets[i].second;
-               } else {
-                  cs.functions[i].code_offset = static_cast<uint32_t>(mod.code[i].jit_code_offset);
-                  cs.functions[i].code_size   = mod.code[i].jit_code_size;
-               }
-               cs.functions[i].stack_size = mod.code[i].stack_size;
-            }
-
-            cs.relocations.resize(compile_result.relocs.size());
-            for (size_t i = 0; i < compile_result.relocs.size(); i++) {
-               cs.relocations[i].code_offset = compile_result.relocs[i].code_offset;
-               cs.relocations[i].symbol      = static_cast<uint16_t>(compile_result.relocs[i].symbol);
-               cs.relocations[i].type        = static_cast<uint8_t>(compile_result.relocs[i].type);
-               cs.relocations[i].addend      = compile_result.relocs[i].addend;
-            }
-
-            if (llvm_aot) {
-               cs.code_blob = compile_result.code_blob;
-            } else {
-               auto code_start = reinterpret_cast<const uint8_t*>(mod.allocator.get_code_start());
-               size_t actual_size = mod.allocator.get_actual_code_size();
-               cs.code_blob.assign(code_start, code_start + actual_size);
-            }
-
-            file.code_sections.push_back(std::move(cs));
+   namespace detail {
+      inline pzam_opt_tier llvm_pzam_tier(int level) {
+         switch (level) {
+            case 0: return pzam_opt_tier::llvm_O0;
+            case 1: return pzam_opt_tier::llvm_O1;
+            case 2: return pzam_opt_tier::llvm_O2;
+            case 3: return pzam_opt_tier::llvm_O3;
+            default: throw std::invalid_argument("pzam_compile: LLVM optimization level must be 0..3");
          }
       }
 
+      // Backend identity is explicit: even an empty LLVM module is LLVM output.
+      inline pzam_code_section make_pzam_code_section(
+            const module& mod, const pzam_compile_result& result,
+            pzam_arch arch, pzam_opt_tier tier, bool softfloat, bool backtrace) {
+         const bool llvm = tier != pzam_opt_tier::jit2;
+         if (llvm && result.function_offsets.size() != mod.code.size())
+            throw std::runtime_error("pzam_compile: incomplete LLVM function table");
+         pzam_code_section cs;
+         cs.arch = static_cast<uint8_t>(arch);
+         cs.opt_tier = static_cast<uint8_t>(tier);
+         cs.instrumentation.softfloat = softfloat;
+         cs.instrumentation.async_backtrace = backtrace;
+         cs.stack_limit_mode = mod.stack_limit_is_bytes;
+         cs.page_size = static_cast<uint32_t>(wasm_allocator::table_size());
+         cs.max_stack = static_cast<uint32_t>(mod.maximum_stack);
+         cs.compiler.compiler_name = llvm ? "psizam-llvm" : "psizam-jit2";
+         cs.compiler.compiler_version = "0.1.0";
+         cs.compiler.compiler_hash = pzam_cache::compiler_identity(arch);
+         cs.functions.resize(mod.code.size());
+         for (size_t i = 0; i < mod.code.size(); ++i) {
+            cs.functions[i].code_offset = llvm ? result.function_offsets[i].first
+               : static_cast<uint32_t>(mod.code[i].jit_code_offset);
+            cs.functions[i].code_size = llvm ? result.function_offsets[i].second
+               : mod.code[i].jit_code_size;
+            cs.functions[i].stack_size = mod.code[i].stack_size;
+         }
+         for (const auto& r : result.relocs)
+            cs.relocations.push_back({r.code_offset, static_cast<uint16_t>(r.symbol),
+                                      static_cast<uint8_t>(r.type), r.addend});
+         if (llvm) {
+            cs.code_blob = result.code_blob;
+         } else if (auto size = mod.allocator.get_actual_code_size()) {
+            auto start = reinterpret_cast<const uint8_t*>(mod.allocator.get_code_start());
+            cs.code_blob.assign(start, start + size);
+         }
+         if (!cs.code_blob.empty() && !result.relocs.empty())
+            canonicalize_reloc_sites(reinterpret_cast<char*>(cs.code_blob.data()),
+                                    result.relocs.data(), result.relocs.size());
+         return cs;
+      }
+
+      template<class Writer>
+      inline void compile_pzam_section(std::vector<uint8_t>& wasm, pzam_file& file,
+            pzam_arch arch, pzam_opt_tier tier, bool softfloat, bool backtrace,
+            int opt_level = 2) {
+         module mod;
+         mod.allocator.use_default_memory();
+         pzam_compile_result result;
+         result.target_triple = arch == pzam_arch::x86_64
+            ? "x86_64-unknown-linux-gnu" : "aarch64-unknown-linux-gnu";
+         result.softfloat = softfloat;
+         result.backtrace = backtrace;
+         result.opt_level = opt_level;
+         null_debug_info debug;
+         binary_parser<Writer, default_options, null_debug_info> parser(
+            mod.allocator, default_options{}, backtrace, false);
+         parser.set_compile_result(&result);
+         parser.parse_module(wasm, mod, debug);
+         mod.finalize();
+         if (!result.error.empty()) throw std::runtime_error("pzam_compile: " + result.error);
+         if (file.code_sections.empty()) file.metadata = extract_metadata(mod);
+         file.code_sections.push_back(make_pzam_code_section(mod, result, arch, tier,
+                                                             softfloat, backtrace));
+      }
+   }
+
+   /// Compile each requested architecture/tier independently. JIT1 PZAM output,
+   /// gas metering and debug-info emission are not implemented and are rejected.
+   /// Link psizam-llvm for LLVM tiers; both JIT2 targets are always available.
+   inline std::vector<char> pzam_compile(std::span<const uint8_t> wasm_bytes,
+                                         const pzam_compile_options& opts = {}) {
+      using namespace detail;
+      if (!opts.arch || !!(opts.arch & ~pzam_arch_flags::all))
+         throw std::invalid_argument("pzam_compile: invalid or empty architecture flags");
+      if (!opts.tier || !!(opts.tier & ~pzam_tier_flags::all))
+         throw std::invalid_argument("pzam_compile: invalid or empty tier flags");
+      if (!!(opts.tier & pzam_tier_flags::jit1))
+         throw std::invalid_argument("pzam_compile: JIT1 PZAM output is not supported");
+      constexpr auto supported = pzam_compile_flags::softfloat | pzam_compile_flags::backtrace;
+      if (!!(opts.flags & ~supported))
+         throw std::invalid_argument("pzam_compile: unsupported instrumentation flags");
+      const bool softfloat = !!(opts.flags & pzam_compile_flags::softfloat);
+      const bool backtrace = !!(opts.flags & pzam_compile_flags::backtrace);
+      if (softfloat && !!(opts.tier & pzam_tier_flags::jit2))
+         throw std::invalid_argument("pzam_compile: softfloat requires LLVM for every requested tier");
+#ifndef PSIZAM_ENABLE_LLVM_BACKEND
+      if (!!(opts.tier & pzam_tier_flags::all_llvm))
+         throw std::invalid_argument("pzam_compile: LLVM backend is not enabled; link psizam-llvm");
+#endif
+      pzam_file file;
+      file.input_hash = pzam_cache::hash_wasm(wasm_bytes);
+      std::vector<uint8_t> wasm(wasm_bytes.begin(), wasm_bytes.end());
+      for (auto [arch_flag, arch] : arch_map) {
+         if (!(opts.arch & arch_flag)) continue;
+         for (auto [tier_flag, tier] : tier_map) {
+            if (!(opts.tier & tier_flag)) continue;
+            if (tier == pzam_opt_tier::jit2) {
+               if (arch == pzam_arch::x86_64)
+                  compile_pzam_section<ir_writer_x64>(wasm, file, arch, tier, false, backtrace);
+               else
+                  compile_pzam_section<ir_writer_a64>(wasm, file, arch, tier, false, backtrace);
+            } else {
+#ifdef PSIZAM_ENABLE_LLVM_BACKEND
+               const int level = tier == pzam_opt_tier::llvm_O1 ? 1
+                               : tier == pzam_opt_tier::llvm_O2 ? 2 : 3;
+               compile_pzam_section<ir_writer_llvm_aot>(wasm, file, arch, tier,
+                                                       softfloat, backtrace, level);
+#endif
+            }
+         }
+      }
       return pzam_save(file);
    }
 
@@ -207,6 +237,8 @@ namespace psizam {
       if (!out.is_open())
          throw std::runtime_error("pzam_compile_file: cannot open " + pzam_path);
       out.write(pzam.data(), static_cast<std::streamsize>(pzam.size()));
+      out.close();
+      if (!out) throw std::runtime_error("pzam_compile_file: write failed: " + pzam_path);
    }
 
 } // namespace psizam

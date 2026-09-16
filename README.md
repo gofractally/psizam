@@ -1,65 +1,66 @@
-# psizam — A High-Performance WebAssembly Engine
+# psizam
 
-- Extremely Fast Execution (interpreter + JIT backends)
-- Extremely Fast Parsing/Loading
-- Efficient Time-Bounded Execution
-- Deterministic Execution (software float + hardware float options)
-- Standards Compliant (WebAssembly 1.0)
-- Designed for Parallel Execution
-- C++23 / Header Only
-- Simple API for integrating Native Calls
+C++23 WebAssembly engine with interpreter, native JIT, two-pass JIT, and optional
+LLVM compilation backends. Native execution supports Linux and macOS on x86_64
+and ARM64. The core templates are header based; runtime support, debug support,
+SoftFloat and LLVM integrations also contain compiled libraries.
 
-## Overview
+This independent checkout was extracted from psiserve. It is under release
+preparation, not a newly certified stable release. See [extraction](docs/extraction.md)
+for source provenance and [compiler bootstrap](docs/compiler-bootstrap.md) for the
+Wasm compiler chain and its verification gate.
 
-psizam is a high-performance, deterministic WebAssembly engine designed for embedding in server applications. It provides multiple execution backends:
+## Build independently
 
-- **interpreter** — portable, all platforms
-- **jit** — native code generation for x86_64 and aarch64
-- **jit2** — two-pass JIT with IR optimization (x86_64)
-- **jit_profile** — JIT with instruction profiling (x86_64)
-- **null_backend** — validation only
+Install the independent psio C++ package first. Dependencies are CMake 3.20+,
+a C++23 compiler, Boost headers, and psio's installed CMake configuration.
+macOS builds use Homebrew LLVM; set CC/CXX accordingly. SoftFloat, Catch2 and the
+transitional psio1 compatibility code are retained in this repository.
 
-Originally forked from [EOS VM](https://github.com/AntelopeIO/eos-vm), psizam has been rebranded and extended for use in the [psiserve](https://github.com/gofractally/psiserve) WebAssembly application server.
+```sh
+CC=/path/to/clang CXX=/path/to/clang++ cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/path/to/psio-install \
+  -DCMAKE_INSTALL_PREFIX=/path/to/psizam-install -DPSIZAM_ENABLE_TOOLS=ON
+cmake --build build
+cmake --install build
+```
 
-## Deterministic Execution
-
-Software floating point ("softfloat") provides deterministic IEEE-754 arithmetic across all platforms, critical for consensus applications. Hardware floating point is available when determinism is not required.
-
-Resource limits (stack size, call depth, memory pages, etc.) are fully configurable at compile time or runtime.
-
-## Time-Bounded Execution
-
-Two mechanisms bound execution time:
-
-1. **Instruction counting** — simple but incurs a performance penalty
-2. **Watchdog timer** — signal-based, near-zero overhead during execution
-
-## Secure by Design
-
-- Guard-page memory sandboxing eliminates per-access bounds checks
-- Non-owning data structures with allocator-managed lifetimes
-- No unbounded recursion or loops during parsing or execution
-- Invariant-maintaining data types prevent invalid states by construction
-
-## Integration
-
-psizam is a header-only library (except for the softfloat dependency). Integration via CMake:
+For source co-development, replace `CMAKE_PREFIX_PATH` with
+`-DFETCHCONTENT_SOURCE_DIR_PSIO=/path/to/independent/psio`.
+No sibling psiserve or psitri directory is required.
 
 ```cmake
-add_subdirectory(path/to/psizam)
-target_link_libraries(your_target psizam)
+find_package(psizam CONFIG REQUIRED)
+target_link_libraries(your_target PRIVATE psizam::psizam-exec)
 ```
 
-See [docs/OVERVIEW.md](./docs/OVERVIEW.md) for a quick start guide and [tools/hello_driver.cpp](./tools/hello_driver.cpp) for a working example.
+Source consumers can use `add_subdirectory` and link `psizam-exec`.
+See [consumer example](examples/consumer). To build LLVM-backed tools, add
+`-DPSIZAM_ENABLE_LLVM=ON -DLLVM_DIR=/path/to/llvm/lib/cmake/llvm`.
+`PSIZAM_LLVM_TARGETS` selects `X86`, `AArch64`, or both. Installed LLVM consumers
+request `find_package(psizam COMPONENTS LLVM CONFIG REQUIRED)` and link
+`psizam::psizam-llvm`.
 
-## Building
+## Verification
 
-```bash
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DPSIZAM_ENABLE_TESTS=ON
-cmake --build build
-cd build && ctest -j$(nproc)
+The independent check builds engine tests, tools, and source/install consumers.
+Its guest fixtures require a WASI SDK, supplied via `WASI_SDK`.
+
+```sh
+WASI_SDK=/path/to/wasi-sdk CC=/path/to/clang CXX=/path/to/clang++ \
+  bash scripts/verify-independent.sh /tmp/psizam-check /path/to/psio-install
 ```
+
+This check excludes the external WebAssembly spec corpus and long-running
+fuzz/benchmark suites. Passing it does not establish complete proposal support,
+security certification, or success of the full LLVM bootstrap.
+
+[LLVM O2 saved-PZAM spec tests](docs/aot-spec-tests.md) exercise the actual AOT
+compiler, file serialization, loading and scalar/SIMD assertions. They are
+separate from the ordinary interpreter/JIT suites. Current results and remaining
+release gates are recorded in [release status](docs/release-status.md).
 
 ## License
 
-See [LICENSE](./LICENSE) for terms. Originally released under the EOS VM License.
+See [LICENSE](LICENSE). Originally forked from EOS VM. Third-party components
+retain their own license files; packaging notices still require release review.
