@@ -7,8 +7,8 @@
 #include <psizam/constants.hpp>
 #include <psizam/detail/sections.hpp>
 #include <psizam/exceptions.hpp>
-#include <psio1/from_bin.hpp>
-#include <psio1/to_bin.hpp>
+#include <psizam/debug/binary_stream.hpp>
+#include <psizam/debug/binary_stream.hpp>
 
 #include <mutex>
 
@@ -511,7 +511,7 @@ namespace psizam::debug
       }
    }
 
-   std::string_view get_string(psio1::input_stream& s)
+   std::string_view get_string(::psizam::debug::binary::input_stream& s)
    {
       auto begin = s.pos;
       while (true)
@@ -525,7 +525,7 @@ namespace psizam::debug
       return {begin, size_t(s.pos - begin - 1)};
    }
 
-   void get_strings(std::vector<std::string>& v, psio1::input_stream& s)
+   void get_strings(std::vector<std::string>& v, ::psizam::debug::binary::input_stream& s)
    {
       while (true)
       {
@@ -565,16 +565,16 @@ namespace psizam::debug
    template <typename S>
    void from_bin(line_header& obj, S& s)
    {
-      psio1::from_bin(obj.minimum_instruction_length, s);
-      psio1::from_bin(obj.maximum_operations_per_instruction, s);
-      psio1::from_bin(obj.default_is_stmt, s);
-      psio1::from_bin(obj.line_base, s);
-      psio1::from_bin(obj.line_range, s);
-      psio1::from_bin(obj.opcode_base, s);
+      ::psizam::debug::binary::from_bin(obj.minimum_instruction_length, s);
+      ::psizam::debug::binary::from_bin(obj.maximum_operations_per_instruction, s);
+      ::psizam::debug::binary::from_bin(obj.default_is_stmt, s);
+      ::psizam::debug::binary::from_bin(obj.line_base, s);
+      ::psizam::debug::binary::from_bin(obj.line_range, s);
+      ::psizam::debug::binary::from_bin(obj.opcode_base, s);
       obj.standard_opcode_lengths.clear();
       obj.standard_opcode_lengths.push_back(0);
       for (int i = 1; i < obj.opcode_base; ++i)
-         obj.standard_opcode_lengths.push_back(psio1::from_bin<uint8_t>(s));
+         obj.standard_opcode_lengths.push_back(::psizam::debug::binary::from_bin<uint8_t>(s));
       obj.include_directories.push_back("");
       get_strings(obj.include_directories, s);
 
@@ -584,10 +584,10 @@ namespace psizam::debug
          auto str = (std::string)get_string(s);
          if (str.empty())
             break;
-         auto dir      = psio1::varuint32_from_bin(s);
-         auto mod_time = psio1::varuint32_from_bin(s);
-         auto filesize = psio1::varuint32_from_bin(s);
-         psio1::check(dir <= obj.include_directories.size(),
+         auto dir      = ::psizam::debug::binary::varuint32_from_bin(s);
+         auto mod_time = ::psizam::debug::binary::varuint32_from_bin(s);
+         auto filesize = ::psizam::debug::binary::varuint32_from_bin(s);
+         ::psizam::debug::binary::check(dir <= obj.include_directories.size(),
                      "invalid include_directory number in .debug_line");
          // Assumes dir will be 0 for absolute paths. Not required by the spec,
          // but it's what clang currently does.
@@ -600,16 +600,16 @@ namespace psizam::debug
    template <typename S>
    void to_bin(const line_header& obj, S& s)
    {
-      psio1::to_bin(obj.minimum_instruction_length, s);
-      psio1::to_bin(obj.maximum_operations_per_instruction, s);
-      psio1::to_bin(obj.default_is_stmt, s);
-      psio1::to_bin(obj.line_base, s);
-      psio1::to_bin(obj.line_range, s);
-      psio1::to_bin(obj.opcode_base, s);
-      psio1::check(obj.standard_opcode_lengths.size() == obj.opcode_base,
+      ::psizam::debug::binary::to_bin(obj.minimum_instruction_length, s);
+      ::psizam::debug::binary::to_bin(obj.maximum_operations_per_instruction, s);
+      ::psizam::debug::binary::to_bin(obj.default_is_stmt, s);
+      ::psizam::debug::binary::to_bin(obj.line_base, s);
+      ::psizam::debug::binary::to_bin(obj.line_range, s);
+      ::psizam::debug::binary::to_bin(obj.opcode_base, s);
+      ::psizam::debug::binary::check(obj.standard_opcode_lengths.size() == obj.opcode_base,
                   "mismatched standard_opcode_lengths size");
       for (int i = 1; i < obj.opcode_base; ++i)
-         psio1::to_bin<uint8_t>(obj.standard_opcode_lengths[i], s);
+         ::psizam::debug::binary::to_bin<uint8_t>(obj.standard_opcode_lengths[i], s);
       for (int i = 1; i < obj.include_directories.size(); ++i)
          write_string(obj.include_directories[i], s);
       s.write(0);
@@ -640,26 +640,26 @@ namespace psizam::debug
       uint32_t                discriminator  = 0;
    };
 
-   void parse_debug_line_unit_header(line_header& header, psio1::input_stream& s)
+   void parse_debug_line_unit_header(line_header& header, ::psizam::debug::binary::input_stream& s)
    {
-      auto version = psio1::from_bin<uint16_t>(s);
-      psio1::check(version == lns_version, ".debug_line isn't from DWARF version 4");
-      uint32_t header_length = psio1::from_bin<uint32_t>(s);
-      psio1::check(header_length <= s.remaining(), "bad header_length in .debug_line");
+      auto version = ::psizam::debug::binary::from_bin<uint16_t>(s);
+      ::psizam::debug::binary::check(version == lns_version, ".debug_line isn't from DWARF version 4");
+      uint32_t header_length = ::psizam::debug::binary::from_bin<uint32_t>(s);
+      ::psizam::debug::binary::check(header_length <= s.remaining(), "bad header_length in .debug_line");
       auto instructions_pos = s.pos + header_length;
       from_bin(header, s);
-      psio1::check(instructions_pos == s.pos, "mismatched header_length in .debug_line");
+      ::psizam::debug::binary::check(instructions_pos == s.pos, "mismatched header_length in .debug_line");
    }
 
    void parse_debug_line_unit(info&                            result,
                               std::map<std::string, uint32_t>& files,
-                              psio1::input_stream               s)
+                              ::psizam::debug::binary::input_stream               s)
    {
       line_header header;
       parse_debug_line_unit_header(header, s);
-      psio1::check(header.minimum_instruction_length == 1,
+      ::psizam::debug::binary::check(header.minimum_instruction_length == 1,
                   "mismatched minimum_instruction_length in .debug_line");
-      psio1::check(header.maximum_operations_per_instruction == 1,
+      ::psizam::debug::binary::check(header.maximum_operations_per_instruction == 1,
                   "mismatched maximum_operations_per_instruction in .debug_line");
       line_state state;
       state.is_stmt      = header.default_is_stmt;
@@ -676,7 +676,7 @@ namespace psizam::debug
             current->end_address    = state.address;
             current->prologue_end   = state.prologue_end;
             current->epilogue_begin = state.epilogue_begin;
-            psio1::check(current->file_index < header.file_names.size(),
+            ::psizam::debug::binary::check(current->file_index < header.file_names.size(),
                         "invalid file index in .debug_line");
             auto& filename = header.file_names[current->file_index];
             auto  it       = files.find(filename);
@@ -703,14 +703,14 @@ namespace psizam::debug
 
       while (s.remaining())
       {
-         auto opcode = psio1::from_bin<uint8_t>(s);
+         auto opcode = ::psizam::debug::binary::from_bin<uint8_t>(s);
          if (!opcode)
          {
-            auto size = psio1::varuint32_from_bin(s);
-            psio1::check(size <= s.remaining(), "bytecode overrun in .debug_line");
-            psio1::input_stream extended{s.pos, s.pos + size};
+            auto size = ::psizam::debug::binary::varuint32_from_bin(s);
+            ::psizam::debug::binary::check(size <= s.remaining(), "bytecode overrun in .debug_line");
+            ::psizam::debug::binary::input_stream extended{s.pos, s.pos + size};
             s.skip(size);
-            auto extended_opcode = psio1::from_bin<uint8_t>(extended);
+            auto extended_opcode = ::psizam::debug::binary::from_bin<uint8_t>(extended);
             switch (extended_opcode)
             {
                case dw_lne_end_sequence:
@@ -719,10 +719,10 @@ namespace psizam::debug
                   state = initial_state;
                   break;
                case dw_lne_set_address:
-                  state.address = psio1::from_bin<uint32_t>(extended);
+                  state.address = ::psizam::debug::binary::from_bin<uint32_t>(extended);
                   break;
                case dw_lne_set_discriminator:
-                  state.discriminator = psio1::varuint32_from_bin(extended);
+                  state.discriminator = ::psizam::debug::binary::varuint32_from_bin(extended);
                   break;
                default:
                   if (show_parsed_lines)
@@ -742,16 +742,16 @@ namespace psizam::debug
                   state.epilogue_begin = false;
                   break;
                case dw_lns_advance_pc:
-                  state.address += psio1::varuint32_from_bin(s);
+                  state.address += ::psizam::debug::binary::varuint32_from_bin(s);
                   break;
                case dw_lns_advance_line:
                   state.line += sleb32_from_bin(s);
                   break;
                case dw_lns_set_file:
-                  state.file = psio1::varuint32_from_bin(s);
+                  state.file = ::psizam::debug::binary::varuint32_from_bin(s);
                   break;
                case dw_lns_set_column:
-                  state.column = psio1::varuint32_from_bin(s);
+                  state.column = ::psizam::debug::binary::varuint32_from_bin(s);
                   break;
                case dw_lns_negate_stmt:
                   state.is_stmt = !state.is_stmt;
@@ -763,7 +763,7 @@ namespace psizam::debug
                   state.address += (255 - header.opcode_base) / header.line_range;
                   break;
                case dw_lns_fixed_advance_pc:
-                  state.address += psio1::from_bin<uint16_t>(s);
+                  state.address += ::psizam::debug::binary::from_bin<uint16_t>(s);
                   break;
                case dw_lns_set_prologue_end:
                   state.prologue_end = true;
@@ -772,7 +772,7 @@ namespace psizam::debug
                   state.epilogue_begin = true;
                   break;
                case dw_lns_set_isa:
-                  state.isa = psio1::varuint32_from_bin(s);
+                  state.isa = ::psizam::debug::binary::varuint32_from_bin(s);
                   break;
                default:
                   if (show_parsed_lines)
@@ -781,7 +781,7 @@ namespace psizam::debug
                      fprintf(stderr, "  args: %d\n", header.standard_opcode_lengths[opcode]);
                   }
                   for (uint8_t i = 0; i < header.standard_opcode_lengths[opcode]; ++i)
-                     psio1::varuint32_from_bin(s);
+                     ::psizam::debug::binary::varuint32_from_bin(s);
                   break;
             }
          }  // opcode < header.opcode_base
@@ -798,14 +798,14 @@ namespace psizam::debug
       }  // while (s.remaining())
    }  // parse_debug_line_unit
 
-   void parse_debug_line(info& result, std::map<std::string, uint32_t>& files, psio1::input_stream s)
+   void parse_debug_line(info& result, std::map<std::string, uint32_t>& files, ::psizam::debug::binary::input_stream s)
    {
       while (s.remaining())
       {
-         uint32_t unit_length = psio1::from_bin<uint32_t>(s);
-         psio1::check(unit_length < 0xffff'fff0,
+         uint32_t unit_length = ::psizam::debug::binary::from_bin<uint32_t>(s);
+         ::psizam::debug::binary::check(unit_length < 0xffff'fff0,
                      "unit_length values in reserved range in .debug_line not supported");
-         psio1::check(unit_length <= s.remaining(), "bad unit_length in .debug_line");
+         ::psizam::debug::binary::check(unit_length <= s.remaining(), "bad unit_length in .debug_line");
          parse_debug_line_unit(result, files, {s.pos, s.pos + unit_length});
          s.skip(unit_length);
       }
@@ -852,10 +852,10 @@ namespace psizam::debug
 
       auto extended = [&](auto f)
       {
-         psio1::to_bin(uint8_t(0), s);
-         psio1::size_stream sz;
+         ::psizam::debug::binary::to_bin(uint8_t(0), s);
+         ::psizam::debug::binary::size_stream sz;
          f(sz);
-         psio1::varuint32_to_bin(sz.size, s);
+         ::psizam::debug::binary::varuint32_to_bin(sz.size, s);
          f(s);
       };
 
@@ -875,7 +875,7 @@ namespace psizam::debug
                extended(
                    [&](auto& s)
                    {
-                      psio1::to_bin(uint8_t(dw_lne_end_sequence), s);
+                      ::psizam::debug::binary::to_bin(uint8_t(dw_lne_end_sequence), s);
                       file = 1;
                       line = 1;
                    });
@@ -883,52 +883,52 @@ namespace psizam::debug
             extended(
                 [&](auto& s)
                 {
-                   psio1::to_bin(uint8_t(dw_lne_set_address), s);
-                   psio1::to_bin(range->first, s);
+                   ::psizam::debug::binary::to_bin(uint8_t(dw_lne_set_address), s);
+                   ::psizam::debug::binary::to_bin(range->first, s);
                    address = range->first;
                 });
          }
 
          if (file != loc.file_index + 1)
          {
-            psio1::to_bin(uint8_t(dw_lns_set_file), s);
-            psio1::varuint32_to_bin(loc.file_index + 1, s);
+            ::psizam::debug::binary::to_bin(uint8_t(dw_lns_set_file), s);
+            ::psizam::debug::binary::varuint32_to_bin(loc.file_index + 1, s);
             file = loc.file_index + 1;
          }
 
          if (line != loc.line)
          {
-            psio1::to_bin(uint8_t(dw_lns_advance_line), s);
-            psio1::sleb64_to_bin(int32_t(loc.line - line), s);
+            ::psizam::debug::binary::to_bin(uint8_t(dw_lns_advance_line), s);
+            ::psizam::debug::binary::sleb64_to_bin(int32_t(loc.line - line), s);
             line = loc.line;
          }
 
          if (loc.prologue_end)
          {
-            psio1::to_bin(uint8_t(dw_lns_set_prologue_end), s);
+            ::psizam::debug::binary::to_bin(uint8_t(dw_lns_set_prologue_end), s);
          }
 
          if (loc.epilogue_begin)
          {
-            psio1::to_bin(uint8_t(dw_lns_set_epilogue_begin), s);
+            ::psizam::debug::binary::to_bin(uint8_t(dw_lns_set_epilogue_begin), s);
          }
 
-         psio1::to_bin(uint8_t(dw_lns_copy), s);
+         ::psizam::debug::binary::to_bin(uint8_t(dw_lns_copy), s);
 
          if (address != range->second)
          {
             extended(
                 [&](auto& s)
                 {
-                   psio1::to_bin(uint8_t(dw_lne_set_address), s);
-                   psio1::to_bin(range->second, s);
+                   ::psizam::debug::binary::to_bin(uint8_t(dw_lne_set_address), s);
+                   ::psizam::debug::binary::to_bin(range->second, s);
                    address = range->second;
                 });
          }
       }  // for(loc)
 
       extended([&](auto& s) {  //
-         psio1::to_bin(uint8_t(dw_lne_end_sequence), s);
+         ::psizam::debug::binary::to_bin(uint8_t(dw_lne_end_sequence), s);
       });
    }  // write_line_program
 
@@ -939,9 +939,9 @@ namespace psizam::debug
       line_header header;
       header.file_names.push_back("");
       header.file_names.insert(header.file_names.end(), info.files.begin(), info.files.end());
-      psio1::size_stream header_size;
+      ::psizam::debug::binary::size_stream header_size;
       to_bin(header, header_size);
-      psio1::size_stream program_size;
+      ::psizam::debug::binary::size_stream program_size;
       write_line_program(info, reloc, code_start, program_size);
 
       // DWARF32 format (length fits in uint32). lldb on macOS handles
@@ -960,17 +960,17 @@ namespace psizam::debug
       uint32_t total_length  = 2 /*version*/ + 4 /*header_length*/ +
                                header_length + static_cast<uint32_t>(program_size.size);
       std::vector<char>      result(4 + total_length);
-      psio1::fixed_buf_stream s{result.data(), result.size()};
-      psio1::to_bin(total_length, s);
-      psio1::to_bin(uint16_t(lns_version), s);
-      psio1::to_bin(header_length, s);
+      ::psizam::debug::binary::fixed_buf_stream s{result.data(), result.size()};
+      ::psizam::debug::binary::to_bin(total_length, s);
+      ::psizam::debug::binary::to_bin(uint16_t(lns_version), s);
+      ::psizam::debug::binary::to_bin(header_length, s);
       to_bin(header, s);
       write_line_program(info, reloc, code_start, s);
-      psio1::check(s.pos == s.end, "generate_debug_line: calculated incorrect stream size");
+      ::psizam::debug::binary::check(s.pos == s.end, "generate_debug_line: calculated incorrect stream size");
       return result;
    }
 
-   void parse_debug_abbrev(debug_abbrev& result, psio1::input_stream s)
+   void parse_debug_abbrev(debug_abbrev& result, ::psizam::debug::binary::input_stream s)
    {
       auto begin = s.pos;
       while (s.remaining())
@@ -980,19 +980,19 @@ namespace psizam::debug
          {
             abbrev_decl decl;
             decl.table_offset = table_offset;
-            decl.code         = psio1::varuint32_from_bin(s);
+            decl.code         = ::psizam::debug::binary::varuint32_from_bin(s);
             if (!decl.code)
                break;
-            decl.tag          = psio1::varuint32_from_bin(s);
-            decl.has_children = psio1::from_bin<uint8_t>(s);
+            decl.tag          = ::psizam::debug::binary::varuint32_from_bin(s);
+            decl.has_children = ::psizam::debug::binary::from_bin<uint8_t>(s);
             while (true)
             {
                abbrev_attr attr;
-               attr.name = psio1::varuint32_from_bin(s);
-               attr.form = psio1::varuint32_from_bin(s);
+               attr.name = ::psizam::debug::binary::varuint32_from_bin(s);
+               attr.form = ::psizam::debug::binary::varuint32_from_bin(s);
                if (!attr.name)
                {
-                  psio1::check(!attr.form, "incorrectly terminated abbreviation");
+                  ::psizam::debug::binary::check(!attr.form, "incorrectly terminated abbreviation");
                   break;
                }
                decl.attrs.push_back(attr);
@@ -1019,7 +1019,7 @@ namespace psizam::debug
 
    struct attr_block
    {
-      psio1::input_stream data;
+      ::psizam::debug::binary::input_stream data;
    };
 
    struct attr_data
@@ -1029,7 +1029,7 @@ namespace psizam::debug
 
    struct attr_exprloc
    {
-      psio1::input_stream data;
+      ::psizam::debug::binary::input_stream data;
    };
 
    struct native_attr_exprloc
@@ -1165,12 +1165,12 @@ namespace psizam::debug
       return {};
    }
 
-   attr_value parse_attr_value(const debug_str& strings, uint32_t form, psio1::input_stream& s)
+   attr_value parse_attr_value(const debug_str& strings, uint32_t form, ::psizam::debug::binary::input_stream& s)
    {
       auto vardata = [&](size_t size)
       {
-         psio1::check(size <= s.remaining(), "variable-length overrun in dwarf entry");
-         psio1::input_stream result{s.pos, s.pos + size};
+         ::psizam::debug::binary::check(size <= s.remaining(), "variable-length overrun in dwarf entry");
+         ::psizam::debug::binary::input_stream result{s.pos, s.pos + size};
          s.skip(size);
          return result;
       };
@@ -1178,55 +1178,55 @@ namespace psizam::debug
       switch (form)
       {
          case dw_form_addr:
-            return attr_address{psio1::from_bin<uint32_t>(s)};
+            return attr_address{::psizam::debug::binary::from_bin<uint32_t>(s)};
          case dw_form_block:
-            return attr_block{vardata(psio1::varuint32_from_bin(s))};
+            return attr_block{vardata(::psizam::debug::binary::varuint32_from_bin(s))};
          case dw_form_block1:
-            return attr_block{vardata(psio1::from_bin<uint8_t>(s))};
+            return attr_block{vardata(::psizam::debug::binary::from_bin<uint8_t>(s))};
          case dw_form_block2:
-            return attr_block{vardata(psio1::from_bin<uint16_t>(s))};
+            return attr_block{vardata(::psizam::debug::binary::from_bin<uint16_t>(s))};
          case dw_form_block4:
-            return attr_block{vardata(psio1::from_bin<uint32_t>(s))};
+            return attr_block{vardata(::psizam::debug::binary::from_bin<uint32_t>(s))};
          case dw_form_sdata:
-            return attr_data{(uint64_t)psio1::sleb64_from_bin(s)};
+            return attr_data{(uint64_t)::psizam::debug::binary::sleb64_from_bin(s)};
          case dw_form_udata:
-            return attr_data{psio1::varuint64_from_bin(s)};
+            return attr_data{::psizam::debug::binary::varuint64_from_bin(s)};
          case dw_form_data1:
-            return attr_data{psio1::from_bin<uint8_t>(s)};
+            return attr_data{::psizam::debug::binary::from_bin<uint8_t>(s)};
          case dw_form_data2:
-            return attr_data{psio1::from_bin<uint16_t>(s)};
+            return attr_data{::psizam::debug::binary::from_bin<uint16_t>(s)};
          case dw_form_data4:
-            return attr_data{psio1::from_bin<uint32_t>(s)};
+            return attr_data{::psizam::debug::binary::from_bin<uint32_t>(s)};
          case dw_form_data8:
-            return attr_data{psio1::from_bin<uint64_t>(s)};
+            return attr_data{::psizam::debug::binary::from_bin<uint64_t>(s)};
          case dw_form_exprloc:
-            return attr_exprloc{vardata(psio1::varuint32_from_bin(s))};
+            return attr_exprloc{vardata(::psizam::debug::binary::varuint32_from_bin(s))};
          case dw_form_flag_present:
             return attr_flag{true};
          case dw_form_flag:
-            return attr_flag{(bool)psio1::from_bin<uint8_t>(s)};
+            return attr_flag{(bool)::psizam::debug::binary::from_bin<uint8_t>(s)};
          case dw_form_sec_offset:
-            return attr_sec_offset{psio1::from_bin<uint32_t>(s)};
+            return attr_sec_offset{::psizam::debug::binary::from_bin<uint32_t>(s)};
          case dw_form_ref_udata:
-            return attr_ref{psio1::varuint64_from_bin(s)};
+            return attr_ref{::psizam::debug::binary::varuint64_from_bin(s)};
          case dw_form_ref1:
-            return attr_ref{psio1::from_bin<uint8_t>(s)};
+            return attr_ref{::psizam::debug::binary::from_bin<uint8_t>(s)};
          case dw_form_ref2:
-            return attr_ref{psio1::from_bin<uint16_t>(s)};
+            return attr_ref{::psizam::debug::binary::from_bin<uint16_t>(s)};
          case dw_form_ref4:
-            return attr_ref{psio1::from_bin<uint32_t>(s)};
+            return attr_ref{::psizam::debug::binary::from_bin<uint32_t>(s)};
          case dw_form_ref8:
-            return attr_ref{psio1::from_bin<uint64_t>(s)};
+            return attr_ref{::psizam::debug::binary::from_bin<uint64_t>(s)};
          case dw_form_ref_addr:
-            return attr_ref_addr{psio1::from_bin<uint32_t>(s)};
+            return attr_ref_addr{::psizam::debug::binary::from_bin<uint32_t>(s)};
          case dw_form_ref_sig8:
-            return attr_ref_sig8{psio1::from_bin<uint64_t>(s)};
+            return attr_ref_sig8{::psizam::debug::binary::from_bin<uint64_t>(s)};
          case dw_form_string:
             return get_string(s);
          case dw_form_strp:
-            return std::string_view{strings.get(psio1::from_bin<uint32_t>(s))};
+            return std::string_view{strings.get(::psizam::debug::binary::from_bin<uint32_t>(s))};
          case dw_form_indirect:
-            return parse_attr_value(strings, psio1::varuint32_from_bin(s), s);
+            return parse_attr_value(strings, ::psizam::debug::binary::varuint32_from_bin(s), s);
          default:
             throw std::runtime_error("unknown form in dwarf entry");
       }
@@ -1234,21 +1234,21 @@ namespace psizam::debug
 
    struct unit_parser
    {
-      const abbrev_decl* get_die_abbrev(psio1::input_stream& s)
+      const abbrev_decl* get_die_abbrev(::psizam::debug::binary::input_stream& s)
       {
          const char* p    = s.pos;
-         auto        code = psio1::varuint32_from_bin(s);
+         auto        code = ::psizam::debug::binary::varuint32_from_bin(s);
          if (!code)
          {
             return nullptr;
          }
          const auto* result = abbrev.find(debug_abbrev_offset, code);
-         psio1::check(result, "Bad abbrev in .debug_info");
+         ::psizam::debug::binary::check(result, "Bad abbrev in .debug_info");
          return result;
       }
 
       template <typename F>
-      void parse_die_attrs_local(const abbrev_decl& abbrev, psio1::input_stream& s, F&& f)
+      void parse_die_attrs_local(const abbrev_decl& abbrev, ::psizam::debug::binary::input_stream& s, F&& f)
       {
          for (const auto& attr : abbrev.attrs)
          {
@@ -1258,7 +1258,7 @@ namespace psizam::debug
       }
 
       template <typename F>
-      void parse_die_attrs(const abbrev_decl& abbrev, psio1::input_stream& s, F&& f)
+      void parse_die_attrs(const abbrev_decl& abbrev, ::psizam::debug::binary::input_stream& s, F&& f)
       {
          for (const auto& attr : abbrev.attrs)
          {
@@ -1267,8 +1267,8 @@ namespace psizam::debug
             {
                if (auto ref = get_ref(value))
                {
-                  psio1::check(*ref < unit_s.remaining(), "DW_AT_specification out of range");
-                  psio1::input_stream ref_s{unit_s.pos + *ref, unit_s.end};
+                  ::psizam::debug::binary::check(*ref < unit_s.remaining(), "DW_AT_specification out of range");
+                  ::psizam::debug::binary::input_stream ref_s{unit_s.pos + *ref, unit_s.end};
                   auto               ref_abbrev = get_die_abbrev(ref_s);
                   parse_die_attrs(*ref_abbrev, ref_s, f);
                }
@@ -1278,7 +1278,7 @@ namespace psizam::debug
          }
       }
 
-      void skip_die_children(const abbrev_decl& abbrev, psio1::input_stream& s)
+      void skip_die_children(const abbrev_decl& abbrev, ::psizam::debug::binary::input_stream& s)
       {
          if (!abbrev.has_children)
             return;
@@ -1292,8 +1292,8 @@ namespace psizam::debug
       const debug_abbrev&       abbrev;
       const debug_str&          strings;
       uint32_t                  debug_abbrev_offset;
-      const psio1::input_stream& whole_s;
-      const psio1::input_stream& unit_s;
+      const ::psizam::debug::binary::input_stream& whole_s;
+      const ::psizam::debug::binary::input_stream& unit_s;
    };
 
    std::string demangle(const std::string& name)
@@ -1355,7 +1355,7 @@ namespace psizam::debug
    void parse_subprograms(info&               result,
                           unit_parser&        parser,
                           const abbrev_decl&  abbrev,
-                          psio1::input_stream& s)
+                          ::psizam::debug::binary::input_stream& s)
    {
       if (!abbrev.has_children)
          return;
@@ -1388,35 +1388,35 @@ namespace psizam::debug
    }  // parse_die_children
 
    void parse_debug_info_unit(info&                     result,
-                              const psio1::input_stream& whole_s,
-                              const psio1::input_stream& unit_s,
-                              psio1::input_stream        s)
+                              const ::psizam::debug::binary::input_stream& whole_s,
+                              const ::psizam::debug::binary::input_stream& unit_s,
+                              ::psizam::debug::binary::input_stream        s)
    {
       uint32_t indent  = 12;
-      auto     version = psio1::from_bin<uint16_t>(s);
-      psio1::check(version == compile_unit_version, ".debug_info isn't from DWARF version 4");
-      auto debug_abbrev_offset = psio1::from_bin<uint32_t>(s);
-      auto address_size        = psio1::from_bin<uint8_t>(s);
-      psio1::check(address_size == 4, "mismatched address_size in .debug_info");
+      auto     version = ::psizam::debug::binary::from_bin<uint16_t>(s);
+      ::psizam::debug::binary::check(version == compile_unit_version, ".debug_info isn't from DWARF version 4");
+      auto debug_abbrev_offset = ::psizam::debug::binary::from_bin<uint32_t>(s);
+      auto address_size        = ::psizam::debug::binary::from_bin<uint8_t>(s);
+      ::psizam::debug::binary::check(address_size == 4, "mismatched address_size in .debug_info");
 
       unit_parser parser{result.abbrev_decls, result.strings, debug_abbrev_offset, whole_s, unit_s};
       auto        root = parser.get_die_abbrev(s);
-      psio1::check(root && root->tag == dw_tag_compile_unit,
+      ::psizam::debug::binary::check(root && root->tag == dw_tag_compile_unit,
                   "missing DW_TAG_compile_unit in .debug_info");
       parser.parse_die_attrs_local(*root, s, [&](auto&&...) {});
       parse_subprograms(result, parser, *root, s);
    }  // parse_debug_info_unit
 
-   void parse_debug_info(info& result, psio1::input_stream s)
+   void parse_debug_info(info& result, ::psizam::debug::binary::input_stream s)
    {
       auto whole_s = s;
       while (s.remaining())
       {
          auto     unit_s      = s;
-         uint32_t unit_length = psio1::from_bin<uint32_t>(s);
-         psio1::check(unit_length < 0xffff'fff0,
+         uint32_t unit_length = ::psizam::debug::binary::from_bin<uint32_t>(s);
+         ::psizam::debug::binary::check(unit_length < 0xffff'fff0,
                      "unit_length values in reserved range in .debug_info not supported");
-         psio1::check(unit_length <= s.remaining(), "bad unit_length in .debug_info");
+         ::psizam::debug::binary::check(unit_length <= s.remaining(), "bad unit_length in .debug_info");
          parse_debug_info_unit(result, whole_s, unit_s, {s.pos, s.pos + unit_length});
          s.skip(unit_length);
       }
@@ -1451,12 +1451,12 @@ namespace psizam::debug
          // first normalize key
          if (auto pos = known.find(key.value); pos != known.end())
          {
-            psio1::to_bin(pos->second - unit_base, out);
+            ::psizam::debug::binary::to_bin(pos->second - unit_base, out);
          }
          else
          {
             unknown[key.value].push_back(out.written());
-            psio1::to_bin(std::uint64_t{0}, out);
+            ::psizam::debug::binary::to_bin(std::uint64_t{0}, out);
          }
       }
       void set(auto& out, const key_type& key)
@@ -1504,15 +1504,15 @@ namespace psizam::debug
 
    void write_attr_value(const native_attr_value& value, auto& stream, relocation_list& reloc)
    {
-      overloaded o{[&](const native_attr_address& a) { psio1::to_bin(a.value, stream); },
-                   [&](const attr_block& a) { psio1::to_bin(a.data, stream); },
-                   [&](const attr_data& a) { psio1::to_bin(a.value, stream); },
-                   [&](const native_attr_exprloc& a) { psio1::to_bin(a.data, stream); },
-                   [&](const attr_flag& a) { psio1::to_bin(a.value, stream); },
-                   [&](const native_attr_sec_offset& a) { psio1::to_bin(a.value, stream); },
+      overloaded o{[&](const native_attr_address& a) { ::psizam::debug::binary::to_bin(a.value, stream); },
+                   [&](const attr_block& a) { ::psizam::debug::binary::to_bin(a.data, stream); },
+                   [&](const attr_data& a) { ::psizam::debug::binary::to_bin(a.value, stream); },
+                   [&](const native_attr_exprloc& a) { ::psizam::debug::binary::to_bin(a.data, stream); },
+                   [&](const attr_flag& a) { ::psizam::debug::binary::to_bin(a.value, stream); },
+                   [&](const native_attr_sec_offset& a) { ::psizam::debug::binary::to_bin(a.value, stream); },
                    [&](const attr_ref& a) { reloc.append(stream, a); },
-                   [&](const attr_ref_addr&) { psio1::check(false, "not implemented"); },
-                   [&](const attr_ref_sig8&) { psio1::check(false, "not implemented"); },
+                   [&](const attr_ref_addr&) { ::psizam::debug::binary::check(false, "not implemented"); },
+                   [&](const attr_ref_sig8&) { ::psizam::debug::binary::check(false, "not implemented"); },
                    [&](const std::string_view& str) { return write_string(str, stream); }};
       std::visit(o, value);
    }
@@ -1540,22 +1540,22 @@ namespace psizam::debug
    // wasm address on the stack, which needs to be translated to a native pointer.
    void translate_expr(const wasm_frame* frame,
                        const psizam::module&        mod,
-                       psio1::input_stream              s,
+                       ::psizam::debug::binary::input_stream              s,
                        auto&                           out,
                        bool                            implicit_object,
                        bool                            is_location)
    {
       auto adjust_addr = [](auto& out)
       {
-         psio1::to_bin(std::uint8_t{dw_op_breg4}, out);
-         psio1::varuint32_to_bin(0, out);
-         psio1::to_bin(std::uint8_t{dw_op_plus}, out);
+         ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_breg4}, out);
+         ::psizam::debug::binary::varuint32_to_bin(0, out);
+         ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_plus}, out);
       };
       auto addr_to_wasm = [](auto& out)
       {
-         psio1::to_bin(std::uint8_t{dw_op_breg4}, out);
-         psio1::varuint32_to_bin(0, out);
-         psio1::to_bin(std::uint8_t{dw_op_minus}, out);
+         ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_breg4}, out);
+         ::psizam::debug::binary::varuint32_to_bin(0, out);
+         ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_minus}, out);
       };
       // The WASM address size is 4 bytes, but the native address is 8 bytes.
       // In order to make the translation accurate, some operations need
@@ -1566,25 +1566,25 @@ namespace psizam::debug
       // I don't think it's worth trying to optimize.
       auto truncate = [](auto& out)
       {
-         psio1::to_bin(std::uint8_t{dw_op_const4u}, out);
-         psio1::to_bin(std::uint32_t{0xffffffffu}, out);
-         psio1::to_bin(std::uint8_t{dw_op_and}, out);
+         ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_const4u}, out);
+         ::psizam::debug::binary::to_bin(std::uint32_t{0xffffffffu}, out);
+         ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_and}, out);
       };
       auto sign_extend = [](auto& out)
       {
-         psio1::to_bin(std::uint8_t{dw_op_const1u}, out);
-         psio1::to_bin(std::uint8_t{32}, out);
-         psio1::to_bin(std::uint8_t{dw_op_shl}, out);
-         psio1::to_bin(std::uint8_t{dw_op_const1u}, out);
-         psio1::to_bin(std::uint8_t{32}, out);
-         psio1::to_bin(std::uint8_t{dw_op_shra}, out);
+         ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_const1u}, out);
+         ::psizam::debug::binary::to_bin(std::uint8_t{32}, out);
+         ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_shl}, out);
+         ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_const1u}, out);
+         ::psizam::debug::binary::to_bin(std::uint8_t{32}, out);
+         ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_shra}, out);
       };
       auto sign_extend2 = [&](auto& out)
       {
          sign_extend(out);
-         psio1::to_bin(std::uint8_t{dw_op_swap}, out);
+         ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_swap}, out);
          sign_extend(out);
-         psio1::to_bin(std::uint8_t{dw_op_swap}, out);
+         ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_swap}, out);
       };
       if (implicit_object)
       {
@@ -1598,249 +1598,249 @@ namespace psizam::debug
       } state = wasm_address;
       while (s.remaining())
       {
-         auto op = psio1::from_bin<std::uint8_t>(s);
+         auto op = ::psizam::debug::binary::from_bin<std::uint8_t>(s);
          switch (op)
          {
 #define OP_CASE(a, b, name, value) case name:
             OP_RANGE32(a, b, dw_op_lit, ~, OP_CASE)
             {
-               psio1::to_bin(op, out);
+               ::psizam::debug::binary::to_bin(op, out);
                state = wasm_address;
                break;
             }
 #undef OP_CASE
             case dw_op_addr:
             {
-               auto val = psio1::from_bin<std::uint32_t>(s);
-               psio1::to_bin(std::uint8_t{dw_op_const4u}, out);
-               psio1::to_bin(val, out);
+               auto val = ::psizam::debug::binary::from_bin<std::uint32_t>(s);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_const4u}, out);
+               ::psizam::debug::binary::to_bin(val, out);
                state = wasm_address;
                break;
             }
             case dw_op_const1u:
             {
-               psio1::to_bin(op, out);
-               psio1::to_bin(psio1::from_bin<std::uint8_t>(s), out);
+               ::psizam::debug::binary::to_bin(op, out);
+               ::psizam::debug::binary::to_bin(::psizam::debug::binary::from_bin<std::uint8_t>(s), out);
                state = wasm_address;
                break;
             }
             case dw_op_const2u:
             {
-               psio1::to_bin(op, out);
-               psio1::to_bin(psio1::from_bin<std::uint16_t>(s), out);
+               ::psizam::debug::binary::to_bin(op, out);
+               ::psizam::debug::binary::to_bin(::psizam::debug::binary::from_bin<std::uint16_t>(s), out);
                state = wasm_address;
                break;
             }
             case dw_op_const4u:
             {
-               psio1::to_bin(op, out);
-               psio1::to_bin(psio1::from_bin<std::uint32_t>(s), out);
+               ::psizam::debug::binary::to_bin(op, out);
+               ::psizam::debug::binary::to_bin(::psizam::debug::binary::from_bin<std::uint32_t>(s), out);
                state = wasm_address;
                break;
             }
             case dw_op_const8u:
             {
                // Truncate to the wasm stack element size
-               psio1::to_bin(std::uint8_t{dw_op_const4u}, out);
-               psio1::to_bin(static_cast<std::uint32_t>(psio1::from_bin<std::uint64_t>(s)), out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_const4u}, out);
+               ::psizam::debug::binary::to_bin(static_cast<std::uint32_t>(::psizam::debug::binary::from_bin<std::uint64_t>(s)), out);
                state = wasm_address;
                break;
             }
             case dw_op_const1s:
             {
-               psio1::to_bin(std::uint8_t{dw_op_const4u}, out);
-               psio1::to_bin(static_cast<std::uint32_t>(psio1::from_bin<std::int8_t>(s)), out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_const4u}, out);
+               ::psizam::debug::binary::to_bin(static_cast<std::uint32_t>(::psizam::debug::binary::from_bin<std::int8_t>(s)), out);
                state = wasm_address;
                break;
             }
             case dw_op_const2s:
             {
-               psio1::to_bin(std::uint8_t{dw_op_const4u}, out);
-               psio1::to_bin(static_cast<std::uint32_t>(psio1::from_bin<std::int16_t>(s)), out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_const4u}, out);
+               ::psizam::debug::binary::to_bin(static_cast<std::uint32_t>(::psizam::debug::binary::from_bin<std::int16_t>(s)), out);
                state = wasm_address;
                break;
             }
             case dw_op_const4s:
             {
-               psio1::to_bin(std::uint8_t{dw_op_const4u}, out);
-               psio1::to_bin(psio1::from_bin<std::uint32_t>(s), out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_const4u}, out);
+               ::psizam::debug::binary::to_bin(::psizam::debug::binary::from_bin<std::uint32_t>(s), out);
                state = wasm_address;
                break;
             }
             case dw_op_const8s:
             {
                // Truncate to the wasm stack element size
-               psio1::to_bin(std::uint8_t{dw_op_const4u}, out);
-               psio1::to_bin(static_cast<std::uint32_t>(psio1::from_bin<std::int64_t>(s)), out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_const4u}, out);
+               ::psizam::debug::binary::to_bin(static_cast<std::uint32_t>(::psizam::debug::binary::from_bin<std::int64_t>(s)), out);
                state = wasm_address;
                break;
             }
             case dw_op_constu:
             {
-               psio1::to_bin(std::uint8_t{dw_op_constu}, out);
-               psio1::varuint32_to_bin(psio1::varuint32_from_bin(s), out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_constu}, out);
+               ::psizam::debug::binary::varuint32_to_bin(::psizam::debug::binary::varuint32_from_bin(s), out);
                state = wasm_address;
                break;
             }
             case dw_op_consts:
             {
-               psio1::to_bin(std::uint8_t{dw_op_const4u}, out);
-               psio1::to_bin(static_cast<std::uint32_t>(psio1::sleb64_from_bin(s)), out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_const4u}, out);
+               ::psizam::debug::binary::to_bin(static_cast<std::uint32_t>(::psizam::debug::binary::sleb64_from_bin(s)), out);
                state = wasm_address;
                break;
             }
             case dw_op_fbreg:
             {
-               psio1::to_bin(std::uint8_t{dw_op_fbreg}, out);
-               psio1::sleb64_to_bin(psio1::sleb64_from_bin(s), out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_fbreg}, out);
+               ::psizam::debug::binary::sleb64_to_bin(::psizam::debug::binary::sleb64_from_bin(s), out);
                addr_to_wasm(out);
                break;
             }
             case dw_op_dup:
             {
-               psio1::to_bin(std::uint8_t{dw_op_dup}, out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_dup}, out);
                break;
             }
             case dw_op_drop:
             {
-               psio1::to_bin(std::uint8_t{dw_op_drop}, out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_drop}, out);
                break;
             }
             case dw_op_pick:
             {
-               psio1::to_bin(std::uint8_t{dw_op_pick}, out);
-               psio1::to_bin(psio1::from_bin<std::uint8_t>(s), out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_pick}, out);
+               ::psizam::debug::binary::to_bin(::psizam::debug::binary::from_bin<std::uint8_t>(s), out);
                break;
             }
             case dw_op_over:
             {
-               psio1::to_bin(std::uint8_t{dw_op_over}, out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_over}, out);
                break;
             }
             case dw_op_swap:
             {
-               psio1::to_bin(std::uint8_t{dw_op_swap}, out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_swap}, out);
                break;
             }
             case dw_op_rot:
             {
-               psio1::to_bin(std::uint8_t{dw_op_rot}, out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_rot}, out);
                break;
             }
             case dw_op_deref:
             {
-               psio1::check(state == wasm_address, "unexpected deref");
+               ::psizam::debug::binary::check(state == wasm_address, "unexpected deref");
                adjust_addr(out);
-               psio1::to_bin(std::uint8_t{dw_op_deref_size}, out);
-               psio1::to_bin(std::uint8_t{4}, out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_deref_size}, out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{4}, out);
                state = wasm_address;
                break;
             }
             case dw_op_deref_size:
             {
                adjust_addr(out);
-               psio1::to_bin(std::uint8_t{dw_op_deref_size}, out);
-               psio1::to_bin(psio1::from_bin<std::uint8_t>(s), out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_deref_size}, out);
+               ::psizam::debug::binary::to_bin(::psizam::debug::binary::from_bin<std::uint8_t>(s), out);
                break;
             }
             case dw_op_push_object_address:
             {
-               psio1::to_bin(std::uint8_t{dw_op_push_object_address}, out);
-               psio1::varuint32_to_bin(psio1::varuint32_from_bin(s), out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_push_object_address}, out);
+               ::psizam::debug::binary::varuint32_to_bin(::psizam::debug::binary::varuint32_from_bin(s), out);
                addr_to_wasm(out);
                break;
             }
             case dw_op_abs:
             {
                sign_extend(out);
-               psio1::to_bin(std::uint8_t{dw_op_abs}, out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_abs}, out);
                truncate(out);
                break;
             }
             case dw_op_and:
             {
-               psio1::to_bin(std::uint8_t{dw_op_and}, out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_and}, out);
                break;
             }
             case dw_op_div:
             {
                sign_extend2(out);
-               psio1::to_bin(std::uint8_t{dw_op_div}, out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_div}, out);
                truncate(out);
                break;
             }
             case dw_op_minus:
             {
-               psio1::to_bin(op, out);
+               ::psizam::debug::binary::to_bin(op, out);
                truncate(out);
                break;
             }
             case dw_op_mod:
             {
                sign_extend2(out);
-               psio1::to_bin(op, out);
+               ::psizam::debug::binary::to_bin(op, out);
                truncate(out);
                break;
             }
             case dw_op_mul:
             {
-               psio1::to_bin(op, out);
+               ::psizam::debug::binary::to_bin(op, out);
                truncate(out);
                break;
             }
             case dw_op_neg:
             {
-               psio1::to_bin(op, out);
+               ::psizam::debug::binary::to_bin(op, out);
                truncate(out);
                break;
             }
             case dw_op_not:
             {
-               psio1::to_bin(op, out);
+               ::psizam::debug::binary::to_bin(op, out);
                truncate(out);
                break;
             }
             case dw_op_or:
             {
-               psio1::to_bin(op, out);
+               ::psizam::debug::binary::to_bin(op, out);
                break;
             }
             case dw_op_plus:
             {
-               psio1::to_bin(op, out);
+               ::psizam::debug::binary::to_bin(op, out);
                truncate(out);
                break;
             }
             case dw_op_plus_uconst:
             {
-               psio1::to_bin(op, out);
-               psio1::varuint32_to_bin(psio1::varuint32_from_bin(s), out);
+               ::psizam::debug::binary::to_bin(op, out);
+               ::psizam::debug::binary::varuint32_to_bin(::psizam::debug::binary::varuint32_from_bin(s), out);
                truncate(out);
                break;
             }
             case dw_op_shl:
             {
-               psio1::to_bin(op, out);
+               ::psizam::debug::binary::to_bin(op, out);
                truncate(out);
                break;
             }
             case dw_op_shr:
             {
-               psio1::to_bin(op, out);
+               ::psizam::debug::binary::to_bin(op, out);
                break;
             }
             case dw_op_shra:
             {
-               psio1::to_bin(std::uint8_t{dw_op_swap}, out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_swap}, out);
                sign_extend(out);
-               psio1::to_bin(std::uint8_t{dw_op_swap}, out);
-               psio1::to_bin(op, out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_swap}, out);
+               ::psizam::debug::binary::to_bin(op, out);
                truncate(out);
                break;
             }
             case dw_op_xor:
             {
-               psio1::to_bin(op, out);
+               ::psizam::debug::binary::to_bin(op, out);
                break;
             }
             case dw_op_le:
@@ -1849,13 +1849,13 @@ namespace psizam::debug
             case dw_op_gt:
             {
                sign_extend2(out);
-               psio1::to_bin(op, out);
+               ::psizam::debug::binary::to_bin(op, out);
                break;
             }
             case dw_op_eq:
             case dw_op_ne:
             {
-               psio1::to_bin(op, out);
+               ::psizam::debug::binary::to_bin(op, out);
                break;
             }
             case dw_op_nop:
@@ -1864,9 +1864,9 @@ namespace psizam::debug
             }
             case dw_op_implicit_value:
             {
-               psio1::to_bin(std::uint8_t{dw_op_implicit_value}, out);
-               auto size = psio1::varuint32_from_bin(s);
-               psio1::varuint32_to_bin(size, out);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_implicit_value}, out);
+               auto size = ::psizam::debug::binary::varuint32_from_bin(s);
+               ::psizam::debug::binary::varuint32_to_bin(size, out);
                const char* base;
                s.read_reuse_storage(base, size);
                out.write(base, size);
@@ -1880,60 +1880,60 @@ namespace psizam::debug
                   // clang generates DW_OP_wasm_location, DW_OP_stack_value
                   // for the frame base. I'm not quite sure what stack_value
                   // applied to a register location is supposed to mean.
-                  psio1::to_bin(std::uint8_t{dw_op_deref_size}, out);
-                  psio1::to_bin(std::uint8_t{4}, out);
+                  ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_deref_size}, out);
+                  ::psizam::debug::binary::to_bin(std::uint8_t{4}, out);
                   state = wasm_address;
                }
                else
                {
-                  psio1::to_bin(std::uint8_t{dw_op_stack_value}, out);
+                  ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_stack_value}, out);
                   state = output_value;
                }
                break;
             }
             case dw_op_wasm_location:
             {
-               switch (psio1::from_bin<std::uint8_t>(s))
+               switch (::psizam::debug::binary::from_bin<std::uint8_t>(s))
                {
                   case 0:
                   {
-                     auto    idx = psio1::varuint32_from_bin(s);
+                     auto    idx = ::psizam::debug::binary::varuint32_from_bin(s);
                      int32_t off = frame ? frame->get_frame_offset(idx) : 0;
-                     psio1::to_bin(std::uint8_t{dw_op_breg6}, out);
-                     psio1::sleb64_to_bin(off, out);
+                     ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_breg6}, out);
+                     ::psizam::debug::binary::sleb64_to_bin(off, out);
                      state = native_address;
                      break;
                   }
                   case 1:
                   {
-                     auto idx = psio1::varuint32_from_bin(s);
-                     psio1::to_bin(std::uint8_t{dw_op_breg4}, out);
-                     psio1::sleb64_to_bin(-4096 - 8, out);
-                     psio1::to_bin(std::uint8_t{dw_op_deref}, out);
-                     psio1::to_bin(std::uint8_t{dw_op_consts}, out);
-                     psio1::sleb64_to_bin(psizam::module::get_global_offset(idx), out);
-                     psio1::to_bin(std::uint8_t{dw_op_plus}, out);
+                     auto idx = ::psizam::debug::binary::varuint32_from_bin(s);
+                     ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_breg4}, out);
+                     ::psizam::debug::binary::sleb64_to_bin(-4096 - 8, out);
+                     ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_deref}, out);
+                     ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_consts}, out);
+                     ::psizam::debug::binary::sleb64_to_bin(psizam::module::get_global_offset(idx), out);
+                     ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_plus}, out);
                      state = native_address;
                      break;
                   }
                   case 2:
                   {
-                     auto    idx = psio1::varuint32_from_bin(s);
+                     auto    idx = ::psizam::debug::binary::varuint32_from_bin(s);
                      int32_t off = frame ? frame->get_stack_offset(idx) : 0;
-                     psio1::to_bin(std::uint8_t{dw_op_breg6}, out);
-                     psio1::sleb64_to_bin(off, out);
+                     ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_breg6}, out);
+                     ::psizam::debug::binary::sleb64_to_bin(off, out);
                      state = native_address;
                      break;
                   }
                   case 3:
                   {
-                     auto idx = psio1::from_bin<std::uint32_t>(s);
-                     psio1::to_bin(std::uint8_t{dw_op_breg4}, out);
-                     psio1::sleb64_to_bin(-4096 - 8, out);
-                     psio1::to_bin(std::uint8_t{dw_op_deref}, out);
-                     psio1::to_bin(std::uint8_t{dw_op_consts}, out);
-                     psio1::sleb64_to_bin(psizam::module::get_global_offset(idx), out);
-                     psio1::to_bin(std::uint8_t{dw_op_plus}, out);
+                     auto idx = ::psizam::debug::binary::from_bin<std::uint32_t>(s);
+                     ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_breg4}, out);
+                     ::psizam::debug::binary::sleb64_to_bin(-4096 - 8, out);
+                     ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_deref}, out);
+                     ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_consts}, out);
+                     ::psizam::debug::binary::sleb64_to_bin(psizam::module::get_global_offset(idx), out);
+                     ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_plus}, out);
                      state = native_address;
                      break;
                   }
@@ -1984,21 +1984,21 @@ namespace psizam::debug
          if (it == codes.end())
          {
             it = codes.insert(std::pair{die, codes.size() + 1}).first;
-            psio1::vector_stream s{abbrev_data};
-            psio1::varuint32_to_bin(it->second, s);
-            psio1::varuint32_to_bin(die.tag, s);
-            psio1::to_bin(die.has_children, s);
+            ::psizam::debug::binary::vector_stream s{abbrev_data};
+            ::psizam::debug::binary::varuint32_to_bin(it->second, s);
+            ::psizam::debug::binary::varuint32_to_bin(die.tag, s);
+            ::psizam::debug::binary::to_bin(die.has_children, s);
             for (const auto& attr : die.attrs)
             {
-               psio1::varuint32_to_bin(attr.attr, s);
-               psio1::varuint32_to_bin(attr.form(), s);
+               ::psizam::debug::binary::varuint32_to_bin(attr.attr, s);
+               ::psizam::debug::binary::varuint32_to_bin(attr.form(), s);
             }
-            psio1::varuint32_to_bin(0, s);
-            psio1::varuint32_to_bin(0, s);
+            ::psizam::debug::binary::varuint32_to_bin(0, s);
+            ::psizam::debug::binary::varuint32_to_bin(0, s);
          }
 
-         psio1::vector_stream s{info_data};
-         psio1::varuint32_to_bin(it->second, s);  // code
+         ::psizam::debug::binary::vector_stream s{info_data};
+         ::psizam::debug::binary::varuint32_to_bin(it->second, s);  // code
 
          for (const auto& attr : die.attrs)
          {
@@ -2037,7 +2037,7 @@ namespace psizam::debug
       };
       common_attrs get_common_attrs(unit_parser&       parser,
                                     const abbrev_decl& abbrev,
-                                    psio1::input_stream s)
+                                    ::psizam::debug::binary::input_stream s)
       {
          common_attrs result;
          parser.parse_die_attrs_local(abbrev, s, result);
@@ -2086,7 +2086,7 @@ namespace psizam::debug
                             frame = &*current_fn->frame;
                          }
                          native_attr_exprloc translated;
-                         psio1::vector_stream stream{translated.data};
+                         ::psizam::debug::binary::vector_stream stream{translated.data};
                          auto                input = a.data;
                          // We don't quite handle all expression opcodes.
                          // If we fail to translate an expression, just drop it.
@@ -2156,13 +2156,13 @@ namespace psizam::debug
       }
       void write_die_children(unit_parser&           parser,
                               const abbrev_decl&     abbrev,
-                              psio1::input_stream&    s,
+                              ::psizam::debug::binary::input_stream&    s,
                               const subprogram_info* current_fn = nullptr,
                               bool                   inline_    = false)
       {
          if (!abbrev.has_children)
             return;
-         psio1::vector_stream info_s{info_data};
+         ::psizam::debug::binary::vector_stream info_s{info_data};
          while (true)
          {
             relocations.set(info_s, s.pos - parser.unit_s.pos);
@@ -2173,13 +2173,13 @@ namespace psizam::debug
          }
          if (!inline_)
          {
-            psio1::vector_stream info_s{info_data};
-            psio1::varuint32_to_bin(0, info_s);  // end children
+            ::psizam::debug::binary::vector_stream info_s{info_data};
+            ::psizam::debug::binary::varuint32_to_bin(0, info_s);  // end children
          }
       }
       void write_die(unit_parser&           parser,
                      const abbrev_decl&     abbrev,
-                     psio1::input_stream&    s,
+                     ::psizam::debug::binary::input_stream&    s,
                      const subprogram_info* current_fn = nullptr)
       {
          die_pattern die;
@@ -2210,7 +2210,7 @@ namespace psizam::debug
             if (die.has_children)
             {
                generic_wasm_pointer = relocations.new_ref();
-               psio1::vector_stream info_s{info_data};
+               ::psizam::debug::binary::vector_stream info_s{info_data};
                relocations.set(info_s, generic_wasm_pointer);
                die_pattern wasm_pointer{.tag          = dw_tag_base_type,
                                         .has_children = false,
@@ -2240,13 +2240,13 @@ namespace psizam::debug
             if (abbrev.tag != dw_tag_pointer_type)
             {
                native_attr_exprloc data_location;
-               psio1::vector_stream expr(data_location.data);
-               psio1::to_bin(uint8_t{dw_op_push_object_address}, expr);
-               psio1::to_bin(uint8_t{dw_op_deref_size}, expr);
-               psio1::to_bin(uint8_t{4}, expr);
-               psio1::to_bin(std::uint8_t{dw_op_breg4}, expr);
-               psio1::varuint32_to_bin(0, expr);
-               psio1::to_bin(std::uint8_t{dw_op_plus}, expr);
+               ::psizam::debug::binary::vector_stream expr(data_location.data);
+               ::psizam::debug::binary::to_bin(uint8_t{dw_op_push_object_address}, expr);
+               ::psizam::debug::binary::to_bin(uint8_t{dw_op_deref_size}, expr);
+               ::psizam::debug::binary::to_bin(uint8_t{4}, expr);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_breg4}, expr);
+               ::psizam::debug::binary::varuint32_to_bin(0, expr);
+               ::psizam::debug::binary::to_bin(std::uint8_t{dw_op_plus}, expr);
                base_struct.attrs.push_back({dw_at_data_location, data_location});
             }
             write_die(base_struct);
@@ -2281,8 +2281,8 @@ namespace psizam::debug
                 .tag = dw_tag_template_type_parameter, .has_children = false, .attrs = {}};
             copy_type(die, type_param);
             write_die(type_param);
-            psio1::vector_stream info_s{info_data};
-            psio1::varuint32_to_bin(0, info_s);  // end children
+            ::psizam::debug::binary::vector_stream info_s{info_data};
+            ::psizam::debug::binary::varuint32_to_bin(0, info_s);  // end children
             write_die(die);
             write_die_children(parser, abbrev, s, current_fn);
          }
@@ -2292,41 +2292,41 @@ namespace psizam::debug
             write_die_children(parser, abbrev, s, current_fn);
          }
       }
-      void write_debug_info_unit(psio1::input_stream whole_s,
-                                 psio1::input_stream unit_s,
-                                 psio1::input_stream s)
+      void write_debug_info_unit(::psizam::debug::binary::input_stream whole_s,
+                                 ::psizam::debug::binary::input_stream unit_s,
+                                 ::psizam::debug::binary::input_stream s)
       {
-         auto version = psio1::from_bin<uint16_t>(s);
-         psio1::check(version == compile_unit_version, ".debug_info isn't from DWARF version 4");
-         auto debug_abbrev_offset = psio1::from_bin<uint32_t>(s);
-         auto address_size        = psio1::from_bin<uint8_t>(s);
-         psio1::check(address_size == 4, "mismatched address_size in .debug_info");
+         auto version = ::psizam::debug::binary::from_bin<uint16_t>(s);
+         ::psizam::debug::binary::check(version == compile_unit_version, ".debug_info isn't from DWARF version 4");
+         auto debug_abbrev_offset = ::psizam::debug::binary::from_bin<uint32_t>(s);
+         auto address_size        = ::psizam::debug::binary::from_bin<uint8_t>(s);
+         ::psizam::debug::binary::check(address_size == 4, "mismatched address_size in .debug_info");
 
          unit_parser parser{abbrev_decls, strings, debug_abbrev_offset, whole_s, unit_s};
          auto        root = parser.get_die_abbrev(s);
-         psio1::check(root && root->tag == dw_tag_compile_unit,
+         ::psizam::debug::binary::check(root && root->tag == dw_tag_compile_unit,
                      "missing DW_TAG_compile_unit in .debug_info");
-         psio1::vector_stream info_s{info_data};
-         psio1::to_bin(version, info_s);
+         ::psizam::debug::binary::vector_stream info_s{info_data};
+         ::psizam::debug::binary::to_bin(version, info_s);
          // DWARF32: abbrev_offset is uint32 (vs uint64 in DWARF64 output
          // previously written here as `to_bin(uint64_t{0}, ...)`). Stays
          // 0 because we emit one unit at the start of .debug_abbrev.
-         psio1::to_bin(std::uint32_t{0}, info_s);
-         psio1::to_bin(std::uint8_t{8}, info_s);
+         ::psizam::debug::binary::to_bin(std::uint32_t{0}, info_s);
+         ::psizam::debug::binary::to_bin(std::uint8_t{8}, info_s);
          write_die(parser, *root, s);
       }
-      void write_debug_info(psio1::input_stream& s)
+      void write_debug_info(::psizam::debug::binary::input_stream& s)
       {
          auto whole_s = s;
          while (s.remaining())
          {
             auto                unit_s = s;
-            psio1::vector_stream info_s{info_data};
+            ::psizam::debug::binary::vector_stream info_s{info_data};
             relocations.start_unit(info_s);
-            uint32_t unit_length = psio1::from_bin<uint32_t>(s);
-            psio1::check(unit_length < 0xffff'fff0,
+            uint32_t unit_length = ::psizam::debug::binary::from_bin<uint32_t>(s);
+            ::psizam::debug::binary::check(unit_length < 0xffff'fff0,
                         "unit_length values in reserved range in .debug_info not supported");
-            psio1::check(unit_length <= s.remaining(), "bad unit_length in .debug_info");
+            ::psizam::debug::binary::check(unit_length <= s.remaining(), "bad unit_length in .debug_info");
             // DWARF32 emission. We backpatch a uint32 length after writing
             // the unit body. Emitting DWARF32 (vs DWARF64) is required for
             // macOS lldb's JIT loader to accept the image — it silently
@@ -2334,7 +2334,7 @@ namespace psizam::debug
             // modules. For any realistic WASM the unit fits in 4 GB.
             auto     length_pos = info_s.written();
             uint32_t placeholder = 0;
-            psio1::to_bin(placeholder, info_s);
+            ::psizam::debug::binary::to_bin(placeholder, info_s);
             auto inner_pos = info_s.written();
             write_debug_info_unit(whole_s, unit_s, {s.pos, s.pos + unit_length});
             s.skip(unit_length);
@@ -2350,7 +2350,7 @@ namespace psizam::debug
                           const info&              info,
                           const psizam::module& mod,
                           const jit_info&          reloc,
-                          psio1::input_stream       info_section)
+                          ::psizam::debug::binary::input_stream       info_section)
    {
       debug_info_visitor gen{abbrev_data, info_data, info.strings, info.abbrev_decls,
                              info,        mod,       reloc,        info.wasm_code_offset};
@@ -2379,10 +2379,10 @@ namespace psizam::debug
 
    void to_bin_with_size32(auto&& f, auto& stream)
    {
-      psio1::size_stream ss;
+      ::psizam::debug::binary::size_stream ss;
       f(ss);
       auto padding = -ss.size & 3u;
-      psio1::to_bin(static_cast<std::uint32_t>(ss.size + padding), stream);
+      ::psizam::debug::binary::to_bin(static_cast<std::uint32_t>(ss.size + padding), stream);
       f(stream);
       for (int i = 0; i < padding; ++i)
       {
@@ -2395,12 +2395,12 @@ namespace psizam::debug
       to_bin_with_size32(
           [&](auto& stream)
           {
-             psio1::to_bin(val.cie_id, stream);
-             psio1::to_bin(val.version, stream);
+             ::psizam::debug::binary::to_bin(val.cie_id, stream);
+             ::psizam::debug::binary::to_bin(val.version, stream);
              write_string(val.augmentation, stream);
-             psio1::varuint32_to_bin(val.code_alignment_factor, stream);
-             psio1::sleb64_to_bin(val.data_alignment_factor, stream);
-             psio1::varuint32_to_bin(val.return_address_register, stream);
+             ::psizam::debug::binary::varuint32_to_bin(val.code_alignment_factor, stream);
+             ::psizam::debug::binary::sleb64_to_bin(val.data_alignment_factor, stream);
+             ::psizam::debug::binary::varuint32_to_bin(val.return_address_register, stream);
              stream.write(val.initial_instructions.data(), val.initial_instructions.size());
           },
           stream);
@@ -2419,9 +2419,9 @@ namespace psizam::debug
       to_bin_with_size32(
           [&](auto& stream)
           {
-             psio1::to_bin(val.cie_ptr, stream);
-             psio1::to_bin(val.initial_location, stream);
-             psio1::to_bin(val.address_range, stream);
+             ::psizam::debug::binary::to_bin(val.cie_ptr, stream);
+             ::psizam::debug::binary::to_bin(val.initial_location, stream);
+             ::psizam::debug::binary::to_bin(val.address_range, stream);
              stream.write(val.instructions.data(), val.instructions.size());
           },
           stream);
@@ -2434,52 +2434,52 @@ namespace psizam::debug
    std::vector<char> get_basic_frame()
    {
       std::vector<char>   result;
-      psio1::vector_stream s(result);
-      psio1::to_bin(dw_cfa_def_cfa, s);
-      psio1::varuint32_to_bin(6, s);   // CFA = rbp + 16
-      psio1::varuint32_to_bin(16, s);
-      psio1::to_bin(std::uint8_t(dw_cfa_offset + 16), s);  // RA at CFA - 8
-      psio1::varuint32_to_bin(1, s);
-      psio1::to_bin(std::uint8_t(dw_cfa_offset + 6), s);   // rbp at CFA - 16
-      psio1::varuint32_to_bin(2, s);
+      ::psizam::debug::binary::vector_stream s(result);
+      ::psizam::debug::binary::to_bin(dw_cfa_def_cfa, s);
+      ::psizam::debug::binary::varuint32_to_bin(6, s);   // CFA = rbp + 16
+      ::psizam::debug::binary::varuint32_to_bin(16, s);
+      ::psizam::debug::binary::to_bin(std::uint8_t(dw_cfa_offset + 16), s);  // RA at CFA - 8
+      ::psizam::debug::binary::varuint32_to_bin(1, s);
+      ::psizam::debug::binary::to_bin(std::uint8_t(dw_cfa_offset + 6), s);   // rbp at CFA - 16
+      ::psizam::debug::binary::varuint32_to_bin(2, s);
       return result;
    }
 
    std::vector<char> get_function_entry_frame()
    {
       std::vector<char>   result;
-      psio1::vector_stream s(result);
-      psio1::to_bin(dw_cfa_def_cfa, s);
-      psio1::varuint32_to_bin(7, s);   // CFA = rsp + 8
-      psio1::varuint32_to_bin(8, s);
-      psio1::to_bin(std::uint8_t(dw_cfa_offset + 16), s);  // RA at CFA - 8
-      psio1::varuint32_to_bin(1, s);
+      ::psizam::debug::binary::vector_stream s(result);
+      ::psizam::debug::binary::to_bin(dw_cfa_def_cfa, s);
+      ::psizam::debug::binary::varuint32_to_bin(7, s);   // CFA = rsp + 8
+      ::psizam::debug::binary::varuint32_to_bin(8, s);
+      ::psizam::debug::binary::to_bin(std::uint8_t(dw_cfa_offset + 16), s);  // RA at CFA - 8
+      ::psizam::debug::binary::varuint32_to_bin(1, s);
       return result;
    }
 
    std::vector<char> get_function_frame(std::size_t fn_size)
    {
       std::vector<char>   result;
-      psio1::vector_stream s(result);
+      ::psizam::debug::binary::vector_stream s(result);
       // push %rbp (1 byte)
-      psio1::to_bin(std::uint8_t{dw_cfa_advance_loc + 1}, s);
-      psio1::to_bin(std::uint8_t{dw_cfa_def_cfa_offset}, s);
-      psio1::varuint32_to_bin(16, s);
-      psio1::to_bin(std::uint8_t(dw_cfa_offset + 6), s);
-      psio1::varuint32_to_bin(2, s);
+      ::psizam::debug::binary::to_bin(std::uint8_t{dw_cfa_advance_loc + 1}, s);
+      ::psizam::debug::binary::to_bin(std::uint8_t{dw_cfa_def_cfa_offset}, s);
+      ::psizam::debug::binary::varuint32_to_bin(16, s);
+      ::psizam::debug::binary::to_bin(std::uint8_t(dw_cfa_offset + 6), s);
+      ::psizam::debug::binary::varuint32_to_bin(2, s);
       // mov %rsp, %rbp (3 bytes)
-      psio1::to_bin(std::uint8_t{dw_cfa_advance_loc + 3}, s);
-      psio1::to_bin(std::uint8_t{dw_cfa_def_cfa_register}, s);
-      psio1::varuint32_to_bin(6, s);
-      psio1::to_bin(std::uint8_t(dw_cfa_offset + 6), s);
-      psio1::varuint32_to_bin(2, s);
+      ::psizam::debug::binary::to_bin(std::uint8_t{dw_cfa_advance_loc + 3}, s);
+      ::psizam::debug::binary::to_bin(std::uint8_t{dw_cfa_def_cfa_register}, s);
+      ::psizam::debug::binary::varuint32_to_bin(6, s);
+      ::psizam::debug::binary::to_bin(std::uint8_t(dw_cfa_offset + 6), s);
+      ::psizam::debug::binary::varuint32_to_bin(2, s);
       // ... body ...
       // pop %rbp (1 byte, 4 bytes before end: pop + ret)
-      psio1::to_bin(dw_cfa_advance_loc4, s);
-      psio1::to_bin(static_cast<std::uint32_t>(fn_size - 5), s);
-      psio1::to_bin(dw_cfa_def_cfa, s);
-      psio1::varuint32_to_bin(7, s);
-      psio1::varuint32_to_bin(8, s);
+      ::psizam::debug::binary::to_bin(dw_cfa_advance_loc4, s);
+      ::psizam::debug::binary::to_bin(static_cast<std::uint32_t>(fn_size - 5), s);
+      ::psizam::debug::binary::to_bin(dw_cfa_def_cfa, s);
+      ::psizam::debug::binary::varuint32_to_bin(7, s);
+      ::psizam::debug::binary::varuint32_to_bin(8, s);
       // ret
       return result;
    }
@@ -2494,14 +2494,14 @@ namespace psizam::debug
    std::vector<char> get_basic_frame()
    {
       std::vector<char>   result;
-      psio1::vector_stream s(result);
-      psio1::to_bin(dw_cfa_def_cfa, s);
-      psio1::varuint32_to_bin(29, s);   // CFA = X29 + 16
-      psio1::varuint32_to_bin(16, s);
-      psio1::to_bin(std::uint8_t(dw_cfa_offset + 30), s);   // LR at CFA - 8
-      psio1::varuint32_to_bin(1, s);
-      psio1::to_bin(std::uint8_t(dw_cfa_offset + 29), s);   // FP at CFA - 16
-      psio1::varuint32_to_bin(2, s);
+      ::psizam::debug::binary::vector_stream s(result);
+      ::psizam::debug::binary::to_bin(dw_cfa_def_cfa, s);
+      ::psizam::debug::binary::varuint32_to_bin(29, s);   // CFA = X29 + 16
+      ::psizam::debug::binary::varuint32_to_bin(16, s);
+      ::psizam::debug::binary::to_bin(std::uint8_t(dw_cfa_offset + 30), s);   // LR at CFA - 8
+      ::psizam::debug::binary::varuint32_to_bin(1, s);
+      ::psizam::debug::binary::to_bin(std::uint8_t(dw_cfa_offset + 29), s);   // FP at CFA - 16
+      ::psizam::debug::binary::varuint32_to_bin(2, s);
       return result;
    }
 
@@ -2509,39 +2509,39 @@ namespace psizam::debug
    std::vector<char> get_function_entry_frame()
    {
       std::vector<char>   result;
-      psio1::vector_stream s(result);
-      psio1::to_bin(dw_cfa_def_cfa, s);
-      psio1::varuint32_to_bin(31, s);   // CFA = SP + 0
-      psio1::varuint32_to_bin(0, s);
+      ::psizam::debug::binary::vector_stream s(result);
+      ::psizam::debug::binary::to_bin(dw_cfa_def_cfa, s);
+      ::psizam::debug::binary::varuint32_to_bin(31, s);   // CFA = SP + 0
+      ::psizam::debug::binary::varuint32_to_bin(0, s);
       return result;
    }
 
    std::vector<char> get_function_frame(std::size_t fn_size)
    {
       std::vector<char>   result;
-      psio1::vector_stream s(result);
+      ::psizam::debug::binary::vector_stream s(result);
       // After STP X29,X30,[SP,#-16]! (4 bytes):
       //   SP decreased by 16; X29 and X30 saved at [SP] and [SP+8].
-      psio1::to_bin(std::uint8_t{dw_cfa_advance_loc + 4}, s);
-      psio1::to_bin(std::uint8_t{dw_cfa_def_cfa_offset}, s);
-      psio1::varuint32_to_bin(16, s);
-      psio1::to_bin(std::uint8_t(dw_cfa_offset + 29), s);   // FP at CFA - 16
-      psio1::varuint32_to_bin(2, s);
-      psio1::to_bin(std::uint8_t(dw_cfa_offset + 30), s);   // LR at CFA - 8
-      psio1::varuint32_to_bin(1, s);
+      ::psizam::debug::binary::to_bin(std::uint8_t{dw_cfa_advance_loc + 4}, s);
+      ::psizam::debug::binary::to_bin(std::uint8_t{dw_cfa_def_cfa_offset}, s);
+      ::psizam::debug::binary::varuint32_to_bin(16, s);
+      ::psizam::debug::binary::to_bin(std::uint8_t(dw_cfa_offset + 29), s);   // FP at CFA - 16
+      ::psizam::debug::binary::varuint32_to_bin(2, s);
+      ::psizam::debug::binary::to_bin(std::uint8_t(dw_cfa_offset + 30), s);   // LR at CFA - 8
+      ::psizam::debug::binary::varuint32_to_bin(1, s);
       // After MOV X29,SP (4 more bytes): CFA register switches to X29.
-      psio1::to_bin(std::uint8_t{dw_cfa_advance_loc + 4}, s);
-      psio1::to_bin(std::uint8_t{dw_cfa_def_cfa_register}, s);
-      psio1::varuint32_to_bin(29, s);
+      ::psizam::debug::binary::to_bin(std::uint8_t{dw_cfa_advance_loc + 4}, s);
+      ::psizam::debug::binary::to_bin(std::uint8_t{dw_cfa_def_cfa_register}, s);
+      ::psizam::debug::binary::varuint32_to_bin(29, s);
       // ... body, then epilogue (LDP + RET = 8 bytes) ...
       // At the start of the epilogue, state is still the body state.
       // After LDP X29,X30,[SP],#16 (at fn_size - 4): SP restored, regs
       // restored. Switch CFA back to SP.
-      psio1::to_bin(dw_cfa_advance_loc4, s);
-      psio1::to_bin(static_cast<std::uint32_t>(fn_size - 8 - 4), s);
-      psio1::to_bin(dw_cfa_def_cfa, s);
-      psio1::varuint32_to_bin(31, s);   // CFA = SP + 0
-      psio1::varuint32_to_bin(0, s);
+      ::psizam::debug::binary::to_bin(dw_cfa_advance_loc4, s);
+      ::psizam::debug::binary::to_bin(static_cast<std::uint32_t>(fn_size - 8 - 4), s);
+      ::psizam::debug::binary::to_bin(dw_cfa_def_cfa, s);
+      ::psizam::debug::binary::varuint32_to_bin(31, s);   // CFA = SP + 0
+      ::psizam::debug::binary::varuint32_to_bin(0, s);
       // RET (4 bytes — no state change needed)
       return result;
    }
@@ -2552,7 +2552,7 @@ namespace psizam::debug
                   const void*                    code,
                   std::size_t                    code_size)
    {
-      psio1::vector_stream stream{v};
+      ::psizam::debug::binary::vector_stream stream{v};
       to_bin(cie{.initial_instructions = get_function_entry_frame()}, stream);
       auto initial_size = functions.empty() ? code_size : functions.front().code_prologue;
       // TODO: get accurate frame information for module prologue
@@ -2637,37 +2637,37 @@ namespace psizam::debug
       uint32_t magic   = 0;
       uint32_t version = 0;
    };
-   PSIO1_REFLECT(wasm_header, magic, version)
 
    struct wasm_section
    {
       uint8_t            id = 0;
-      psio1::input_stream data;
+      ::psizam::debug::binary::input_stream data;
    };
 
    // Manual parser for wasm_section: u8 id + varuint32 length + bytes[length].
-   // Avoids dependency on a psio1::from_bin<input_stream> specialization.
-   inline wasm_section read_wasm_section(psio1::input_stream& stream)
+   // Avoids dependency on a ::psizam::debug::binary::from_bin<input_stream> specialization.
+   inline wasm_section read_wasm_section(::psizam::debug::binary::input_stream& stream)
    {
       wasm_section s;
-      psio1::from_bin(s.id, stream);
+      ::psizam::debug::binary::from_bin(s.id, stream);
       uint32_t size;
-      psio1::varuint32_from_bin(size, stream);
-      psio1::check(size <= size_t(stream.end - stream.pos),
+      ::psizam::debug::binary::varuint32_from_bin(size, stream);
+      ::psizam::debug::binary::check(size <= size_t(stream.end - stream.pos),
                   "wasm section length exceeds remaining input");
-      s.data = psio1::input_stream{stream.pos, size};
+      s.data = ::psizam::debug::binary::input_stream{stream.pos, size};
       stream.pos += size;
       return s;
    }
 
-   psio1::input_stream wasm_exclude_custom(psio1::input_stream stream)
+   ::psizam::debug::binary::input_stream wasm_exclude_custom(::psizam::debug::binary::input_stream stream)
    {
       auto        begin = stream.pos;
       wasm_header header;
-      psio1::from_bin(header, stream);
-      psio1::check(header.magic == psizam::constants::magic,
+      ::psizam::debug::binary::from_bin(header.magic, stream);
+      ::psizam::debug::binary::from_bin(header.version, stream);
+      ::psizam::debug::binary::check(header.magic == psizam::constants::magic,
                   "wasm file magic number does not match");
-      psio1::check(header.version == psizam::constants::version,
+      ::psizam::debug::binary::check(header.version == psizam::constants::version,
                   "wasm file version does not match");
       const char* found = nullptr;
       while (stream.remaining())
@@ -2681,7 +2681,7 @@ namespace psizam::debug
          }
          else
          {
-            psio1::check(!found, "custom sections before non-custom sections not supported");
+            ::psizam::debug::binary::check(!found, "custom sections before non-custom sections not supported");
          }
       }
       if (found)
@@ -2692,23 +2692,24 @@ namespace psizam::debug
    struct wasm_section_info
    {
       std::uint32_t      wasm_code_offset;
-      psio1::input_stream code;
-      psio1::input_stream debug_line;
-      psio1::input_stream debug_abbrev;
-      psio1::input_stream debug_str;
-      psio1::input_stream debug_info;
+      ::psizam::debug::binary::input_stream code;
+      ::psizam::debug::binary::input_stream debug_line;
+      ::psizam::debug::binary::input_stream debug_abbrev;
+      ::psizam::debug::binary::input_stream debug_str;
+      ::psizam::debug::binary::input_stream debug_info;
    };
 
-   wasm_section_info get_dwarf_sections(psio1::input_stream stream)
+   wasm_section_info get_dwarf_sections(::psizam::debug::binary::input_stream stream)
    {
       wasm_section_info result = {};
 
       auto        file_begin = stream.pos;
       wasm_header header;
-      psio1::from_bin(header, stream);
-      psio1::check(header.magic == psizam::constants::magic,
+      ::psizam::debug::binary::from_bin(header.magic, stream);
+      ::psizam::debug::binary::from_bin(header.version, stream);
+      ::psizam::debug::binary::check(header.magic == psizam::constants::magic,
                   "wasm file magic number does not match");
-      psio1::check(header.version == psizam::constants::version,
+      ::psizam::debug::binary::check(header.version == psizam::constants::version,
                   "wasm file version does not match");
 
       while (stream.remaining())
@@ -2722,7 +2723,7 @@ namespace psizam::debug
          }
          else if (section.id == psizam::detail::section_id::custom_section)
          {
-            auto name = psio1::from_bin<std::string>(section.data);
+            auto name = ::psizam::debug::binary::from_bin<std::string>(section.data);
             if (name == ".debug_line")
             {
                result.debug_line = section.data;
@@ -2745,7 +2746,7 @@ namespace psizam::debug
       return result;
    }
 
-   info get_info_from_wasm(psio1::input_stream stream)
+   info get_info_from_wasm(::psizam::debug::binary::input_stream stream)
    {
       info                            result;
       auto                            file_begin = stream.pos;
@@ -2768,7 +2769,7 @@ namespace psizam::debug
       if (sections.debug_str.remaining())
       {
          result.strings.data = std::vector<char>{sections.debug_str.pos, sections.debug_str.end};
-         psio1::check(result.strings.data.empty() || result.strings.data.back() == 0,
+         ::psizam::debug::binary::check(result.strings.data.empty() || result.strings.data.back() == 0,
                      ".debug_str is malformed");
       }
 
@@ -2779,7 +2780,7 @@ namespace psizam::debug
       return result;
    }  // get_info_from_wasm
 
-   bool has_debug_info(psio1::input_stream stream)
+   bool has_debug_info(::psizam::debug::binary::input_stream stream)
    {
       auto sections = get_dwarf_sections(stream);
       return sections.debug_line.remaining() || sections.debug_info.remaining();
@@ -2787,7 +2788,7 @@ namespace psizam::debug
 
    const char* debug_str::get(uint32_t offset) const
    {
-      psio1::check(offset < data.size(), "string out of range in .debug_str");
+      ::psizam::debug::binary::check(offset < data.size(), "string out of range in .debug_str");
       return &data[offset];
    }
 
@@ -2997,7 +2998,7 @@ namespace psizam::debug
        info&                    info,
        const jit_info&          reloc,
        const psizam::module& mod,
-       psio1::input_stream       wasm_source)
+       ::psizam::debug::binary::input_stream       wasm_source)
    {
       auto code_start = mod.allocator.get_code_start();
       auto code_size  = mod.allocator._code_size;

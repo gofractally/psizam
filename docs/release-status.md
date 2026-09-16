@@ -97,8 +97,8 @@ See [aot-spec-tests.md](aot-spec-tests.md) for commands, limits and evidence.
    execution through this particular runtime API. The shared PZAM loader and
    CLI execution paths do execute the new compilation results successfully.
 4. Review and selectively recover agent2's zero-copy PZAM loader optimization;
-   it has not been merged into this checkout. Retain the namespaced legacy
-   psio1 snapshot until its metadata/component APIs have a tested migration.
+   it has not been merged into this checkout. PZAM metadata and component APIs
+   now use current psio; the WIT port preserves the existing calling convention.
 5. Run the independent package and execution matrix on Linux/x86_64 as well
    as ARM64. Establish immutable dependency versions, license/notice files,
    public tags and release artifacts. No publishing has occurred here.

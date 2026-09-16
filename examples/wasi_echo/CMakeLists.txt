@@ -7,7 +7,7 @@
 psi_add_wasm_module(wasi_echo_guest
    SOURCES guest.cpp
    OUTPUT  guest.wasm
-   DEPS    psio1 psizam wasi-cpp)
+   DEPS    psio psizam wasi-cpp)
 
 if(NOT TARGET wasi_echo_guest)
    return()
@@ -27,6 +27,12 @@ add_custom_command(
            ${CMAKE_CURRENT_SOURCE_DIR}/../hello_world/bin2hpp.cmake
    COMMENT "Embedding guest.wasm -> guest_wasm.hpp"
    VERBATIM)
+
+# The network host belongs to the server integration, not the standalone engine.
+if(NOT TARGET wasi-host)
+   message(STATUS "wasi_echo: guest enabled; host requires the server's wasi-host target")
+   return()
+endif()
 
 add_executable(wasi_echo_host host.cpp ${_hpp})
 target_include_directories(wasi_echo_host PRIVATE

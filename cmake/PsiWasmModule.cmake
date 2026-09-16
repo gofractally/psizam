@@ -18,7 +18,7 @@
 # against it.
 #
 # The reactor defaults (`-mexec-model=reactor`, `-Wl,--allow-undefined`,
-# `-Wl,--strip-all`, `-fno-exceptions`, `-fno-rtti`, `-std=c++20`) come
+# `-Wl,--strip-all`, `-fno-exceptions`, `-fno-rtti`, `-std=c++23`) come
 # from the canonical-ABI workflow: the guest is a library the host
 # instantiates, host-provided imports resolve at instantiate time.
 
@@ -141,30 +141,46 @@ function(psi_add_wasm_module name)
    set(_base_flags
       --target=wasm32-wasip1
       --sysroot=${_sysroot}
-      -mexec-model=${ARG_EXEC_MODEL}
       -std=c++23
       -fno-exceptions
       -fno-rtti
-      -O2
+      -O2)
+   set(_link_flags
+      -mexec-model=${ARG_EXEC_MODEL}
       -Wl,--allow-undefined    # host imports resolve at instantiate
       -Wl,--strip-debug        # strip debug but keep custom sections
       -Wl,--no-gc-sections)    # keep WIT custom sections
 
    set(_raw_out ${_out}.raw)
 
+   # Compile separately so each translation unit has a complete header depfile.
+   # Changes in shared interfaces or psio must rebuild the embedded guest.
+   set(_objects "")
+   set(_compile_flags ${ARG_FLAGS})
+   list(FILTER _compile_flags EXCLUDE REGEX "^-Wl,")
+   set(_source_index 0)
+   file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/${name}.objects")
+   foreach(_src IN LISTS _srcs)
+      set(_object "${CMAKE_CURRENT_BINARY_DIR}/${name}.objects/${_source_index}.o")
+      add_custom_command(
+         OUTPUT ${_object}
+         COMMAND ${_cxx} ${_base_flags} ${_compile_flags} ${_include_flags}
+                 -MMD -MF ${_object}.d -MT ${_object} -c ${_src} -o ${_object}
+         DEPENDS ${_src}
+         DEPFILE ${_object}.d
+         COMMENT "Compiling wasm guest ${name}: ${_src}"
+         VERBATIM)
+      list(APPEND _objects ${_object})
+      math(EXPR _source_index "${_source_index} + 1")
+   endforeach()
    add_custom_command(
-      OUTPUT  ${_raw_out}
-      COMMAND ${_cxx}
-              ${_base_flags}
-              ${ARG_FLAGS}
-              ${_include_flags}
-              ${_srcs}
-              -o ${_raw_out}
-      DEPENDS ${_srcs}
-      COMMENT "Building wasm guest ${ARG_OUTPUT} (wasi-sdk, ${ARG_EXEC_MODEL})"
+      OUTPUT ${_raw_out}
+      COMMAND ${_cxx} ${_base_flags} ${_link_flags} ${ARG_FLAGS} ${_objects} -o ${_raw_out}
+      DEPENDS ${_objects}
+      COMMENT "Linking wasm guest ${ARG_OUTPUT} (wasi-sdk, ${ARG_EXEC_MODEL})"
       VERBATIM)
 
-   # Post-link: promote PSIO1_WIT blobs from data section to custom sections.
+   # Post-link: promote PSIO_WIT blobs from data section to custom sections.
    # Use the native pzam tool from the build tree if available.
    set(_pzam ${CMAKE_BINARY_DIR}/bin/pzam)
    if(TARGET pzam)

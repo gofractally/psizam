@@ -33,7 +33,7 @@ def main():
     work.mkdir(parents=True, exist_ok=True)
     compiler = work / 'pzam-compile'
     shutil.copy2(args.compiler.resolve(), compiler)
-    manifest = {'backend': 'LLVM AOT', 'optimization': 2, 'pzam_version': 3,
+    manifest = {'backend': 'LLVM AOT', 'optimization': 2, 'pzam_version': 4, 'serialization': 'psio::pssz',
                 'compiler_origin': str(args.compiler.resolve()),
                 'compiler_sha256': digest(compiler), 'suites': {}, 'complete': False}
 

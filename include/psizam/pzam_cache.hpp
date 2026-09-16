@@ -1,6 +1,6 @@
 #pragma once
 
-// .pzam cache — save and load compiled WASM native code using fracpack.
+// .pzam cache — save and load compiled WASM native code using pSSZ.
 //
 // Usage:
 //   // Save after JIT compilation:
@@ -218,7 +218,7 @@ namespace psizam {
          return result;
       }
 
-      /// Save compiled module to fracpack-serialized .pzam byte vector.
+      /// Save compiled module to pSSZ-serialized .pzam byte vector.
       /// code_base: start of the JIT code segment
       /// code_size: total size of the code segment
       inline std::vector<char> save(
@@ -271,7 +271,7 @@ namespace psizam {
          return pzam_save(file);
       }
 
-      /// Load cached code from fracpack .pzam data into a module.
+      /// Load cached code from pSSZ .pzam data into a module.
       /// Returns true on success.
       inline bool load(
             std::span<const char> pzam_data,

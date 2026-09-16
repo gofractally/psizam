@@ -347,6 +347,7 @@ catch_discover_tests(psizam_compliance_tests)
 
 # ── Component / CType tests ───────────────────────────────────────────────────
 
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/wit-golden")
 add_executable(component_tests main.cpp
    component_tests.cpp
    golden_gen.cpp
@@ -358,7 +359,7 @@ target_include_directories(component_tests PUBLIC
 )
 target_compile_definitions(component_tests PUBLIC
    CATCH_CONFIG_NO_POSIX_SIGNALS
-   GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../psio1/golden"
+   GOLDEN_DIR="${CMAKE_CURRENT_BINARY_DIR}/wit-golden"
 )
 catch_discover_tests(component_tests)
 
@@ -443,3 +444,13 @@ endif()
 target_compile_definitions(psizam_pzam_compile_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS)
 add_test(NAME pzam_compile_api COMMAND psizam_pzam_compile_tests)
 set_tests_properties(pzam_compile_api PROPERTIES TIMEOUT 60)
+
+add_executable(psizam_pzam_format_tests pzam_format_tests.cpp)
+target_link_libraries(psizam_pzam_format_tests PRIVATE psizam Catch2::Catch2)
+target_compile_definitions(psizam_pzam_format_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS)
+add_test(NAME pzam_format COMMAND psizam_pzam_format_tests)
+
+if(TARGET psizam_runtime_resource)
+   add_test(NAME wit_resource_integration COMMAND psizam_runtime_resource)
+   set_tests_properties(wit_resource_integration PROPERTIES TIMEOUT 30)
+endif()

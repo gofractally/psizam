@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
     }
     auto code = load_file(argv[1]);
 
-    psio::input_stream wasm_stream(reinterpret_cast<const char*>(code.data()),
+    psizam::debug::binary::input_stream wasm_stream(reinterpret_cast<const char*>(code.data()),
                                    code.size());
     auto dwarf_info = psizam::debug::get_info_from_wasm(wasm_stream);
 

@@ -226,7 +226,7 @@ TEST_CASE("DWARF symbolization: captured PCs resolve to trap_guest.cpp source li
    // Parse DWARF custom sections out of the raw WASM bytes first — the
    // dwarf::info must outlive the backend so backend::call sees the same
    // wasm addresses that DWARF encoded at build time.
-   psio::input_stream wasm_stream(reinterpret_cast<const char*>(code.data()),
+   psizam::debug::binary::input_stream wasm_stream(reinterpret_cast<const char*>(code.data()),
                                   code.size());
    auto dwarf_info = psizam::debug::get_info_from_wasm(wasm_stream);
 
@@ -300,7 +300,7 @@ TEST_CASE("register_with_debugger builds a valid ELF and links the descriptor",
           "[debug][gdb]") {
    auto code = load_fixture("trap_guest.wasm");
 
-   psio::input_stream wasm_stream(reinterpret_cast<const char*>(code.data()),
+   psizam::debug::binary::input_stream wasm_stream(reinterpret_cast<const char*>(code.data()),
                                   code.size());
    auto dwarf_info = psizam::debug::get_info_from_wasm(wasm_stream);
 
@@ -399,3 +399,28 @@ TEST_CASE("rebuild_from_module produces correct fn_locs for jit_llvm",
 }
 #endif
 #endif
+
+TEST_CASE("Debug binary streams reject malformed lengths and preserve LEB boundaries", "[debug][binary]") {
+   namespace bin = psizam::debug::binary;
+   std::vector<char> data;
+   bin::vector_stream output{data};
+   for (uint32_t v : {0u, 127u, 128u, UINT32_MAX}) bin::varuint32_to_bin(v, output);
+   for (int64_t v : {INT64_MIN, int64_t{-65}, int64_t{-64}, int64_t{63}, int64_t{64}, INT64_MAX})
+      bin::sleb64_to_bin(v, output);
+   bin::input_stream input{data};
+   for (uint32_t v : {0u, 127u, 128u, UINT32_MAX}) CHECK(bin::varuint32_from_bin(input) == v);
+   for (int64_t v : {INT64_MIN, int64_t{-65}, int64_t{-64}, int64_t{63}, int64_t{64}, INT64_MAX})
+      CHECK(bin::sleb64_from_bin(input) == v);
+   CHECK(input.remaining() == 0);
+   CHECK_THROWS(bin::from_bin<uint8_t>(input));
+   std::vector<char> invalid(10, static_cast<char>(0xff));
+   bin::input_stream too_wide{invalid};
+   CHECK_THROWS(bin::varuint32_from_bin(too_wide));
+   bin::input_stream unterminated{invalid};
+   CHECK_THROWS(bin::sleb64_from_bin(unterminated));
+   char fixed[2];
+   bin::fixed_buf_stream bounded{fixed, sizeof(fixed)};
+   bin::to_bin(uint16_t{0x1234}, bounded);
+   CHECK(static_cast<unsigned char>(fixed[0]) == 0x34);
+   CHECK_THROWS(bin::to_bin(uint8_t{0}, bounded));
+}

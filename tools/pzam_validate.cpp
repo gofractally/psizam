@@ -27,7 +27,7 @@ static bool validate_pzam(const std::string& path) {
    in.read(data.data(), size);
 
    if (!pzam_validate(data)) {
-      std::cerr << path << ": INVALID (fracpack validation failed)\n";
+      std::cerr << path << ": INVALID (pSSZ validation failed)\n";
       return false;
    }
 

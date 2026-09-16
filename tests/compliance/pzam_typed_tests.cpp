@@ -1,5 +1,6 @@
 // Tests for the typed C++ API (pzam_typed.hpp).
 
+#include <psio/structural.hpp>
 #include <psizam/pzam_typed.hpp>
 #include <catch2/catch.hpp>
 
@@ -15,10 +16,10 @@ struct test_host {
    uint32_t last_logged = 0;
    uint64_t counter = 42;
 };
-PSIO1_REFLECT(test_host,
-   method(add, a, b),
-   method(log_value, v),
-   method(get_counter))
+PSIO_INTERFACE(test_host, types(), funcs(
+   func(add, a, b),
+   func(log_value, v),
+   func(get_counter)))
 
 // Test exports struct (just declares the shape)
 struct test_exports {
@@ -26,10 +27,10 @@ struct test_exports {
    uint32_t compute(uint32_t x, uint32_t y);
    void cleanup();
 };
-PSIO1_REFLECT(test_exports,
-   method(init),
-   method(compute, x, y),
-   method(cleanup))
+PSIO_INTERFACE(test_exports, types(), funcs(
+   func(init),
+   func(compute, x, y),
+   func(cleanup)))
 
 TEST_CASE("typed API: register_reflected adds all host methods", "[pzam_typed]") {
    host_function_table table;

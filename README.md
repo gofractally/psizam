@@ -14,8 +14,8 @@ Wasm compiler chain and its verification gate.
 
 Install the independent psio C++ package first. Dependencies are CMake 3.20+,
 a C++23 compiler, Boost headers, and psio's installed CMake configuration.
-macOS builds use Homebrew LLVM; set CC/CXX accordingly. SoftFloat, Catch2 and the
-transitional psio1 compatibility code are retained in this repository.
+macOS builds use Homebrew LLVM; set CC/CXX accordingly. SoftFloat and Catch2 are retained in this repository. WIT bindings and PZAM
+serialization use the independent current psio library.
 
 ```sh
 CC=/path/to/clang CXX=/path/to/clang++ cmake -S . -B build -G Ninja \

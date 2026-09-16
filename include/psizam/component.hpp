@@ -14,16 +14,16 @@
 //   )
 //
 // Produces:
-//   - PSIO1_REFLECT for the class
+//   - PSIO_REFLECT for the class
 //   - WIT embedded in component-type custom section
 //   - cabi_realloc export
 //   - Typed extern "C" exports for each method
 //   - Canonical ABI lift/lower for all parameter and return types
 
-#include <psio1/reflect.hpp>
-#include <psio1/wit_gen.hpp>
-#include <psio1/wit_encode.hpp>
-#include <psio1/wview.hpp>
+#include <psio/reflect.hpp>
+#include <psio/wit_gen.hpp>
+#include <psio/wit_encode.hpp>
+#include <psio/wview.hpp>
 #include <psizam/component_proxy.hpp>  // flat_val, export_*_policy, ComponentProxy
 
 #include <cstdint>
@@ -41,20 +41,22 @@ namespace psizam {
 
    template <typename T>
    std::string generate_component_wit(const std::string& package) {
-      return psio1::generate_wit_text<T>(package);
+      return psio::generate_wit_text<T>(package,
+         psio::detail::to_kebab_case(psio::detail::interface_info<T>::name) + "-world");
    }
 
    // Generate Component Model binary for embedding as a component-type custom section.
    template <typename T>
    std::vector<uint8_t> generate_component_wit_binary(const std::string& package) {
-      return psio1::generate_wit_binary<T>(package);
+      return psio::generate_wit_binary<T>(package,
+         psio::detail::to_kebab_case(psio::detail::interface_info<T>::name) + "-world");
    }
 
 } // namespace psizam
 
 // ── PZAM_COMPONENT macro ─────────────────────────────────────────────────────
 //
-// Generates: PSIO1_REFLECT + static instance + extern "C" exports
+// Generates: PSIO_REFLECT + static instance + extern "C" exports
 //
 // The preprocessor iteration uses a simple X-macro pattern to handle
 // each method(...) entry in the variadic args.
@@ -114,6 +116,9 @@ namespace psizam {
 // ── The main macro ───────────────────────────────────────────────────────────
 
 #define PZAM_COMPONENT(Class, ...) \
-   PSIO1_REFLECT(Class, __VA_ARGS__) \
+   PSIO_INTERFACE(Class, types(), funcs(BOOST_PP_SEQ_ENUM(BOOST_PP_SEQ_TRANSFORM(_PZAM_AS_FUNC, _, BOOST_PP_VARIADIC_TO_SEQ(__VA_ARGS__))))) \
    static Class _pzam_impl; \
    _PZAM_FOREACH(Class, __VA_ARGS__)
+
+#define _PZAM_AS_FUNC(r, _, spec) BOOST_PP_CAT(_PZAM_AS_FUNC_, spec)
+#define _PZAM_AS_FUNC_method(...) func(__VA_ARGS__)

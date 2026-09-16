@@ -1,7 +1,8 @@
+#include <psio/structural.hpp>
 #include <catch2/catch.hpp>
-#include <psio1/wview.hpp>
-#include <psio1/canonical_abi.hpp>
-#include <psio1/wit_view.hpp>
+#include <psio/wview.hpp>
+#include <psio/wit_abi.hpp>
+#include <psio/wit_view.hpp>
 #include <psizam/component.hpp>
 
 #include <cstdint>
@@ -16,109 +17,105 @@ struct Point {
    int32_t x;
    int32_t y;
 };
-PSIO1_REFLECT(Point, x, y)
+PSIO_REFLECT(Point, x, y)
 
 struct Person {
    std::string name;
    uint32_t    age;
 };
-PSIO1_REFLECT(Person, name, age)
+PSIO_REFLECT(Person, name, age)
 
 struct Order {
    std::string              customer;
    std::vector<int32_t>     quantities;
    std::vector<std::string> items;
 };
-PSIO1_REFLECT(Order, customer, quantities, items)
+PSIO_REFLECT(Order, customer, quantities, items)
 
 struct Nested {
    Person               person;
    std::vector<Point>   path;
    std::optional<Point> origin;
 };
-PSIO1_REFLECT(Nested, person, path, origin)
+PSIO_REFLECT(Nested, person, path, origin)
 
 // ── is_canonical_simple tests ────────────────────────────────────────────────
 
 TEST_CASE("is_canonical_simple — scalar types", "[wview]") {
-   STATIC_REQUIRE(psio1::is_canonical_simple<int32_t>);
-   STATIC_REQUIRE(psio1::is_canonical_simple<uint64_t>);
-   STATIC_REQUIRE(psio1::is_canonical_simple<float>);
-   STATIC_REQUIRE(psio1::is_canonical_simple<double>);
-   STATIC_REQUIRE(psio1::is_canonical_simple<bool>);
+   STATIC_REQUIRE(psio::is_canonical_simple<int32_t>);
+   STATIC_REQUIRE(psio::is_canonical_simple<uint64_t>);
+   STATIC_REQUIRE(psio::is_canonical_simple<float>);
+   STATIC_REQUIRE(psio::is_canonical_simple<double>);
+   STATIC_REQUIRE(psio::is_canonical_simple<bool>);
 }
 
 TEST_CASE("is_canonical_simple — flat struct", "[wview]") {
-   STATIC_REQUIRE(psio1::is_canonical_simple<Point>);
+   STATIC_REQUIRE(psio::is_canonical_simple<Point>);
 }
 
 TEST_CASE("is_canonical_simple — struct with string is NOT simple", "[wview]") {
-   STATIC_REQUIRE_FALSE(psio1::is_canonical_simple<Person>);
+   STATIC_REQUIRE_FALSE(psio::is_canonical_simple<Person>);
 }
 
 TEST_CASE("is_canonical_simple — struct with vector is NOT simple", "[wview]") {
-   STATIC_REQUIRE_FALSE(psio1::is_canonical_simple<Order>);
+   STATIC_REQUIRE_FALSE(psio::is_canonical_simple<Order>);
 }
 
 // ── WView/WOwned type identity for simple types ─────────────────────────────
 
 TEST_CASE("WView<int32_t> collapses to int32_t", "[wview]") {
-   STATIC_REQUIRE(std::is_same_v<psio1::WView<int32_t>, int32_t>);
+   STATIC_REQUIRE(std::is_same_v<psio::WView<int32_t>, int32_t>);
 }
 
 TEST_CASE("WOwned<int32_t> collapses to int32_t", "[wview]") {
-   STATIC_REQUIRE(std::is_same_v<psio1::WOwned<int32_t>, int32_t>);
+   STATIC_REQUIRE(std::is_same_v<psio::WOwned<int32_t>, int32_t>);
 }
 
 TEST_CASE("WView<Point> collapses to Point", "[wview]") {
-   STATIC_REQUIRE(std::is_same_v<psio1::WView<Point>, Point>);
+   STATIC_REQUIRE(std::is_same_v<psio::WView<Point>, Point>);
 }
 
 TEST_CASE("WOwned<Point> collapses to Point", "[wview]") {
-   STATIC_REQUIRE(std::is_same_v<psio1::WOwned<Point>, Point>);
+   STATIC_REQUIRE(std::is_same_v<psio::WOwned<Point>, Point>);
 }
 
 TEST_CASE("WView<Person> does NOT collapse", "[wview]") {
-   STATIC_REQUIRE(std::is_same_v<psio1::WView<Person>, psio1::WViewImpl<Person>>);
+   STATIC_REQUIRE(std::is_same_v<psio::WView<Person>, psio::WViewImpl<Person>>);
 }
 
 TEST_CASE("WOwned<Person> does NOT collapse", "[wview]") {
-   STATIC_REQUIRE(std::is_same_v<psio1::WOwned<Person>, psio1::WOwnedImpl<Person>>);
+   STATIC_REQUIRE(std::is_same_v<psio::WOwned<Person>, psio::WOwnedImpl<Person>>);
 }
 
 // ── is_wviewable tests ──────────────────────────────────────────────────────
 
 TEST_CASE("is_wviewable — scalar struct", "[wview]") {
-   STATIC_REQUIRE(psio1::is_wviewable<Point>);
+   STATIC_REQUIRE(psio::is_wviewable<Point>);
 }
 
 TEST_CASE("is_wviewable — struct with string", "[wview]") {
-   STATIC_REQUIRE(psio1::is_wviewable<Person>);
+   STATIC_REQUIRE(psio::is_wviewable<Person>);
 }
 
 TEST_CASE("is_wviewable — struct with vector<scalar>", "[wview]") {
    // Has vector<string> which needs descriptor alloc → NOT viewable
-   STATIC_REQUIRE_FALSE(psio1::is_wviewable<Order>);
+   STATIC_REQUIRE_FALSE(psio::is_wviewable<Order>);
 }
 
 TEST_CASE("is_wviewable — nested struct with vector<compound>", "[wview]") {
    // Has vector<Point> (compound) → NOT viewable
-   STATIC_REQUIRE_FALSE(psio1::is_wviewable<Nested>);
+   STATIC_REQUIRE_FALSE(psio::is_wviewable<Nested>);
 }
 
 // ── Legacy is_viewable still works ──────────────────────────────────────────
 
-TEST_CASE("is_viewable — legacy alias works", "[wview]") {
-   STATIC_REQUIRE(psio1::is_viewable<Point>);
-   STATIC_REQUIRE(psio1::is_viewable<Person>);
-   STATIC_REQUIRE_FALSE(psio1::is_viewable<Order>);
-}
+
 
 // ── WViewImpl construction and promotion ─────────────────────────────────────
 
 TEST_CASE("WViewImpl<Point> — scalar struct round-trip", "[wview]") {
    Point p{42, 99};
-   psio1::WViewImpl<Point> view(p);
+   psio::WViewImpl<Point> view(p);
 
    CHECK(view.get<0>() == 42);
    CHECK(view.get<1>() == 99);
@@ -130,7 +127,7 @@ TEST_CASE("WViewImpl<Point> — scalar struct round-trip", "[wview]") {
 
 TEST_CASE("WViewImpl<Person> — struct with string", "[wview]") {
    Person p{"Alice", 30};
-   psio1::WViewImpl<Person> view(p);
+   psio::WViewImpl<Person> view(p);
 
    CHECK(view.get<0>() == "Alice");
    CHECK(view.get<1>() == 30);
@@ -142,7 +139,7 @@ TEST_CASE("WViewImpl<Person> — struct with string", "[wview]") {
 
 TEST_CASE("WViewImpl<Order> — struct with vector<string>", "[wview]") {
    Order o{"Bob", {1, 2, 3}, {"apple", "banana", "cherry"}};
-   psio1::WViewImpl<Order> view(o);
+   psio::WViewImpl<Order> view(o);
 
    CHECK(view.get<0>() == "Bob");  // customer
    CHECK(view.get<1>().size() == 3);  // quantities
@@ -160,7 +157,7 @@ TEST_CASE("WViewImpl<Order> — struct with vector<string>", "[wview]") {
 
 TEST_CASE("WViewImpl<Nested> — nested struct with optional", "[wview]") {
    Nested n{{"Carol", 25}, {{1, 2}, {3, 4}}, Point{10, 20}};
-   psio1::WViewImpl<Nested> view(n);
+   psio::WViewImpl<Nested> view(n);
 
    // person field
    CHECK(view.get<0>().get<0>() == "Carol");
@@ -187,7 +184,7 @@ TEST_CASE("WViewImpl<Nested> — nested struct with optional", "[wview]") {
 
 TEST_CASE("WViewImpl<Nested> — optional is null", "[wview]") {
    Nested n{{"Dave", 40}, {}, std::nullopt};
-   psio1::WViewImpl<Nested> view(n);
+   psio::WViewImpl<Nested> view(n);
 
    CHECK(view.get<2>() == nullptr);
 
@@ -199,8 +196,8 @@ TEST_CASE("WViewImpl<Nested> — optional is null", "[wview]") {
 
 TEST_CASE("WOwnedImpl — wraps WViewImpl and tracks allocations", "[wview]") {
    Person p{"Eve", 28};
-   psio1::WViewImpl<Person> view(p);
-   psio1::WOwnedImpl<Person> owned(std::move(view));
+   psio::WViewImpl<Person> view(p);
+   psio::WOwnedImpl<Person> owned(std::move(view));
 
    CHECK(owned.get<0>() == "Eve");
    CHECK(owned.get<1>() == 28);
@@ -212,25 +209,15 @@ TEST_CASE("WOwnedImpl — wraps WViewImpl and tracks allocations", "[wview]") {
 
 // ── Legacy CView/COwned aliases ─────────────────────────────────────────────
 
-TEST_CASE("CView legacy alias works", "[wview]") {
-   Person p{"Frank", 35};
-   psio1::CView<Person> view(p);
-   CHECK(view.get<0>() == "Frank");
-   CHECK(view.get<1>() == 35);
-}
 
-TEST_CASE("COwned legacy alias works", "[wview]") {
-   Person p{"Grace", 42};
-   psio1::CView<Person> view(p);
-   psio1::COwned<Person> owned(std::move(view));
-   CHECK(owned.get<0>() == "Grace");
-}
+
+
 
 // ── Proxy accessor tests ────────────────────────────────────────────────────
 
 TEST_CASE("WViewImpl<Person> — named proxy accessors", "[wview]") {
    Person p{"Alice", 30};
-   psio1::WViewImpl<Person> view(p);
+   psio::WViewImpl<Person> view(p);
    auto px = view.proxy();
 
    CHECK(px.name() == "Alice");
@@ -239,7 +226,7 @@ TEST_CASE("WViewImpl<Person> — named proxy accessors", "[wview]") {
 
 TEST_CASE("WViewImpl<Nested> — nested proxy accessors", "[wview]") {
    Nested n{{"Carol", 25}, {{1, 2}, {3, 4}}, Point{10, 20}};
-   psio1::WViewImpl<Nested> view(n);
+   psio::WViewImpl<Nested> view(n);
    auto px = view.proxy();
 
    // Nested person — returns proxy with named accessors
@@ -249,8 +236,8 @@ TEST_CASE("WViewImpl<Nested> — nested proxy accessors", "[wview]") {
 
 TEST_CASE("WOwnedImpl — proxy accessors", "[wview]") {
    Person p{"Bob", 50};
-   psio1::WViewImpl<Person> view(p);
-   psio1::WOwnedImpl<Person> owned(std::move(view));
+   psio::WViewImpl<Person> view(p);
+   psio::WOwnedImpl<Person> owned(std::move(view));
    auto px = owned.proxy();
 
    CHECK(px.name() == "Bob");
@@ -265,12 +252,12 @@ struct Calculator {
    double  divide(double a, double b) { return a / b; }
    float   to_float(int32_t x) { return static_cast<float>(x); }
 };
-PSIO1_REFLECT(Calculator,
-   method(add, a, b),
-   method(mul, a, b),
-   method(divide, a, b),
-   method(to_float, x)
-)
+PSIO_INTERFACE(Calculator, types(), funcs(
+   func(add, a, b),
+   func(mul, a, b),
+   func(divide, a, b),
+   func(to_float, x)
+))
 
 TEST_CASE("ComponentProxy — int32 add", "[component]") {
    Calculator calc;
@@ -318,10 +305,10 @@ struct PointService {
    int32_t distance_sq(Point p) { return p.x * p.x + p.y * p.y; }
    Point   scale(Point p, int32_t factor) { return {p.x * factor, p.y * factor}; }
 };
-PSIO1_REFLECT(PointService,
-   method(distance_sq, p),
-   method(scale, p, factor)
-)
+PSIO_INTERFACE(PointService, types(), funcs(
+   func(distance_sq, p),
+   func(scale, p, factor)
+))
 
 TEST_CASE("ComponentProxy — record arg flattened as scalars", "[component]") {
    PointService svc;
@@ -334,10 +321,12 @@ TEST_CASE("ComponentProxy — record arg flattened as scalars", "[component]") {
 TEST_CASE("ComponentProxy — record arg + scalar arg", "[component]") {
    PointService svc;
    // Point{2, 3} + factor=5 → flattens to (i32=2, i32=3, i32=5)
-   // Result Point{10, 15} → flattens to 2 values, but we return only first (x=10)
+   // A multi-slot result is returned through a canonical memory area.
    auto result = psizam::ComponentProxy<PointService>::call<&PointService::scale>(
       &svc, 2, 3, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-   CHECK(static_cast<int32_t>(result) == 10);  // first flat value: x
+   const auto* fields = reinterpret_cast<const int32_t*>(static_cast<uintptr_t>(result));
+   CHECK(fields[0] == 10);
+   CHECK(fields[1] == 15);
 }
 
 // ── ComponentProxy — string arg dispatch via memory context ──────────────────
@@ -346,10 +335,10 @@ struct NameService {
    uint32_t name_length(std::string name) { return static_cast<uint32_t>(name.size()); }
    bool     is_alice(std::string name) { return name == "Alice"; }
 };
-PSIO1_REFLECT(NameService,
-   method(name_length, name),
-   method(is_alice, name)
-)
+PSIO_INTERFACE(NameService, types(), funcs(
+   func(name_length, name),
+   func(is_alice, name)
+))
 
 TEST_CASE("ComponentProxy — string arg via call_with_memory", "[component]") {
    // Lower the string arg into a buffer using canonical ABI
@@ -392,10 +381,10 @@ struct PersonService {
    uint32_t    get_age(Person p) { return p.age; }
    std::string get_name(Person p) { return p.name; }
 };
-PSIO1_REFLECT(PersonService,
-   method(get_age, p),
-   method(get_name, p)
-)
+PSIO_INTERFACE(PersonService, types(), funcs(
+   func(get_age, p),
+   func(get_name, p)
+))
 
 TEST_CASE("ComponentProxy — Person arg (string+scalar record)", "[component]") {
    // Lower Person into buffer: flattens to [name_ptr, name_len, age]
@@ -418,30 +407,30 @@ TEST_CASE("ComponentProxy — Person arg (string+scalar record)", "[component]")
 // ── Method flat count tests ──────────────────────────────────────────────────
 
 TEST_CASE("method param flat counts", "[component]") {
-   using psio1::canonical_flat_count_v;
+   using psio::wit_abi_flat_count_v;
 
    // add(i32, i32) → 2 flat params
-   using AddM = psio1::MemberPtrType<decltype(&Calculator::add)>;
+   using AddM = psio::MemberPtrType<decltype(&Calculator::add)>;
    STATIC_REQUIRE(psizam::detail_component::param_flat_count(AddM::SimplifiedArgTypes{}) == 2);
 
    // divide(f64, f64) → 2 flat params
-   using DivM = psio1::MemberPtrType<decltype(&Calculator::divide)>;
+   using DivM = psio::MemberPtrType<decltype(&Calculator::divide)>;
    STATIC_REQUIRE(psizam::detail_component::param_flat_count(DivM::SimplifiedArgTypes{}) == 2);
 
    // name_length(string) → 2 flat params (ptr + len)
-   using NlM = psio1::MemberPtrType<decltype(&NameService::name_length)>;
+   using NlM = psio::MemberPtrType<decltype(&NameService::name_length)>;
    STATIC_REQUIRE(psizam::detail_component::param_flat_count(NlM::SimplifiedArgTypes{}) == 2);
 
    // get_age(Person) → 3 flat params (name_ptr + name_len + age)
-   using GaM = psio1::MemberPtrType<decltype(&PersonService::get_age)>;
+   using GaM = psio::MemberPtrType<decltype(&PersonService::get_age)>;
    STATIC_REQUIRE(psizam::detail_component::param_flat_count(GaM::SimplifiedArgTypes{}) == 3);
 
    // distance_sq(Point) → 2 flat params (x + y)
-   using DsM = psio1::MemberPtrType<decltype(&PointService::distance_sq)>;
+   using DsM = psio::MemberPtrType<decltype(&PointService::distance_sq)>;
    STATIC_REQUIRE(psizam::detail_component::param_flat_count(DsM::SimplifiedArgTypes{}) == 2);
 
    // scale(Point, i32) → 3 flat params (x + y + factor)
-   using ScM = psio1::MemberPtrType<decltype(&PointService::scale)>;
+   using ScM = psio::MemberPtrType<decltype(&PointService::scale)>;
    STATIC_REQUIRE(psizam::detail_component::param_flat_count(ScM::SimplifiedArgTypes{}) == 3);
 }
 
@@ -491,14 +480,14 @@ struct Item {
    std::vector<std::string> tags;
    std::optional<uint32_t>  weight_grams;
 };
-PSIO1_REFLECT(Item, id, name, category, price_cents, in_stock, tags, weight_grams)
+PSIO_REFLECT(Item, id, name, category, price_cents, in_stock, tags, weight_grams)
 
 struct StockResult {
    uint32_t item_id;
    uint32_t old_quantity;
    uint32_t new_quantity;
 };
-PSIO1_REFLECT(StockResult, item_id, old_quantity, new_quantity)
+PSIO_REFLECT(StockResult, item_id, old_quantity, new_quantity)
 
 struct SearchQuery {
    std::string text;
@@ -507,21 +496,21 @@ struct SearchQuery {
    std::optional<uint32_t> max_price;
    std::vector<std::string> categories;
 };
-PSIO1_REFLECT(SearchQuery, text, max_results, min_price, max_price, categories)
+PSIO_REFLECT(SearchQuery, text, max_results, min_price, max_price, categories)
 
 struct SearchResponse {
    std::vector<Item> items;
    uint64_t          total_count;
    bool              has_more;
 };
-PSIO1_REFLECT(SearchResponse, items, total_count, has_more)
+PSIO_REFLECT(SearchResponse, items, total_count, has_more)
 
 struct BulkResult {
    uint32_t inserted;
    uint32_t failed;
    std::vector<std::string> errors;
 };
-PSIO1_REFLECT(BulkResult, inserted, failed, errors)
+PSIO_REFLECT(BulkResult, inserted, failed, errors)
 
 struct InventoryApi {
    std::optional<Item> get_item(uint32_t item_id) { return std::nullopt; }
@@ -532,18 +521,18 @@ struct InventoryApi {
    BulkResult          bulk_import(std::vector<Item> items) { return {}; }
    void                ping() {}
 };
-PSIO1_REFLECT(InventoryApi,
-   method(get_item, item_id),
-   method(list_items, category),
-   method(add_item, item),
-   method(update_stock, item_id, delta),
-   method(search, query),
-   method(bulk_import, items),
-   method(ping)
-)
+PSIO_INTERFACE(InventoryApi, types(), funcs(
+   func(get_item, item_id),
+   func(list_items, category),
+   func(add_item, item),
+   func(update_stock, item_id, delta),
+   func(search, query),
+   func(bulk_import, items),
+   func(ping)
+))
 
 TEST_CASE("generate_wit_binary — produces valid Component Model binary", "[component]") {
-   auto binary = psio1::generate_wit_binary<InventoryApi>("test:inventory@1.0.0");
+   auto binary = psio::generate_wit_binary<InventoryApi>("test:inventory@1.0.0");
 
    // Must start with Component Model header
    REQUIRE(binary.size() >= 8);
@@ -586,7 +575,7 @@ TEST_CASE("generate_wit_binary — produces valid Component Model binary", "[com
 }
 
 // ── PZAM_COMPONENT macro test ────────────────────────────────────────────────
-// We can't use PZAM_COMPONENT in a test file that already has PSIO1_REFLECT
+// We can't use PZAM_COMPONENT in a test file that already has PSIO_REFLECT
 // for the same types. So we test with a fresh type.
 
 struct Adder {
@@ -596,7 +585,7 @@ PZAM_COMPONENT(Adder, method(add, a, b))
 
 TEST_CASE("PZAM_COMPONENT — generates callable export", "[component]") {
    // The macro generated:
-   // - PSIO1_REFLECT(Adder, method(add, a, b))
+   // - PSIO_INTERFACE(Adder, types(), funcs( func(add, a, b)))
    // - static Adder _pzam_impl;
    // - extern "C" flat_val add(flat_val a0, ..., flat_val a15)
    //
@@ -608,55 +597,55 @@ TEST_CASE("PZAM_COMPONENT — generates callable export", "[component]") {
 // ── Canonical ABI compile-time layout tests ──────────────────────────────────
 
 TEST_CASE("canonical_size — scalars", "[canonical]") {
-   STATIC_REQUIRE(psio1::canonical_size_v<bool> == 1);
-   STATIC_REQUIRE(psio1::canonical_size_v<uint8_t> == 1);
-   STATIC_REQUIRE(psio1::canonical_size_v<int16_t> == 2);
-   STATIC_REQUIRE(psio1::canonical_size_v<uint32_t> == 4);
-   STATIC_REQUIRE(psio1::canonical_size_v<int32_t> == 4);
-   STATIC_REQUIRE(psio1::canonical_size_v<float> == 4);
-   STATIC_REQUIRE(psio1::canonical_size_v<uint64_t> == 8);
-   STATIC_REQUIRE(psio1::canonical_size_v<double> == 8);
+   STATIC_REQUIRE(psio::wit_abi_size_v<bool> == 1);
+   STATIC_REQUIRE(psio::wit_abi_size_v<uint8_t> == 1);
+   STATIC_REQUIRE(psio::wit_abi_size_v<int16_t> == 2);
+   STATIC_REQUIRE(psio::wit_abi_size_v<uint32_t> == 4);
+   STATIC_REQUIRE(psio::wit_abi_size_v<int32_t> == 4);
+   STATIC_REQUIRE(psio::wit_abi_size_v<float> == 4);
+   STATIC_REQUIRE(psio::wit_abi_size_v<uint64_t> == 8);
+   STATIC_REQUIRE(psio::wit_abi_size_v<double> == 8);
 }
 
 TEST_CASE("canonical_align — scalars", "[canonical]") {
-   STATIC_REQUIRE(psio1::canonical_align_v<bool> == 1);
-   STATIC_REQUIRE(psio1::canonical_align_v<uint8_t> == 1);
-   STATIC_REQUIRE(psio1::canonical_align_v<int16_t> == 2);
-   STATIC_REQUIRE(psio1::canonical_align_v<uint32_t> == 4);
-   STATIC_REQUIRE(psio1::canonical_align_v<float> == 4);
-   STATIC_REQUIRE(psio1::canonical_align_v<uint64_t> == 8);
-   STATIC_REQUIRE(psio1::canonical_align_v<double> == 8);
+   STATIC_REQUIRE(psio::wit_abi_align_v<bool> == 1);
+   STATIC_REQUIRE(psio::wit_abi_align_v<uint8_t> == 1);
+   STATIC_REQUIRE(psio::wit_abi_align_v<int16_t> == 2);
+   STATIC_REQUIRE(psio::wit_abi_align_v<uint32_t> == 4);
+   STATIC_REQUIRE(psio::wit_abi_align_v<float> == 4);
+   STATIC_REQUIRE(psio::wit_abi_align_v<uint64_t> == 8);
+   STATIC_REQUIRE(psio::wit_abi_align_v<double> == 8);
 }
 
 TEST_CASE("canonical_size — string and vector", "[canonical]") {
-   STATIC_REQUIRE(psio1::canonical_size_v<std::string> == 8);
-   STATIC_REQUIRE(psio1::canonical_size_v<std::vector<int32_t>> == 8);
-   STATIC_REQUIRE(psio1::canonical_align_v<std::string> == 4);
-   STATIC_REQUIRE(psio1::canonical_align_v<std::vector<int32_t>> == 4);
+   STATIC_REQUIRE(psio::wit_abi_size_v<std::string> == 8);
+   STATIC_REQUIRE(psio::wit_abi_size_v<std::vector<int32_t>> == 8);
+   STATIC_REQUIRE(psio::wit_abi_align_v<std::string> == 4);
+   STATIC_REQUIRE(psio::wit_abi_align_v<std::vector<int32_t>> == 4);
 }
 
 TEST_CASE("canonical_size — Point (two i32s)", "[canonical]") {
    // Point = { i32 x, i32 y } → size=8, align=4
-   STATIC_REQUIRE(psio1::canonical_size_v<Point> == 8);
-   STATIC_REQUIRE(psio1::canonical_align_v<Point> == 4);
-   STATIC_REQUIRE(psio1::canonical_field_offset_v<Point, 0> == 0);
-   STATIC_REQUIRE(psio1::canonical_field_offset_v<Point, 1> == 4);
+   STATIC_REQUIRE(psio::wit_abi_size_v<Point> == 8);
+   STATIC_REQUIRE(psio::wit_abi_align_v<Point> == 4);
+   STATIC_REQUIRE(psio::wit_abi_field_offset_v<Point, 0> == 0);
+   STATIC_REQUIRE(psio::wit_abi_field_offset_v<Point, 1> == 4);
 }
 
 TEST_CASE("canonical_size — Person (string + u32)", "[canonical]") {
    // Person = { string name (8 bytes, align 4), u32 age (4 bytes, align 4) }
    // Layout: name at 0, age at 8 → size=12, align=4
-   STATIC_REQUIRE(psio1::canonical_size_v<Person> == 12);
-   STATIC_REQUIRE(psio1::canonical_align_v<Person> == 4);
-   STATIC_REQUIRE(psio1::canonical_field_offset_v<Person, 0> == 0);
-   STATIC_REQUIRE(psio1::canonical_field_offset_v<Person, 1> == 8);
+   STATIC_REQUIRE(psio::wit_abi_size_v<Person> == 12);
+   STATIC_REQUIRE(psio::wit_abi_align_v<Person> == 4);
+   STATIC_REQUIRE(psio::wit_abi_field_offset_v<Person, 0> == 0);
+   STATIC_REQUIRE(psio::wit_abi_field_offset_v<Person, 1> == 8);
 }
 
 TEST_CASE("canonical_flat_count — various types", "[canonical]") {
-   STATIC_REQUIRE(psio1::canonical_flat_count_v<int32_t> == 1);
-   STATIC_REQUIRE(psio1::canonical_flat_count_v<std::string> == 2);
-   STATIC_REQUIRE(psio1::canonical_flat_count_v<Point> == 2);       // x + y
-   STATIC_REQUIRE(psio1::canonical_flat_count_v<Person> == 3);      // name(2) + age(1)
+   STATIC_REQUIRE(psio::wit_abi_flat_count_v<int32_t> == 1);
+   STATIC_REQUIRE(psio::wit_abi_flat_count_v<std::string> == 2);
+   STATIC_REQUIRE(psio::wit_abi_flat_count_v<Point> == 2);       // x + y
+   STATIC_REQUIRE(psio::wit_abi_flat_count_v<Person> == 3);      // name(2) + age(1)
 }
 
 // ── Lower/lift round-trip tests ──────────────────────────────────────────────
@@ -753,18 +742,18 @@ TEST_CASE("lower/lift round-trip — optional nullopt", "[canonical]") {
 TEST_CASE("canonical_validate — valid buffer", "[canonical]") {
    psizam::buffer_lower_policy lp;
    Person p{"Eve", 28};
-   psio1::canonical_lower_fields(p, lp, lp.alloc(psio1::canonical_align_v<Person>, psio1::canonical_size_v<Person>));
+   psio::wit_abi_lower_fields(p, lp, lp.alloc(psio::wit_abi_align_v<Person>, psio::wit_abi_size_v<Person>));
 
-   CHECK(psio1::canonical_validate<Person>(lp.buf.data(), lp.buf.size(), 0));
+   CHECK(psio::wit_abi_validate<Person>(lp.buf.data(), lp.buf.size(), 0));
 }
 
 TEST_CASE("canonical_validate — truncated buffer fails", "[canonical]") {
    psizam::buffer_lower_policy lp;
    Person p{"Eve", 28};
-   psio1::canonical_lower_fields(p, lp, lp.alloc(psio1::canonical_align_v<Person>, psio1::canonical_size_v<Person>));
+   psio::wit_abi_lower_fields(p, lp, lp.alloc(psio::wit_abi_align_v<Person>, psio::wit_abi_size_v<Person>));
 
    // Truncate the buffer
-   CHECK_FALSE(psio1::canonical_validate<Person>(lp.buf.data(), 4, 0));
+   CHECK_FALSE(psio::wit_abi_validate<Person>(lp.buf.data(), 4, 0));
 }
 
 // ── Rebase tests ─────────────────────────────────────────────────────────────
@@ -773,15 +762,15 @@ TEST_CASE("canonical_rebase — shift pointers", "[canonical]") {
    // Lower at base 0
    psizam::buffer_lower_policy lp;
    Person p{"Frank", 35};
-   uint32_t record_offset = lp.alloc(psio1::canonical_align_v<Person>, psio1::canonical_size_v<Person>);
-   psio1::canonical_lower_fields(p, lp, record_offset);
+   uint32_t record_offset = lp.alloc(psio::wit_abi_align_v<Person>, psio::wit_abi_size_v<Person>);
+   psio::wit_abi_lower_fields(p, lp, record_offset);
 
    // Validate at base 0
-   CHECK(psio1::canonical_validate<Person>(lp.buf.data(), lp.buf.size(), 0));
+   CHECK(psio::wit_abi_validate<Person>(lp.buf.data(), lp.buf.size(), 0));
 
    // Rebase by delta=1000
    int32_t delta = 1000;
-   psio1::canonical_rebase<Person>(lp.buf.data(), 0, delta);
+   psio::wit_abi_rebase<Person>(lp.buf.data(), 0, delta);
 
    // Simulate placing into a larger buffer at offset 1000
    std::vector<uint8_t> guest_mem(2000, 0);
@@ -789,7 +778,7 @@ TEST_CASE("canonical_rebase — shift pointers", "[canonical]") {
 
    // Lift from the rebased position
    psizam::buffer_lift_policy rp(guest_mem.data(), guest_mem.size(), nullptr);
-   auto result = psio1::canonical_lift_fields<Person>(rp, static_cast<uint32_t>(delta));
+   auto result = psio::wit_abi_lift_fields<Person>(rp, static_cast<uint32_t>(delta));
    CHECK(result.name == "Frank");
    CHECK(result.age == 35);
 }
@@ -798,8 +787,8 @@ TEST_CASE("lower with base offset — pre-rebased", "[canonical]") {
    // Lower with base=500, pointers already correct for that offset
    psizam::buffer_lower_policy lp(500);
    Person p{"Grace", 42};
-   uint32_t record_offset = lp.alloc(psio1::canonical_align_v<Person>, psio1::canonical_size_v<Person>);
-   psio1::canonical_lower_fields(p, lp, record_offset);
+   uint32_t record_offset = lp.alloc(psio::wit_abi_align_v<Person>, psio::wit_abi_size_v<Person>);
+   psio::wit_abi_lower_fields(p, lp, record_offset);
 
    // Place into guest memory at offset 500
    std::vector<uint8_t> guest_mem(1000, 0);
@@ -807,7 +796,54 @@ TEST_CASE("lower with base offset — pre-rebased", "[canonical]") {
 
    // Lift from offset 500 — pointers should be correct
    psizam::buffer_lift_policy rp(guest_mem.data(), guest_mem.size(), nullptr);
-   auto result = psio1::canonical_lift_fields<Person>(rp, 500);
+   auto result = psio::wit_abi_lift_fields<Person>(rp, 500);
    CHECK(result.name == "Grace");
    CHECK(result.age == 42);
+}
+
+// Real drop hooks expose accidental copies or premature destruction hidden by
+// the default unbound resource hook.
+struct PortResource : psio::wit_resource {};
+static unsigned port_resource_drops = 0;
+namespace psio {
+template <> inline void wit_resource_drop<PortResource>(uint32_t) { ++port_resource_drops; }
+}
+struct PortResourceService {
+   psio::own<PortResource> create() { return psio::own<PortResource>{42}; }
+   uint32_t consume(psio::own<PortResource> value) { return value.handle; }
+};
+TEST_CASE("Component resource handoff preserves a single owner", "[component][ownership]") {
+   port_resource_drops = 0;
+   PortResourceService service;
+   psizam::flat_val slots[16] = {};
+   auto handle = psizam::ComponentProxy<PortResourceService>::call_with_memory<
+      &PortResourceService::create>(&service, slots, nullptr);
+   CHECK(handle == 42);
+   CHECK(port_resource_drops == 0);
+   slots[0] = handle;
+   CHECK(psizam::ComponentProxy<PortResourceService>::call_with_memory<
+      &PortResourceService::consume>(&service, slots, nullptr) == 42);
+   CHECK(port_resource_drops == 1);
+   {
+      psio::own<PortResource> resource{43};
+      size_t count = 0;
+      psizam::guest_import_lower(slots, count, resource);
+      CHECK(count == 1);
+      CHECK(slots[0] == 43);
+      CHECK(resource.handle == psio::own<PortResource>::null_handle);
+   }
+   CHECK(port_resource_drops == 1);
+   // Receiver owns the imported handle.
+   { psio::own<PortResource> receiver{43}; }
+   CHECK(port_resource_drops == 2);
+}
+
+struct ReferenceService {
+   int32_t bump(Point& point) { return ++point.x; }
+};
+TEST_CASE("Component dispatch retains declared C++ reference parameters", "[component]") {
+   ReferenceService service;
+   psizam::flat_val slots[16] = {41, 0};
+   CHECK(psizam::ComponentProxy<ReferenceService>::call_with_memory<&ReferenceService::bump>(
+      &service, slots, nullptr) == 42);
 }

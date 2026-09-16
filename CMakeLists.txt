@@ -96,9 +96,9 @@ target_compile_options(psizam INTERFACE
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
-   target_link_libraries(psizam INTERFACE psio psio1)
+   target_link_libraries(psizam INTERFACE psio)
 else()
-   target_link_libraries(psizam INTERFACE Threads::Threads psio psio1)
+   target_link_libraries(psizam INTERFACE Threads::Threads psio)
 endif()
 
 # ucc::typed_int is vendored independently of the database.
@@ -291,7 +291,7 @@ if(PSIZAM_ENABLE_INSTALL)
    include(GNUInstallDirs)
    include(CMakePackageConfigHelpers)
    set(_psizam_export_targets psizam psizam-jit1-x86 psizam-jit1-arm
-      psizam-jit2-x86 psizam-jit2-arm psio1 wasi-cpp)
+      psizam-jit2-x86 psizam-jit2-arm wasi-cpp)
    foreach(_target psizam-exec psizam-debug softfloat)
       if(TARGET ${_target})
          list(APPEND _psizam_export_targets ${_target})
@@ -313,8 +313,7 @@ if(PSIZAM_ENABLE_INSTALL)
          DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/psizam)
    endif()
    install(DIRECTORY include/psizam DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-   install(DIRECTORY external/psio1/include/psio1
-      external/psio1/rapidjson/include/rapidjson external/ucc/include/ucc
+   install(DIRECTORY external/ucc/include/ucc
       external/wasi/include/wasi DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
    install(DIRECTORY external/softfloat/source/include/
       DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/psizam/external/softfloat)

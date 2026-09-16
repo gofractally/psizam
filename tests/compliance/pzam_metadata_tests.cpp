@@ -285,13 +285,13 @@ TEST_CASE("pzam_metadata: extract round-trip preserves derived counts", "[pzam_m
    CHECK(meta.start_function == 1);
 }
 
-TEST_CASE("pzam_metadata: full round-trip extract→fracpack→restore", "[pzam_metadata]") {
+TEST_CASE("pzam_metadata: full round-trip extract→pSSZ→restore", "[pzam_metadata]") {
    auto mod = make_test_module();
    auto meta = extract_metadata(mod);
 
-   // Serialize to fracpack and back
-   auto bytes = psio1::convert_to_frac(meta);
-   auto restored_meta = psio1::from_frac<pzam_module_metadata>(bytes);
+   // Serialize to pSSZ and back
+   auto bytes = psio::encode(psio::pssz{}, meta);
+   auto restored_meta = psio::decode<pzam_module_metadata>(psio::pssz{}, bytes);
 
    // Restore to module
    auto restored = restore_module(restored_meta);
@@ -530,7 +530,7 @@ TEST_CASE("pzam_metadata: full pzam_file with metadata round-trip", "[pzam_metad
    CHECK(loaded.magic == PZAM_MAGIC);
    CHECK(loaded.format_version == PZAM_VERSION);
 
-   // Verify metadata survived fracpack
+   // Verify metadata survived pSSZ
    REQUIRE(loaded.metadata.types.size() == 3);
    CHECK(loaded.metadata.imports.size() == 4);
    CHECK(loaded.metadata.exports.size() == 2);

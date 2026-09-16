@@ -49,7 +49,7 @@ struct RuntimeHost
    int           log_string_calls  = 0;
 };
 
-PSIO1_HOST_MODULE(RuntimeHost, interface(env, log_u64, log_string))
+PSIO_HOST_MODULE(RuntimeHost, interface(env, log_u64, log_string))
 
 // ── WASM loading helper ─────────────────────────────────────────────────────
 
@@ -90,8 +90,7 @@ struct tier_jit_llvm
 
 // jit2 is supported on both x86_64 and aarch64 (per backend.hpp
 // gating — `struct jit2` is defined under `__x86_64__ || __aarch64__`).
-// composition_tests.cpp's aarch64 exclusion predates jit2's aarch64
-// support; runtime tests exercise all four backends.
+// Both composition and runtime tests exercise all four backends.
 #if defined(PSIZAM_ENABLE_LLVM_BACKEND) && (defined(__x86_64__) || defined(__aarch64__))
   #define PARITY_TEST_CASE(name, tags) \
     TEMPLATE_TEST_CASE(name, tags, tier_interpret, tier_jit1, tier_jit2, tier_jit_llvm)
@@ -128,7 +127,7 @@ struct live_runtime
       policy.initial = Tier::value;
 
       // Prepare + provide both sides. provide<>() walks
-      // PSIO1_HOST_MODULE(RuntimeHost, ...) and registers env::log_u64 /
+      // PSIO_HOST_MODULE(RuntimeHost, ...) and registers env::log_u64 /
       // env::log_string on each module's host function table.
       provider_mod = rt.prepare(psizam::wasm_bytes{provider_bytes}, policy);
       consumer_mod = rt.prepare(psizam::wasm_bytes{consumer_bytes}, policy);

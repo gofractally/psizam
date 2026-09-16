@@ -1,6 +1,6 @@
 #pragma once
 
-// psio/guest_alloc.hpp — provides `cabi_realloc` for a WASM guest using
+// psizam/guest_alloc.hpp — provides `cabi_realloc` for a WASM guest using
 // a minimal bump allocator seeded at `__heap_base`. The canonical ABI
 // gives the callee ownership of every allocation the host lowers into
 // the guest's memory; this implementation satisfies the export without

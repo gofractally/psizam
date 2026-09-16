@@ -43,7 +43,7 @@ struct CompHost
    int           log_string_calls = 0;
 };
 
-PSIO1_HOST_MODULE(CompHost, interface(env, log_u64, log_string))
+PSIO_HOST_MODULE(CompHost, interface(env, log_u64, log_string))
 
 // ── WASM loading helper ─────────────────────────────────────────────────────
 
@@ -74,15 +74,15 @@ static std::vector<std::uint8_t> read_wasm(const char* path)
 //      asserts arg count == WASM param count.
 // All backends should now work — the host_function_table constructor
 // in backend.hpp builds trampoline arrays for JIT1/JIT2.
-// jit2 is x86_64-only.
+// Exercise JIT2 on both native code-generation architectures.
 
-#if defined(PSIZAM_ENABLE_LLVM_BACKEND) && defined(__x86_64__)
+#if defined(PSIZAM_ENABLE_LLVM_BACKEND) && (defined(__x86_64__) || defined(__aarch64__))
   #define COMP_TEST_CASE(name, tags) \
     TEMPLATE_TEST_CASE(name, tags, psizam::interpreter, psizam::jit, psizam::jit2, psizam::jit_llvm)
 #elif defined(PSIZAM_ENABLE_LLVM_BACKEND)
   #define COMP_TEST_CASE(name, tags) \
     TEMPLATE_TEST_CASE(name, tags, psizam::interpreter, psizam::jit, psizam::jit_llvm)
-#elif defined(__x86_64__)
+#elif defined(__x86_64__) || defined(__aarch64__)
   #define COMP_TEST_CASE(name, tags) \
     TEMPLATE_TEST_CASE(name, tags, psizam::interpreter, psizam::jit, psizam::jit2)
 #else

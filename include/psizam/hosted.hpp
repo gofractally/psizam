@@ -9,14 +9,14 @@
 //   struct greeter { static void run(std::uint64_t); };
 //
 //   struct Host { void log_u64(std::uint64_t); };
-//   PSIO1_HOST_MODULE(Host, interface(env, log_u64))
+//   PSIO_HOST_MODULE(Host, interface(env, log_u64))
 //
 //   Host host;
 //   psizam::hosted<Host, psizam::interpreter> vm{wasm_bytes, host};
 //   vm.as<greeter>().run(5);
 //
 // What it does:
-//   • Constructor walks psio1::detail::impl_info<Impl>::interfaces and
+//   • Constructor walks psio::detail::impl_info<Impl>::interfaces and
 //     registers every (member pointer, name) pair with
 //     `registered_host_functions::add<MemberPtr>` under the WASM module
 //     name matching the interface's reflected name.
@@ -30,8 +30,8 @@
 #include <psizam/detail/instance_be.hpp>
 #include <psizam/host_function.hpp>
 
-#include <psio1/structural.hpp>
-#include <psio1/wit_owned.hpp>
+#include <psio/structural.hpp>
+#include <psio/wit_owned.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -59,7 +59,7 @@ constexpr bool is_scalar_wasm_type_v = [] {
       return sizeof(U) <= 8;
    else if constexpr (std::is_same_v<U, float> || std::is_same_v<U, double>)
       return true;
-   else if constexpr (psio1::detail::is_own_ct<U>::value || psio1::detail::is_borrow_ct<U>::value)
+   else if constexpr (psio::detail::is_own_ct<U>::value || psio::detail::is_borrow_ct<U>::value)
       return false;
    else if constexpr (wasm_type_traits<U>::is_wasm_type)
       return true;
@@ -100,11 +100,11 @@ inline uint32_t host_cabi_realloc(uint32_t align, uint32_t size) {
 // slots[] is pre-filled by the caller; mem_base is linear memory.
 struct host_lift_policy
 {
-   const ::psio1::native_value* slots;
+   const ::psio::native_value* slots;
    size_t idx = 0;
    const uint8_t* mem_base;
 
-   host_lift_policy(const ::psio1::native_value* s, const uint8_t* m) : slots(s), mem_base(m) {}
+   host_lift_policy(const ::psio::native_value* s, const uint8_t* m) : slots(s), mem_base(m) {}
 
    uint32_t next_i32() { return slots[idx++].i32; }
    uint64_t next_i64() { return slots[idx++].i64; }
@@ -126,7 +126,7 @@ struct host_lift_policy
 // from the operand stack, lifts them into C++ types via canonical ABI,
 // calls the real host method, lowers the return, and pushes the result.
 template <auto MemPtr, typename Policy, typename... Args>
-auto lift_canonical_args(Policy& p, ::psio1::TypeList<Args...>)
+auto lift_canonical_args(Policy& p, ::psio::TypeList<Args...>)
 {
    return std::make_tuple(psizam::canonical_lift_flat<std::remove_cvref_t<Args>>(p)...);
 }
@@ -139,7 +139,7 @@ auto make_canonical_host_handler()
       using ReturnType = typename MType::ReturnType;
 
       // Read 16 i64 values from operand stack
-      ::psio1::native_value slots[16];
+      ::psio::native_value slots[16];
       for (int i = 0; i < 16; ++i)
          slots[i].i64 = tc.get_interface()
                             .operand_from_back(15 - i)
@@ -156,7 +156,7 @@ auto make_canonical_host_handler()
       // Extract arg types from the member pointer
       auto args = [&]<typename H, typename R, typename... As>(R (H::*)(As...)) {
          return lift_canonical_args<MemPtr>(
-            lift, ::psio1::TypeList<std::remove_cvref_t<As>...>{});
+            lift, ::psio::TypeList<std::remove_cvref_t<As>...>{});
       }(MemPtr);
 
       // Trim operand stack (pop the 16 args)
@@ -188,14 +188,18 @@ auto make_canonical_host_handler()
                rv = cvt.u;
             }
          }
+         else if constexpr (psio::detail::is_own_ct<U>::value)
+            rv = result.release();
+         else if constexpr (psio::detail::is_borrow_ct<U>::value)
+            rv = result.handle;
          else if constexpr (std::is_same_v<U, std::string> ||
                             std::is_same_v<U, std::string_view> ||
-                            std::is_same_v<U, psio1::owned<std::string, psio1::wit>>) {
+                            std::is_same_v<U, psio::owned<std::string, psio::wit>>) {
             // String return: allocate in guest memory via cabi_realloc,
             // copy the string data, write {ptr, len} into a return area,
             // return the pointer to the return area.
             std::string_view sv;
-            if constexpr (std::is_same_v<U, psio1::owned<std::string, psio1::wit>>)
+            if constexpr (std::is_same_v<U, psio::owned<std::string, psio::wit>>)
                sv = result.view();
             else
                sv = result;
@@ -223,12 +227,12 @@ auto make_canonical_host_handler()
 
             rv = static_cast<uint64_t>(retptr);
          }
-         else if constexpr (psio1::Reflected<U> ||
-                            psio1::is_std_variant_v<U> ||
-                            psio1::detail::is_std_vector_ct<U>::value ||
-                            psio1::detail::is_std_optional_ct<U>::value ||
-                            psio1::detail::is_std_expected_ct<U>::value ||
-                            psio1::is_std_tuple<U>::value) {
+         else if constexpr (psio::Reflected<U> ||
+                            psio::detail::is_std_variant_v<U> ||
+                            psio::detail::is_std_vector_ct<U>::value ||
+                            psio::detail::is_std_optional_ct<U>::value ||
+                            psio::detail::is_std_expected_ct<U>::value ||
+                            psio::detail::is_std_tuple<U>::value) {
             uint32_t retptr = static_cast<uint32_t>(slots[lift.idx].i64);
 
             struct guest_store {
@@ -249,7 +253,7 @@ auto make_canonical_host_handler()
                }
             };
             guest_store sp{&tc};
-            psio1::canonical_lower_fields(result, sp, retptr);
+            psio::wit_abi_lower_fields(result, sp, retptr);
             rv = static_cast<uint64_t>(retptr);
          }
 
@@ -308,7 +312,7 @@ template <typename Rhf, typename IfaceImpl>
 inline void register_one_interface()
 {
    using iface_tag  = typename IfaceImpl::tag;
-   using iface_info = ::psio1::detail::interface_info<iface_tag>;
+   using iface_info = ::psio::detail::interface_info<iface_tag>;
    constexpr auto n =
        std::tuple_size_v<std::remove_cvref_t<decltype(IfaceImpl::methods)>>;
    register_iface_methods<Rhf, IfaceImpl>(
@@ -319,9 +323,9 @@ inline void register_one_interface()
 template <typename Rhf, typename Impl>
 inline void register_all_impls()
 {
-   if constexpr (requires { typename ::psio1::detail::impl_info<Impl>::interfaces; })
+   if constexpr (requires { typename ::psio::detail::impl_info<Impl>::interfaces; })
    {
-      using interfaces = typename ::psio1::detail::impl_info<Impl>::interfaces;
+      using interfaces = typename ::psio::detail::impl_info<Impl>::interfaces;
       [&]<typename... IfaceImpls>(std::tuple<IfaceImpls...>*) {
          (register_one_interface<Rhf, IfaceImpls>(), ...);
       }(static_cast<interfaces*>(nullptr));
@@ -331,7 +335,7 @@ inline void register_all_impls()
 // ── Fn trait for free-function pointers ──────────────────────────────
 // PSIO anchors declare methods as `static R method(Args...)`, so
 // `decltype(&Tag::method)` is `R (*)(Args...)` — not covered by
-// psio1::MemberPtrType's member-pointer specializations. We extract R
+// psio::MemberPtrType's member-pointer specializations. We extract R
 // and Args locally from that free-pointer type.
 template <typename F>
 struct free_fn_traits;
@@ -340,7 +344,7 @@ template <typename R, typename... Args>
 struct free_fn_traits<R (*)(Args...)>
 {
    using ReturnType = R;
-   using ArgTypes   = ::psio1::TypeList<std::remove_cvref_t<Args>...>;
+   using ArgTypes   = ::psio::TypeList<std::remove_cvref_t<Args>...>;
 };
 
 // ── host_lower_policy ────────────────────────────────────────────────
@@ -353,7 +357,7 @@ struct host_lower_policy
 {
    Backend* be;
    Host*    host;
-   std::vector<::psio1::native_value> flat_values;
+   std::vector<::psio::native_value> flat_values;
 
    host_lower_policy(Backend& b, Host& h) : be(&b), host(&h) {}
 
@@ -379,10 +383,10 @@ struct host_lower_policy
       if (len > 0) std::memcpy(linear_memory() + off, data, len);
    }
 
-   void emit_i32(uint32_t v) { ::psio1::native_value nv; nv.i64 = 0; nv.i32 = v; flat_values.push_back(nv); }
-   void emit_i64(uint64_t v) { ::psio1::native_value nv; nv.i64 = v;              flat_values.push_back(nv); }
-   void emit_f32(float v)    { ::psio1::native_value nv; nv.i64 = 0; nv.f32 = v; flat_values.push_back(nv); }
-   void emit_f64(double v)   { ::psio1::native_value nv; nv.i64 = 0; nv.f64 = v; flat_values.push_back(nv); }
+   void emit_i32(uint32_t v) { ::psio::native_value nv; nv.i64 = 0; nv.i32 = v; flat_values.push_back(nv); }
+   void emit_i64(uint64_t v) { ::psio::native_value nv; nv.i64 = v;              flat_values.push_back(nv); }
+   void emit_f32(float v)    { ::psio::native_value nv; nv.i64 = 0; nv.f32 = v; flat_values.push_back(nv); }
+   void emit_f64(double v)   { ::psio::native_value nv; nv.i64 = 0; nv.f64 = v; flat_values.push_back(nv); }
 };
 
 // ── canonical_result — deferred copy/view proxy ─────────────────────
@@ -399,7 +403,7 @@ template <typename WireType>
 struct canonical_result;
 
 template <>
-struct canonical_result<psio1::owned<std::string, psio1::wit>>
+struct canonical_result<psio::owned<std::string, psio::wit>>
 {
    uint32_t       ptr;
    uint32_t       len;
@@ -413,14 +417,14 @@ struct canonical_result<psio1::owned<std::string, psio1::wit>>
    bool        empty() const noexcept { return len == 0; }
 
    operator std::string_view() const noexcept { return view(); }
-   operator psio1::owned<std::string, psio1::wit>() const {
-      return psio1::owned<std::string, psio1::wit>{view()};
+   operator psio::owned<std::string, psio::wit>() const {
+      return psio::owned<std::string, psio::wit>{view()};
    }
    operator std::string() const { return std::string{view()}; }
 };
 
 template <typename E>
-struct canonical_result<psio1::owned<std::vector<E>, psio1::wit>>
+struct canonical_result<psio::owned<std::vector<E>, psio::wit>>
 {
    uint32_t       ptr;
    uint32_t       len;
@@ -437,8 +441,8 @@ struct canonical_result<psio1::owned<std::vector<E>, psio1::wit>>
    const E* end() const noexcept { return data() + len; }
 
    operator std::span<const E>() const noexcept { return view(); }
-   operator psio1::owned<std::vector<E>, psio1::wit>() const {
-      return psio1::owned<std::vector<E>, psio1::wit>{view()};
+   operator psio::owned<std::vector<E>, psio::wit>() const {
+      return psio::owned<std::vector<E>, psio::wit>{view()};
    }
    operator std::vector<E>() const {
       auto v = view();
@@ -452,22 +456,22 @@ struct canonical_result<psio1::owned<std::vector<E>, psio1::wit>>
 // X's linear memory into Y's linear memory via cabi_realloc. No
 // host-heap intermediate.
 template <LowerPolicy Policy>
-void canonical_lower_flat(const canonical_result<psio1::owned<std::string, psio1::wit>>& value, Policy& p)
+void canonical_lower_flat(const canonical_result<psio::owned<std::string, psio::wit>>& value, Policy& p)
 {
    canonical_lower_flat(value.view(), p);
 }
 
 template <typename E, LowerPolicy Policy>
-void canonical_lower_flat(const canonical_result<psio1::owned<std::vector<E>, psio1::wit>>& value, Policy& p)
+void canonical_lower_flat(const canonical_result<psio::owned<std::vector<E>, psio::wit>>& value, Policy& p)
 {
    // Lower as std::vector-style: alloc array in target, copy elements
-   using namespace psio1::detail;
-   constexpr uint32_t es = psio1::canonical_size_v<E>;
-   constexpr uint32_t ea = psio1::canonical_align_v<E>;
+   using namespace psio::detail;
+   constexpr uint32_t es = psio::wit_abi_size_v<E>;
+   constexpr uint32_t ea = psio::wit_abi_align_v<E>;
    uint32_t count = static_cast<uint32_t>(value.size());
    uint32_t arr = p.alloc(ea, count * es);
    for (uint32_t i = 0; i < count; i++)
-      psio1::detail_canonical::store_field(value[i], p, arr + i * es);
+      psio::detail_wit_abi::store_field(value[i], p, arr + i * es);
    p.emit_i32(arr);
    p.emit_i32(count);
 }
@@ -482,7 +486,7 @@ auto invoke_canonical_export(Backend& be, Host& host, std::string_view name, Arg
    host_lower_policy<Backend, Host> lp{be, host};
    (canonical_lower_flat(args, lp), ...);
 
-   // PSIO1_MODULE thunks are always declared `(flat_val, ..., flat_val)`
+   // PSIO_MODULE thunks are always declared `(flat_val, ..., flat_val)`
    // with 16 slots — the `flat_val` envelope is i64. So we read each
    // lowered slot as i64 (emit_i32/emit_f32 left the high 32 bits zero)
    // and pad the tail with zeros to reach the required 16-wide sig.
@@ -499,14 +503,14 @@ auto invoke_canonical_export(Backend& be, Host& host, std::string_view name, Arg
 
    if constexpr (std::is_void_v<Ret>) {
       return;
-   } else if constexpr (std::is_same_v<std::remove_cvref_t<Ret>, psio1::owned<std::string, psio1::wit>>) {
+   } else if constexpr (std::is_same_v<std::remove_cvref_t<Ret>, psio::owned<std::string, psio::wit>>) {
       // Return a deferred-conversion proxy — caller decides copy vs view.
       uint32_t ret_ptr = r ? r->to_ui32() : 0;
       const uint8_t* mem = reinterpret_cast<const uint8_t*>(be.get_context().linear_memory());
       uint32_t s_ptr, s_len;
       std::memcpy(&s_ptr, mem + ret_ptr, 4);
       std::memcpy(&s_len, mem + ret_ptr + 4, 4);
-      return canonical_result<psio1::owned<std::string, psio1::wit>>{s_ptr, s_len, mem};
+      return canonical_result<psio::owned<std::string, psio::wit>>{s_ptr, s_len, mem};
    } else if constexpr (detail_dispatch::is_wit_vector<std::remove_cvref_t<Ret>>::value) {
       using E = typename detail_dispatch::is_wit_vector<std::remove_cvref_t<Ret>>::element_type;
       uint32_t ret_ptr = r ? r->to_ui32() : 0;
@@ -514,14 +518,14 @@ auto invoke_canonical_export(Backend& be, Host& host, std::string_view name, Arg
       uint32_t e_ptr, e_len;
       std::memcpy(&e_ptr, mem + ret_ptr, 4);
       std::memcpy(&e_len, mem + ret_ptr + 4, 4);
-      return canonical_result<psio1::owned<std::vector<E>, psio1::wit>>{e_ptr, e_len, mem};
+      return canonical_result<psio::owned<std::vector<E>, psio::wit>>{e_ptr, e_len, mem};
    } else {
       using U = std::remove_cvref_t<Ret>;
       constexpr size_t rflat = psizam::flat_count_v<U>;
       host_lift_policy lift{nullptr, reinterpret_cast<const uint8_t*>(be.get_context().linear_memory())};
-      if constexpr (rflat <= psio1::MAX_FLAT_RESULTS) {
+      if constexpr (rflat <= psio::MAX_FLAT_RESULTS) {
          // Single-slot flat return — scalar.
-         ::psio1::native_value slot;
+         ::psio::native_value slot;
          slot.i64 = 0;
          if (r) slot.i64 = r->to_ui64();
          host_lift_policy s_lift{&slot, reinterpret_cast<const uint8_t*>(be.get_context().linear_memory())};
@@ -531,7 +535,7 @@ auto invoke_canonical_export(Backend& be, Host& host, std::string_view name, Arg
          // return area in linear memory; read the record from there via
          // psio's canonical_lift_fields.
          uint32_t ret_ptr = r ? r->to_ui32() : 0;
-         return psio1::canonical_lift_fields<U>(lift, ret_ptr);
+         return psio::wit_abi_lift_fields<U>(lift, ret_ptr);
       }
    }
 }
@@ -550,7 +554,7 @@ struct proxy_adapter
 
    // Fn is the pointer-to-function TYPE of the interface method
    // (decltype(&Tag::method), which for a static method resolves to a
-   // free-function pointer). PSIO1_MODULE thunks are always 16-wide
+   // free-function pointer). PSIO_MODULE thunks are always 16-wide
    // flat_val signatures regardless of the logical param types, so every
    // call routes through the canonical-ABI lower/lift path — scalars
    // just lower to a single i32/i64/f32/f64 slot with the tail zero-
@@ -599,7 +603,7 @@ struct void_host_lower_policy
 {
    Backend* be;
    void*    host;
-   std::vector<::psio1::native_value> flat_values;
+   std::vector<::psio::native_value> flat_values;
 
    void_host_lower_policy(Backend& b, void* h) : be(&b), host(h) {}
 
@@ -625,10 +629,10 @@ struct void_host_lower_policy
       if (len > 0) std::memcpy(linear_memory() + off, data, len);
    }
 
-   void emit_i32(uint32_t v) { ::psio1::native_value nv; nv.i64 = 0; nv.i32 = v; flat_values.push_back(nv); }
-   void emit_i64(uint64_t v) { ::psio1::native_value nv; nv.i64 = v;              flat_values.push_back(nv); }
-   void emit_f32(float v)    { ::psio1::native_value nv; nv.i64 = 0; nv.f32 = v; flat_values.push_back(nv); }
-   void emit_f64(double v)   { ::psio1::native_value nv; nv.i64 = 0; nv.f64 = v; flat_values.push_back(nv); }
+   void emit_i32(uint32_t v) { ::psio::native_value nv; nv.i64 = 0; nv.i32 = v; flat_values.push_back(nv); }
+   void emit_i64(uint64_t v) { ::psio::native_value nv; nv.i64 = v;              flat_values.push_back(nv); }
+   void emit_f32(float v)    { ::psio::native_value nv; nv.i64 = 0; nv.f32 = v; flat_values.push_back(nv); }
+   void emit_f64(double v)   { ::psio::native_value nv; nv.i64 = 0; nv.f64 = v; flat_values.push_back(nv); }
 };
 
 template <typename Ret, typename Backend, typename... Args>
@@ -650,13 +654,13 @@ auto invoke_canonical_export_void(Backend& be, void* host, std::string_view name
 
    if constexpr (std::is_void_v<Ret>) {
       return;
-   } else if constexpr (std::is_same_v<std::remove_cvref_t<Ret>, psio1::owned<std::string, psio1::wit>>) {
+   } else if constexpr (std::is_same_v<std::remove_cvref_t<Ret>, psio::owned<std::string, psio::wit>>) {
       uint32_t ret_ptr = r ? r->to_ui32() : 0;
       const uint8_t* mem = reinterpret_cast<const uint8_t*>(be.get_context().linear_memory());
       uint32_t s_ptr, s_len;
       std::memcpy(&s_ptr, mem + ret_ptr, 4);
       std::memcpy(&s_len, mem + ret_ptr + 4, 4);
-      return canonical_result<psio1::owned<std::string, psio1::wit>>{s_ptr, s_len, mem};
+      return canonical_result<psio::owned<std::string, psio::wit>>{s_ptr, s_len, mem};
    } else if constexpr (detail_dispatch::is_wit_vector<std::remove_cvref_t<Ret>>::value) {
       using E = typename detail_dispatch::is_wit_vector<std::remove_cvref_t<Ret>>::element_type;
       uint32_t ret_ptr = r ? r->to_ui32() : 0;
@@ -664,20 +668,20 @@ auto invoke_canonical_export_void(Backend& be, void* host, std::string_view name
       uint32_t e_ptr, e_len;
       std::memcpy(&e_ptr, mem + ret_ptr, 4);
       std::memcpy(&e_len, mem + ret_ptr + 4, 4);
-      return canonical_result<psio1::owned<std::vector<E>, psio1::wit>>{e_ptr, e_len, mem};
+      return canonical_result<psio::owned<std::vector<E>, psio::wit>>{e_ptr, e_len, mem};
    } else {
       using U = std::remove_cvref_t<Ret>;
       constexpr size_t rflat = psizam::flat_count_v<U>;
       host_lift_policy lift{nullptr, reinterpret_cast<const uint8_t*>(be.get_context().linear_memory())};
-      if constexpr (rflat <= psio1::MAX_FLAT_RESULTS) {
-         ::psio1::native_value slot;
+      if constexpr (rflat <= psio::MAX_FLAT_RESULTS) {
+         ::psio::native_value slot;
          slot.i64 = 0;
          if (r) slot.i64 = r->to_ui64();
          host_lift_policy s_lift{&slot, reinterpret_cast<const uint8_t*>(be.get_context().linear_memory())};
          return canonical_lift_flat<U>(s_lift);
       } else {
          uint32_t ret_ptr = r ? r->to_ui32() : 0;
-         return psio1::canonical_lift_fields<U>(lift, ret_ptr);
+         return psio::wit_abi_lift_fields<U>(lift, ret_ptr);
       }
    }
 }
@@ -699,7 +703,7 @@ struct void_host_lower_policy_erased
    // Cached cabi_realloc index on `be` — resolved lazily on first
    // alloc(), reused for subsequent allocs within the same call.
    uint32_t     realloc_idx = std::numeric_limits<uint32_t>::max();
-   std::vector<::psio1::native_value> flat_values;
+   std::vector<::psio::native_value> flat_values;
 
    void_host_lower_policy_erased(instance_be& b, void* h) : be(&b), host(h) {}
 
@@ -724,10 +728,10 @@ struct void_host_lower_policy_erased
       if (len > 0) std::memcpy(linear_memory() + off, data, len);
    }
 
-   void emit_i32(uint32_t v) { ::psio1::native_value nv; nv.i64 = 0; nv.i32 = v; flat_values.push_back(nv); }
-   void emit_i64(uint64_t v) { ::psio1::native_value nv; nv.i64 = v;              flat_values.push_back(nv); }
-   void emit_f32(float v)    { ::psio1::native_value nv; nv.i64 = 0; nv.f32 = v; flat_values.push_back(nv); }
-   void emit_f64(double v)   { ::psio1::native_value nv; nv.i64 = 0; nv.f64 = v; flat_values.push_back(nv); }
+   void emit_i32(uint32_t v) { ::psio::native_value nv; nv.i64 = 0; nv.i32 = v; flat_values.push_back(nv); }
+   void emit_i64(uint64_t v) { ::psio::native_value nv; nv.i64 = v;              flat_values.push_back(nv); }
+   void emit_f32(float v)    { ::psio::native_value nv; nv.i64 = 0; nv.f32 = v; flat_values.push_back(nv); }
+   void emit_f64(double v)   { ::psio::native_value nv; nv.i64 = 0; nv.f64 = v; flat_values.push_back(nv); }
 };
 
 template <typename Ret, typename... Args>
@@ -751,13 +755,13 @@ auto invoke_canonical_export_void_erased(instance_be& be, void* host,
 
    if constexpr (std::is_void_v<Ret>) {
       return;
-   } else if constexpr (std::is_same_v<std::remove_cvref_t<Ret>, psio1::owned<std::string, psio1::wit>>) {
+   } else if constexpr (std::is_same_v<std::remove_cvref_t<Ret>, psio::owned<std::string, psio::wit>>) {
       uint32_t ret_ptr = r ? r->to_ui32() : 0;
       const uint8_t* mem = reinterpret_cast<const uint8_t*>(be.linear_memory());
       uint32_t s_ptr, s_len;
       std::memcpy(&s_ptr, mem + ret_ptr, 4);
       std::memcpy(&s_len, mem + ret_ptr + 4, 4);
-      return canonical_result<psio1::owned<std::string, psio1::wit>>{s_ptr, s_len, mem};
+      return canonical_result<psio::owned<std::string, psio::wit>>{s_ptr, s_len, mem};
    } else if constexpr (detail_dispatch::is_wit_vector<std::remove_cvref_t<Ret>>::value) {
       using E = typename detail_dispatch::is_wit_vector<std::remove_cvref_t<Ret>>::element_type;
       uint32_t ret_ptr = r ? r->to_ui32() : 0;
@@ -765,20 +769,20 @@ auto invoke_canonical_export_void_erased(instance_be& be, void* host,
       uint32_t e_ptr, e_len;
       std::memcpy(&e_ptr, mem + ret_ptr, 4);
       std::memcpy(&e_len, mem + ret_ptr + 4, 4);
-      return canonical_result<psio1::owned<std::vector<E>, psio1::wit>>{e_ptr, e_len, mem};
+      return canonical_result<psio::owned<std::vector<E>, psio::wit>>{e_ptr, e_len, mem};
    } else {
       using U = std::remove_cvref_t<Ret>;
       constexpr size_t rflat = psizam::flat_count_v<U>;
       host_lift_policy lift{nullptr, reinterpret_cast<const uint8_t*>(be.linear_memory())};
-      if constexpr (rflat <= psio1::MAX_FLAT_RESULTS) {
-         ::psio1::native_value slot;
+      if constexpr (rflat <= psio::MAX_FLAT_RESULTS) {
+         ::psio::native_value slot;
          slot.i64 = 0;
          if (r) slot.i64 = r->to_ui64();
          host_lift_policy s_lift{&slot, reinterpret_cast<const uint8_t*>(be.linear_memory())};
          return canonical_lift_flat<U>(s_lift);
       } else {
          uint32_t ret_ptr = r ? r->to_ui32() : 0;
-         return psio1::canonical_lift_fields<U>(lift, ret_ptr);
+         return psio::wit_abi_lift_fields<U>(lift, ret_ptr);
       }
    }
 }
@@ -884,7 +888,7 @@ struct void_proxy_adapter
 
 // hosted<Impl, BackendKind> — owns a backend instance wired to Impl.
 //
-// Impl must have one or more PSIO1_HOST_MODULE(Impl, interface(…), …) blocks
+// Impl must have one or more PSIO_HOST_MODULE(Impl, interface(…), …) blocks
 // declaring which interfaces it fulfills; the constructor registers
 // each of those methods with the backend's host-function table keyed
 // by the interface's WIT name.
@@ -917,12 +921,12 @@ struct hosted
    // Return a proxy for a guest-exported interface Tag. Usage:
    //
    //   struct greeter { static void run(std::uint64_t); };
-   //   PSIO1_INTERFACE(greeter, types(), funcs(func(run, count)))
+   //   PSIO_INTERFACE(greeter, types(), funcs(func(run, count)))
    //   vm.as<greeter>().run(5);
    template <typename Tag>
    auto as()
    {
-      using info    = ::psio1::detail::interface_info<Tag>;
+      using info    = ::psio::detail::interface_info<Tag>;
       using adapter = detail::proxy_adapter<backend_t, Impl, info>;
       using proxy_t = typename info::template proxy<adapter>;
       return proxy_t{be, *host_ptr};

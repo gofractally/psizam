@@ -4,26 +4,27 @@
 //
 // Contains both module metadata (types, imports, exports, data segments, etc.)
 // and N compiled code sections (per architecture × optimization tier × options).
-// Serialized with psio fracpack for zero-copy access via psio1::view<pzam_file>.
+// Serialized with current psio pSSZ.
 //
 // A .pzam file is fully self-contained — no .wasm file needed at runtime.
-// Load path: mmap → validate_frac → view<pzam_file> → pick code section → execute.
+// Load path: mmap → validate pSSZ → decode metadata/code → pick section → execute.
 
 #include <psizam/detail/jit_reloc.hpp>
-#include <psizam/wit_types.hpp>
-
-#include <psio1/fracpack.hpp>
+#include <psio/pssz_view.hpp>
+#include <psio/wit_types.hpp>
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace psizam {
 
    static constexpr uint32_t PZAM_MAGIC   = 0x4d415a50; // "PZAM" in little-endian
-   static constexpr uint32_t PZAM_VERSION = 3;
+   static constexpr uint32_t PZAM_VERSION = 4;
 
    // ---- Architecture ----
 
@@ -50,7 +51,7 @@ namespace psizam {
       uint32_t code_size    = 0;  // size in bytes
       uint32_t stack_size   = 0;  // operand stack slots needed
    };
-   PSIO1_REFLECT(pzam_func_entry, code_offset, code_size, stack_size)
+   PSIO_REFLECT(pzam_func_entry, code_offset, code_size, stack_size)
 
    /// Relocation entry for address patching at load time.
    struct pzam_relocation {
@@ -59,7 +60,7 @@ namespace psizam {
       uint8_t  type         = 0;  // reloc_type
       int32_t  addend       = 0;  // relocation addend
    };
-   PSIO1_REFLECT(pzam_relocation, code_offset, symbol, type, addend)
+   PSIO_REFLECT(pzam_relocation, code_offset, symbol, type, addend)
 
    // ===========================================================================
    // Module metadata — everything needed to instantiate without a .wasm file
@@ -69,37 +70,37 @@ namespace psizam {
       std::vector<uint8_t> param_types;
       std::vector<uint8_t> return_types;
    };
-   PSIO1_REFLECT(pzam_func_type, param_types, return_types)
+   PSIO_REFLECT(pzam_func_type, param_types, return_types)
 
    struct pzam_resizable_limits {
       uint8_t  has_maximum = 0;
       uint32_t initial     = 0;
       uint32_t maximum     = 0;
    };
-   PSIO1_REFLECT(pzam_resizable_limits, has_maximum, initial, maximum)
+   PSIO_REFLECT(pzam_resizable_limits, has_maximum, initial, maximum)
 
    struct pzam_table_type {
       uint8_t               element_type = 0x70; // funcref
       pzam_resizable_limits limits;
    };
-   PSIO1_REFLECT(pzam_table_type, element_type, limits)
+   PSIO_REFLECT(pzam_table_type, element_type, limits)
 
    struct pzam_memory_type {
       pzam_resizable_limits limits;
    };
-   PSIO1_REFLECT(pzam_memory_type, limits)
+   PSIO_REFLECT(pzam_memory_type, limits)
 
    struct pzam_global_type {
       uint8_t content_type = 0;
       uint8_t mutability   = 0;
    };
-   PSIO1_REFLECT(pzam_global_type, content_type, mutability)
+   PSIO_REFLECT(pzam_global_type, content_type, mutability)
 
    struct pzam_global_variable {
       pzam_global_type      type;
       std::vector<uint8_t>  init_expr;  // raw WASM const expression bytes
    };
-   PSIO1_REFLECT(pzam_global_variable, type, init_expr)
+   PSIO_REFLECT(pzam_global_variable, type, init_expr)
 
    struct pzam_import_entry {
       std::string  module_name;
@@ -110,7 +111,7 @@ namespace psizam {
       pzam_memory_type memory_type;     // for Memory imports
       pzam_global_type global_type;     // for Global imports
    };
-   PSIO1_REFLECT(pzam_import_entry, module_name, field_name, kind,
+   PSIO_REFLECT(pzam_import_entry, module_name, field_name, kind,
                 func_type_idx, table_type, memory_type, global_type)
 
    struct pzam_export_entry {
@@ -118,13 +119,13 @@ namespace psizam {
       uint8_t      kind  = 0;
       uint32_t     index = 0;
    };
-   PSIO1_REFLECT(pzam_export_entry, field_name, kind, index)
+   PSIO_REFLECT(pzam_export_entry, field_name, kind, index)
 
    struct pzam_elem_entry {
       uint8_t  type  = 0;   // funcref/externref
       uint32_t index = 0;   // function index (or UINT32_MAX for ref.null)
    };
-   PSIO1_REFLECT(pzam_elem_entry, type, index)
+   PSIO_REFLECT(pzam_elem_entry, type, index)
 
    struct pzam_elem_segment {
       uint32_t                      table_index = 0;
@@ -133,7 +134,7 @@ namespace psizam {
       uint8_t                       elem_type = 0x70;
       std::vector<pzam_elem_entry>  elems;
    };
-   PSIO1_REFLECT(pzam_elem_segment, table_index, offset_expr, mode, elem_type, elems)
+   PSIO_REFLECT(pzam_elem_segment, table_index, offset_expr, mode, elem_type, elems)
 
    struct pzam_data_segment {
       uint32_t             memory_index = 0;
@@ -141,13 +142,13 @@ namespace psizam {
       uint8_t              passive = 0;
       std::vector<uint8_t> data;
    };
-   PSIO1_REFLECT(pzam_data_segment, memory_index, offset_expr, passive, data)
+   PSIO_REFLECT(pzam_data_segment, memory_index, offset_expr, passive, data)
 
    struct pzam_tag_type {
       uint8_t  attribute  = 0;
       uint32_t type_index = 0;
    };
-   PSIO1_REFLECT(pzam_tag_type, attribute, type_index)
+   PSIO_REFLECT(pzam_tag_type, attribute, type_index)
 
    /// WASM features required by this module.
    struct pzam_wasm_features {
@@ -162,7 +163,7 @@ namespace psizam {
       uint8_t threads               = 0;
       uint8_t multi_memory          = 0;
    };
-   PSIO1_REFLECT(pzam_wasm_features, simd, bulk_memory, sign_ext,
+   PSIO_REFLECT(pzam_wasm_features, simd, bulk_memory, sign_ext,
                 nontrapping_fptoint, tail_call, multi_value,
                 reference_types, extended_const, threads, multi_memory)
 
@@ -185,10 +186,10 @@ namespace psizam {
       uint32_t num_imported_tables    = 0;
       uint32_t num_imported_memories  = 0;
       uint32_t num_imported_globals   = 0;
-      // WIT (Component Model interface types) — optional, fracpack-compatible
-      std::optional<pzam_wit_world>   wit;
+      // WIT (Component Model interface types) — optional
+      std::optional<psio::wit_world>   wit;
    };
-   PSIO1_REFLECT(pzam_module_metadata,
+   PSIO_REFLECT(pzam_module_metadata,
       types, imports, functions, tables, memories, globals,
       exports, elements, data, tags, start_function, features_required,
       num_imported_functions, num_imported_tables,
@@ -206,7 +207,7 @@ namespace psizam {
       uint8_t debug_info      = 0;
       uint8_t async_backtrace = 0;
    };
-   PSIO1_REFLECT(pzam_instrumentation, softfloat, gas_metering,
+   PSIO_REFLECT(pzam_instrumentation, softfloat, gas_metering,
                 yield_points, debug_info, async_backtrace)
 
    /// Identity of the compiler that produced a code section.
@@ -215,14 +216,14 @@ namespace psizam {
       std::string              compiler_version; // semver or git hash
       std::array<uint8_t, 32>  compiler_hash = {};  // hash of compiler binary
    };
-   PSIO1_REFLECT(pzam_compiler_info, compiler_name, compiler_version, compiler_hash)
+   PSIO_REFLECT(pzam_compiler_info, compiler_name, compiler_version, compiler_hash)
 
    /// Attestation: someone who vouches for a code section's correctness.
    struct pzam_attestation {
       std::array<uint8_t, 32> pubkey_hash = {};  // hash of attester's public key
       std::vector<uint8_t>    signature;          // ECC signature over code section content hash
    };
-   PSIO1_REFLECT(pzam_attestation, pubkey_hash, signature)
+   PSIO_REFLECT(pzam_attestation, pubkey_hash, signature)
 
    /// One compiled code variant.
    /// All backends produce C ABI entry points — no legacy dispatch modes.
@@ -241,7 +242,7 @@ namespace psizam {
       std::vector<pzam_relocation>   relocations;
       std::vector<uint8_t>           code_blob;
    };
-   PSIO1_REFLECT(pzam_code_section,
+   PSIO_REFLECT(pzam_code_section,
       arch, opt_tier, instrumentation, stack_limit_mode, page_size, max_stack,
       compiler, attestations, functions, relocations, code_blob)
 
@@ -256,26 +257,44 @@ namespace psizam {
       pzam_module_metadata            metadata;
       std::vector<pzam_code_section>  code_sections;
    };
-   PSIO1_REFLECT(pzam_file, magic, format_version, input_hash,
+   PSIO_REFLECT(pzam_file, magic, format_version, input_hash,
                 metadata, code_sections)
+
+} // namespace psizam
+
+// The versioned top-level layout starts with magic and version at byte zero.
+PSIO_TYPE_ATTRS(psizam::pzam_file, psio::definition_will_not_change{})
+
+namespace psizam {
 
    // ===========================================================================
    // Serialization helpers
    // ===========================================================================
 
-   /// Serialize a pzam_file to fracpack bytes.
+   /// Serialize a pzam_file using psio's automatic-width pSSZ format.
    inline std::vector<char> pzam_save(const pzam_file& file) {
-      return psio1::convert_to_frac(file);
+      if (file.magic != PZAM_MAGIC || file.format_version != PZAM_VERSION)
+         throw std::invalid_argument("pzam_save: invalid magic or format version");
+      // This unbounded schema uses 32-bit offsets throughout the file.
+      if (psio::size_of(psio::pssz{}, file) > std::numeric_limits<uint32_t>::max())
+         throw std::length_error("pzam_save: file exceeds pSSZ offset range");
+      return psio::encode(psio::pssz{}, file);
    }
 
-   /// Deserialize a pzam_file from fracpack bytes.
-   inline pzam_file pzam_load(std::span<const char> data) {
-      return psio1::from_frac<pzam_file>(data);
-   }
-
-   /// Validate a .pzam buffer without deserializing.
+   /// Validate structure and file identity without allocating decoded contents.
    inline bool pzam_validate(std::span<const char> data) {
-      return psio1::validate_frac_compatible<pzam_file>(data);
+      if (data.size() > std::numeric_limits<uint32_t>::max() ||
+          !psio::validate<pzam_file>(psio::pssz{}, data))
+         return false;
+      const psio::view<pzam_file, psio::pssz, psio::storage::const_borrow> file{data};
+      return file.get<0>() == PZAM_MAGIC && file.get<1>() == PZAM_VERSION;
+   }
+
+   /// Validate before decoding: psio's fast decoder assumes validated bytes.
+   inline pzam_file pzam_load(std::span<const char> data) {
+      if (!pzam_validate(data))
+         throw std::runtime_error("pzam_load: invalid pSSZ PZAM file");
+      return psio::decode<pzam_file>(psio::pssz{}, data);
    }
 
 } // namespace psizam

@@ -12,15 +12,12 @@ if(NOT TARGET psio)
     add_library(psio ALIAS psio::psio)
   endif()
 endif()
-if(NOT TARGET psio1)
-  add_subdirectory(${PSIZAM_SOURCE_DIR}/external/psio1 ${PSIZAM_BINARY_DIR}/external/psio1)
-endif()
 if(NOT TARGET wasi-cpp)
   add_library(wasi-cpp INTERFACE)
   target_include_directories(wasi-cpp INTERFACE
     $<BUILD_INTERFACE:${PSIZAM_SOURCE_DIR}/external/wasi/include>
     $<INSTALL_INTERFACE:include>)
-  target_link_libraries(wasi-cpp INTERFACE psio1)
+  target_link_libraries(wasi-cpp INTERFACE psio)
   target_compile_features(wasi-cpp INTERFACE cxx_std_23)
 endif()
 # Homebrew LLVM's headers and runtime must agree when LLVM is linked on macOS.
