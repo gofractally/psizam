@@ -1,6 +1,11 @@
 // Equivalent protected entry per service invocation; linking is outside timing.
 #ifdef HAVE_WASMTIME
+// wasm.h's native float aliases collide with SoftFloat's global struct names.
+#define float32_t wasmtime_float32_t
+#define float64_t wasmtime_float64_t
 #include <wasmtime.h>
+#undef float64_t
+#undef float32_t
 #endif
 #include <psizam/backend.hpp>
 #include <psizam/detail/pzam_loader.hpp>

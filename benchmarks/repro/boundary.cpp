@@ -1,5 +1,10 @@
 // Purpose-built scalar boundary microbenchmark, not a Component Model benchmark.
+// wasm.h's native float aliases collide with SoftFloat's global struct names.
+#define float32_t wasmtime_float32_t
+#define float64_t wasmtime_float64_t
 #include <wasmtime.h>
+#undef float64_t
+#undef float32_t
 #include <psizam/backend.hpp>
 #include <psizam/detail/execution_limits.hpp>
 #include <chrono>
