@@ -31,6 +31,7 @@ extern "C" {
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/Support/SmallVectorMemoryBuffer.h>
 
+#include <algorithm>
 #include <iostream>
 #include <optional>
 #include <unordered_map>
@@ -268,7 +269,6 @@ namespace psizam::detail {
       // alignment, and emit code_blob_self relocations for cross-section references.
       llvm_aot_result result;
       std::optional<llvm::object::SectionRef> text_section;
-      uint64_t rodata_blob_offset = 0;  // offset of .rodata within the merged code blob
 
       // Track section index → blob offset for resolving internal relocations
       std::unordered_map<uint64_t, uint64_t> section_blob_offsets;
@@ -296,18 +296,17 @@ namespace psizam::detail {
          auto name_or_err = section.getName();
          if (!name_or_err) continue;
          auto name = *name_or_err;
-         if (name == ".rodata" || name.starts_with(".rodata.")) {
+         if (name == ".rodata" || name.starts_with(".rodata.") ||
+             name == ".lrodata" || name.starts_with(".lrodata.")) {
             auto contents_or_err = section.getContents();
             if (!contents_or_err || contents_or_err->empty()) continue;
 
-            // Align to 16 bytes for data sections
-            size_t align_pad = (16 - (result.code.size() % 16)) % 16;
+            const uint64_t alignment = std::max<uint64_t>(16, section.getAlignment().value());
+            size_t align_pad = (alignment - (result.code.size() % alignment)) % alignment;
             result.code.resize(result.code.size() + align_pad, 0);
             uint64_t offset = result.code.size();
             result.code.insert(result.code.end(), contents_or_err->begin(), contents_or_err->end());
             section_blob_offsets[section.getIndex()] = offset;
-            if (name == ".rodata")
-               rodata_blob_offset = offset;
          }
       }
 
@@ -324,21 +323,20 @@ namespace psizam::detail {
          sym_index_to_name[sym.getRawDataRefImpl().p] = name_or_err->str();
       }
 
-      // Extract relocations from .text section
+      // Jump tables can contain absolute code pointers. Relocate every section
+      // merged into the blob, including the pointers stored in read-only data.
       for (const auto& section : obj.sections()) {
          auto relocated_or_err = section.getRelocatedSection();
-         if (!relocated_or_err || *relocated_or_err != *text_section) {
-            // Also check if this section IS the text section (some formats)
-            auto name_or_err = section.getName();
-            if (name_or_err && (*name_or_err == ".rela.text" || *name_or_err == ".rel.text" ||
-                                *name_or_err == ".rela.ltext" || *name_or_err == ".rel.ltext")) {
-               // This is a relocation section for .text
-            } else {
-               continue;
-            }
+         if (!relocated_or_err) {
+            llvm::consumeError(relocated_or_err.takeError());
+            continue;
          }
+         if (*relocated_or_err == obj.section_end()) continue;
+         const auto source_section = section_blob_offsets.find((*relocated_or_err)->getIndex());
+         if (source_section == section_blob_offsets.end()) continue;
 
          for (const auto& reloc : section.relocations()) {
+            const auto reloc_offset = static_cast<uint32_t>(source_section->second + reloc.getOffset());
             auto sym_it = reloc.getSymbol();
             if (sym_it == obj.symbol_end()) continue;
 
@@ -383,7 +381,7 @@ namespace psizam::detail {
                   uint64_t sym_val = sym_val_or_err ? *sym_val_or_err : 0;
 
                   code_relocation cr;
-                  cr.code_offset = static_cast<uint32_t>(reloc.getOffset());
+                  cr.code_offset = reloc_offset;
                   cr.symbol = reloc_symbol::code_blob_self;
                   cr.type = map_elf_reloc_type(reloc.getType(), is_x86_64);
                   cr.addend = static_cast<int32_t>(data_section_blob_offset + sym_val) + elf_addend;
@@ -409,7 +407,7 @@ namespace psizam::detail {
                   uint32_t num_imports_val = mod.get_imported_functions_size();
                   if (func_idx >= num_imports_val) {
                      auto mapped_type = map_elf_reloc_type(reloc.getType(), is_x86_64);
-                     uint32_t reloc_off = static_cast<uint32_t>(reloc.getOffset());
+                     uint32_t reloc_off = reloc_offset;
 
                      // Same-batch + PC-relative → resolve at compile time.
                      // `is_internal_code` means the symbol is defined in this
@@ -465,11 +463,22 @@ namespace psizam::detail {
                   continue;
                }
 
-               // Internal code reference (local labels within .text)
-               // The assembler already resolves intra-section relocations in .text,
-               // so the instructions have correct relative offsets. Skip them.
-               if (is_internal_code ||
-                   sym_name.starts_with(".L") || sym_name.starts_with(".")) {
+               // A local label still needs relocation when referenced through
+               // an absolute pointer, including x86 large-model jump tables.
+               if (is_internal_code) {
+                  auto addend = llvm::object::ELFRelocationRef(reloc).getAddend();
+                  auto value = sym_it->getValue();
+                  if (!addend || !value) {
+                     if (!addend) llvm::consumeError(addend.takeError());
+                     if (!value) llvm::consumeError(value.takeError());
+                     return llvm_aot_result{.error = "Cannot resolve local code relocation"};
+                  }
+                  code_relocation cr;
+                  cr.code_offset = reloc_offset;
+                  cr.symbol = reloc_symbol::code_blob_self;
+                  cr.type = map_elf_reloc_type(reloc.getType(), is_x86_64);
+                  cr.addend = static_cast<int32_t>(*value + *addend);
+                  result.relocations.push_back(cr);
                   continue;
                }
 
@@ -482,7 +491,7 @@ namespace psizam::detail {
 
                if (mapped != reloc_symbol::unknown) {
                   code_relocation cr;
-                  cr.code_offset = static_cast<uint32_t>(reloc.getOffset());
+                  cr.code_offset = reloc_offset;
                   cr.symbol = mapped;
                   cr.type = map_elf_reloc_type(reloc.getType(), is_x86_64);
                   auto val_or_err = llvm::object::ELFRelocationRef(reloc).getAddend();
@@ -495,7 +504,7 @@ namespace psizam::detail {
             }
 
             code_relocation cr;
-            cr.code_offset = static_cast<uint32_t>(reloc.getOffset());
+            cr.code_offset = reloc_offset;
             cr.symbol = psizam_sym;
             cr.type = map_elf_reloc_type(reloc.getType(), is_x86_64);
 
