@@ -4,14 +4,17 @@
 
 | Platform | Failures | Total | Pass Rate |
 |----------|----------|-------|-----------|
-| macOS aarch64, full CTest (2026-09-17) | 4 (memory_grow_2 × 4 backends) | 17,651 | 99.98% |
+| macOS aarch64, full CTest (2026-09-17) | 4 (memory_grow_2 × 4 backends) | 17,689 | 99.98% |
 | Linux x86_64 | (stale — re-measure after submodule bump) | | |
 
 The four multiple-memory failures are ordinary test failures, not expected-failure
-passes. The saved LLVM O2 scalar suite separately passes 3,050 of 3,051 cases;
-its one failure is the same unsupported module. The JIT2-specific suite passes
-1,499 assertions across 86 cases. The saved LLVM O2 SIMD suite passes all
-25,073 assertions across 1,149 cases.
+passes. The saved LLVM O2 and saved JIT1 scalar suites each pass 3,050 of 3,051
+cases; each suite's one failure is the same unsupported module. The JIT2-specific
+suite passes 1,499 assertions across 86 cases. Saved LLVM O2 and JIT1 each pass
+all 25,073 SIMD assertions across 1,149 cases, plus four smoke assertions.
+The full CTest run includes all 24 compiler gates and 149 quick gates. Focused
+JIT1 CLI/API and deterministic saved-file checks also pass on x86-64 under
+Rosetta; this does not establish native Linux x86-64 acceptance.
 
 The spec testsuite submodule was bumped to `51279a9` and the SIMD block now
 auto-regenerates like the other spec tests (see

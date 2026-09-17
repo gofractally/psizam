@@ -8,8 +8,9 @@ work=$(cd "$work" && pwd)
 cmake -S "$root" -B "$work/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH="$psio_prefix" -DCMAKE_INSTALL_PREFIX="$work/install" \
   -DPSIZAM_ENABLE_TESTS=ON -DPSIZAM_ENABLE_SPEC_TESTS=OFF -DPSIZAM_ENABLE_TOOLS=ON
-cmake --build "$work/build" --target unit_tests runtime_parity_tests psizam_compliance_tests \
-  pzam-run pzam-compile psizam-wasi psizam-debug psizam_execution_driver psizam_regalloc_tests --parallel "${PSIZAM_BUILD_JOBS:-4}"
+# The quick CTest selection includes every registered acceptance executable;
+# building a hand-maintained target list can leave newer gates unbuilt.
+cmake --build "$work/build" --parallel "${PSIZAM_BUILD_JOBS:-4}"
 "$work/build/bin/unit_tests"
 "$work/build/bin/runtime_parity_tests"
 "$work/build/bin/psizam_compliance_tests"
