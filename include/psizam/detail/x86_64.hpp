@@ -7418,7 +7418,7 @@ namespace psizam::detail {
          emit_restore_stack();
          emit_pop(rsi);
          emit_pop(rdi);
-         emit_restore_backtrace(); // FIXME: clobbers rdx
+         emit_restore_backtrace();
          emit_mov(rax, *rsp);
          emit_mov(rdx, *(rsp + 8));
       }
@@ -7466,7 +7466,7 @@ namespace psizam::detail {
          emit_restore_stack();
          emit_pop(rsi);
          emit_pop(rdi);
-         emit_restore_backtrace_basic(); // FIXME: clobbers rdx
+         emit_restore_backtrace_basic();
          emit_add(16 + extra, rsp);
          emit_mov(rax, *rsp);
          emit_mov(rdx, *(rsp + 8));
@@ -7591,10 +7591,11 @@ namespace psizam::detail {
       // stack pointer adjustment is combined with another instruction.
       void emit_restore_backtrace_basic() {
          if (_enable_backtrace) {
-            // xorl %edx, %edx
-            emit_bytes(0x31, 0xd2);
-            // movq %rdx, (%rdi)
-            emit_bytes(0x48, 0x89, 0x17);
+            // Preserve RAX:RDX, the SysV return registers for v128 helpers.
+            // RCX is caller-saved and dead after the helper returns.
+            // xorl %ecx, %ecx; movq %rcx, (%rdi)
+            emit_bytes(0x31, 0xc9);
+            emit_bytes(0x48, 0x89, 0x0f);
          }
       }
       void emit_restore_backtrace() {

@@ -509,3 +509,18 @@ target_compile_definitions(psizam_runtime_release_tests PRIVATE CATCH_CONFIG_NO_
    RUNTIME_RELEASE_DIR="${runtime_release_dir}")
 add_test(NAME runtime_release COMMAND psizam_runtime_release_tests)
 set_tests_properties(runtime_release PROPERTIES LABELS "execution;quick;release;resource" TIMEOUT 60)
+
+# Backtrace cleanup must preserve both halves of a SIMD helper return value.
+add_executable(psizam_jit1_backtrace_tests main.cpp jit1_backtrace_tests.cpp)
+target_link_libraries(psizam_jit1_backtrace_tests PRIVATE psizam psizam-exec Catch2::Catch2)
+target_compile_definitions(psizam_jit1_backtrace_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
+   JIT1_BACKTRACE_WASM="${CMAKE_CURRENT_BINARY_DIR}/jit1-backtrace.wasm")
+find_program(PSIZAM_BACKTRACE_WAT2WASM wat2wasm REQUIRED)
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/jit1-backtrace.wasm"
+   COMMAND "${PSIZAM_BACKTRACE_WAT2WASM}" --enable-relaxed-simd
+      "${CMAKE_CURRENT_SOURCE_DIR}/jit1-backtrace.wat" -o "${CMAKE_CURRENT_BINARY_DIR}/jit1-backtrace.wasm"
+   DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/jit1-backtrace.wat" VERBATIM)
+add_custom_target(psizam_jit1_backtrace_fixture DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/jit1-backtrace.wasm")
+add_dependencies(psizam_jit1_backtrace_tests psizam_jit1_backtrace_fixture)
+add_test(NAME execution.jit1-backtrace COMMAND psizam_jit1_backtrace_tests)
+set_tests_properties(execution.jit1-backtrace PROPERTIES LABELS "execution;quick" TIMEOUT 30)
