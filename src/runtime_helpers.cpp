@@ -35,6 +35,16 @@ namespace {
       }
       std::rethrow_exception(eptr);
    }
+
+   void invoke_gas_handler(gas_state& gas) {
+      // Custom handlers may throw (timeouts, exhausted pools, scheduler
+      // failures). Never unwind through generated code. The helper leaves
+      // the catch scope before escaping so the exception is not leaked.
+      if (trap_jmp_ptr)
+         longjmp_on_exception([&] { gas.handler(&gas, gas.user_data); });
+      else
+         gas.handler(&gas, gas.user_data);
+   }
 }
 
 extern "C" {
@@ -218,7 +228,7 @@ void __psizam_gas_charge(void* ctx, int64_t cost) {
    auto& gs = c.gas();
    gs.consumed += static_cast<uint64_t>(cost);
    if (gs.consumed >= gs.deadline.load(std::memory_order_relaxed)) {
-      if (gs.handler) gs.handler(&gs, gs.user_data);
+      if (gs.handler) invoke_gas_handler(gs);
       else escape_or_throw<wasm_gas_exhausted_exception>("gas exhausted");
    }
 }
@@ -229,7 +239,7 @@ void __psizam_gas_exhausted_check(void* ctx) {
    // may have advanced it, or an external thread may have raced us) and
    // dispatch only if we're still over the line.
    if (gs.consumed < gs.deadline.load(std::memory_order_relaxed)) return;
-   if (gs.handler) gs.handler(&gs, gs.user_data);
+   if (gs.handler) invoke_gas_handler(gs);
    else escape_or_throw<wasm_gas_exhausted_exception>("gas exhausted");
 }
 

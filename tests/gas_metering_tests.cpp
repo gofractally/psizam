@@ -369,3 +369,28 @@ BACKEND_TEST_CASE("gas: heavy-op loop-extra per-backend",
    CHECK(consumed >= static_cast<uint64_t>(iters * per_iter_weighted));
    CHECK(consumed <= static_cast<uint64_t>(3 * iters * per_iter_weighted));
 }
+
+BACKEND_TEST_CASE("gas: throwing user handler escapes and releases its exception", "[gas][execution][quick][resource]") {
+   using hosts = psizam::registered_host_functions<psizam::standalone_function_t>;
+   hosts::add<&gas_host_call>("env", "host.call");
+   psizam::wasm_code code(implementation_limits_wasm,
+                         implementation_limits_wasm + implementation_limits_wasm_len);
+   psizam::wasm_allocator alloc;
+   psizam::backend<hosts, TestType> be(code, &alloc);
+   hosts::resolve(be.get_module());
+   struct handler_error : std::exception {
+      int* destroyed;
+      explicit handler_error(int* p) : destroyed(p) {}
+      ~handler_error() override { ++*destroyed; }
+   };
+   int destroyed = 0;
+   be.get_context().set_gas_handler(+[](psizam::gas_state*, void* data) {
+      throw handler_error{static_cast<int*>(data)};
+   }, &destroyed);
+   be.get_context().set_gas_budget(psizam::gas_units{5});
+   CHECK_THROWS_AS(be.call("env", "call", uint32_t{50}), handler_error);
+   CHECK(destroyed == 1);
+   be.get_context().set_gas_handler(nullptr);
+   be.get_context().set_gas_budget(psizam::gas_units{psizam::gas_budget_unlimited});
+   CHECK_NOTHROW(be.call("env", "call", uint32_t{3}));
+}
