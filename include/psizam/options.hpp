@@ -60,6 +60,8 @@ struct options {
 
 struct default_options {
    bool gas_metering = true;
+   // Runtime facades install resource handlers before invoking module.start.
+   bool defer_start = false;
 };
 
 

@@ -133,11 +133,6 @@ int main(int argc, char** argv) {
       .gas_budget  = 10'000'000,
    };
 
-   // ── Shared gas ──────────────────────────────────────────────────
-   auto gas = std::make_shared<gas_state>();
-   gas->deadline = policy.gas_budget;
-   policy.shared_gas = gas;
-
    // ── Register host functions ────────────────────────────────────
    auto tmpl = rt.prepare(wasm_bytes{wasm_data}, policy);
 

@@ -488,3 +488,24 @@ endforeach()
 set(call_test_target psizam_call_boundary_tests)
 set(call_test_wasm "${CMAKE_CURRENT_BINARY_DIR}/call-boundary.wasm")
 include("${CMAKE_CURRENT_SOURCE_DIR}/../benchmarks/call-boundary/aot-tests.cmake")
+
+# Public facade resource enforcement, including the module start section.
+set(runtime_release_dir "${CMAKE_CURRENT_BINARY_DIR}/runtime-release")
+file(MAKE_DIRECTORY "${runtime_release_dir}")
+set(runtime_release_fixtures)
+foreach(fixture start spin spin-start)
+   add_custom_command(OUTPUT "${runtime_release_dir}/${fixture}.wasm"
+      COMMAND "${PSIZAM_CALL_WAT2WASM}" "${CMAKE_CURRENT_SOURCE_DIR}/runtime-release/${fixture}.wat"
+         -o "${runtime_release_dir}/${fixture}.wasm"
+      DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/runtime-release/${fixture}.wat" VERBATIM)
+   list(APPEND runtime_release_fixtures "${runtime_release_dir}/${fixture}.wasm")
+endforeach()
+add_executable(psizam_runtime_release_tests main.cpp runtime_release_tests.cpp ${runtime_release_fixtures})
+target_link_libraries(psizam_runtime_release_tests PRIVATE psizam psizam-exec Catch2::Catch2)
+if(PSIZAM_ENABLE_LLVM)
+   target_link_libraries(psizam_runtime_release_tests PRIVATE psizam-llvm)
+endif()
+target_compile_definitions(psizam_runtime_release_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
+   RUNTIME_RELEASE_DIR="${runtime_release_dir}")
+add_test(NAME runtime_release COMMAND psizam_runtime_release_tests)
+set_tests_properties(runtime_release PROPERTIES LABELS "execution;quick;release;resource" TIMEOUT 60)

@@ -43,16 +43,16 @@ std::unique_ptr<instance_be> make_instance_be(
    host_function_table table,
    void* host_ptr,
    char* external_base,
-   uint32_t external_budget_bytes)
+   uint32_t external_budget_bytes, bool gas_metering)
 {
    auto make = [&]<typename Impl>(Impl*) -> std::unique_ptr<instance_be> {
       if (external_base)
          return std::make_unique<instance_be_impl<Impl>>(
             kind, wasm, std::move(table), host_ptr,
-            external_base, external_budget_bytes);
+            external_base, external_budget_bytes, gas_metering);
       else
          return std::make_unique<instance_be_impl<Impl>>(
-            kind, wasm, std::move(table), host_ptr);
+            kind, wasm, std::move(table), host_ptr, gas_metering);
    };
 
    switch (kind) {
@@ -174,15 +174,37 @@ struct instance_impl {
    // module's host_function_table can deref `module->live_be` safely.
    std::shared_ptr<module_handle_impl>  module;
    std::unique_ptr<detail::instance_be> be;
-   gas_state                            local_gas;
-   std::shared_ptr<gas_state>           shared_gas;
    // Shared pool for multi-module gas tracking. Kept alive for the
    // instance's lifetime so the pool outlives any leases.
    std::shared_ptr<gas_pool>            pool;
    void*                                host_ptr = nullptr;
+   std::chrono::steady_clock::time_point wall_deadline;
+   uint64_t gas_slice = 0;
+   gas_handler_t yield_handler = nullptr;
+   void* yield_user_data = nullptr;
+   instance_policy::meter_mode metering = instance_policy::meter_mode::none;
 
    gas_state* active_gas() {
-      return shared_gas ? shared_gas.get() : &local_gas;
+      return be ? &be->gas() : nullptr;
+   }
+
+   static void on_deadline(gas_state* gas, void* data) {
+      auto& self = *static_cast<instance_impl*>(data);
+      // A public interrupt must also stop instances with refill handlers.
+      if (gas->deadline.load(std::memory_order_relaxed) == 0)
+         throw wasm_gas_exhausted_exception{"runtime: interrupted"};
+      if (self.pool) {
+         pool_yield_handler(gas, self.pool.get());
+      } else if (self.metering == instance_policy::meter_mode::timeout) {
+         if (std::chrono::steady_clock::now() >= self.wall_deadline)
+            throw timeout_exception{"runtime: execution timed out"};
+         const auto room = std::numeric_limits<uint64_t>::max() - gas->consumed;
+         if (!room) throw timeout_exception{"runtime: timeout counter exhausted"};
+         gas->deadline.store(gas->consumed + std::min(room, self.gas_slice),
+                             std::memory_order_relaxed);
+      } else {
+         self.yield_handler(gas, self.yield_user_data);
+      }
    }
 
    ~instance_impl() {
@@ -364,11 +386,8 @@ struct runtime_impl {
    guarded_pool   pool;
    arena_budget   arena;
 
-   // wasm_hash → prepared module. weak_ptr keeps the cache from
-   // pinning modules indefinitely; an entry whose module_handle has
-   // been dropped by every external owner is garbage on the next
-   // lookup. Track B will key on the full module_cache_key
-   // (wasm + compile_policy + env) once compile_policy lands.
+   // Wasm hash → most recently prepared handle, for weak bookkeeping only.
+   // Mutable policies/bindings are never reused on a hash hit.
    std::unordered_map<uint64_t, std::weak_ptr<module_handle_impl>>
       module_cache;
 
@@ -411,17 +430,9 @@ void runtime::register_library(std::string_view name, wasm_bytes wasm) {
 
 module_handle runtime::prepare(wasm_bytes wasm, const instance_policy& policy) {
    const uint64_t key = hash_wasm_bytes(wasm.data);
-
-   // Cache hit? Track A keys only on wasm bytes; Track B will extend the
-   // key to include compile_policy so divergent policies don't collide.
-   if (impl_) {
-      auto it = impl_->module_cache.find(key);
-      if (it != impl_->module_cache.end()) {
-         if (auto live = it->second.lock())
-            return module_handle{std::move(live)};
-         impl_->module_cache.erase(it);
-      }
-   }
+   // Handles contain mutable bindings and an instance policy. Returning a
+   // previous handle by Wasm hash aliases both, even with identical policies.
+   // Native-code caching belongs in a separate immutable compiled template.
 
    const auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -476,7 +487,7 @@ std::vector<unresolved_import> runtime::check(wasm_bytes) const {
 }
 
 instance runtime::instantiate(const module_handle& tmpl) {
-   return instantiate(tmpl, tmpl.get()->policy);
+   return tmpl ? instantiate(tmpl, tmpl.get()->policy) : instance{};
 }
 
 instance runtime::instantiate(const module_handle& tmpl,
@@ -487,10 +498,23 @@ instance runtime::instantiate(const module_handle& tmpl,
    auto inst = std::make_unique<instance_impl>();
    inst->module = tmpl.share_impl();   // keep module_handle_impl alive
    inst->host_ptr = mod->host_ptr;
-   inst->shared_gas = policy.shared_gas;
-   if (!inst->shared_gas) {
-      inst->local_gas.deadline.store(policy.gas_budget, std::memory_order_relaxed);
-   }
+   using meter = instance_policy::meter_mode;
+   if (policy.pool && policy.metering != meter::gas_trap)
+      throw std::invalid_argument("runtime: gas_pool requires gas_trap metering");
+   if (policy.metering == meter::gas_yield && !policy.yield_handler)
+      throw std::invalid_argument("runtime: gas_yield requires yield_handler");
+   if ((policy.metering == meter::timeout || policy.metering == meter::gas_yield)
+         && policy.gas_slice == 0)
+      throw std::invalid_argument("runtime: gas_slice must be positive");
+   if (policy.external_memory && (policy.mem_budget < 16 || policy.mem_budget > 31))
+      throw std::invalid_argument("runtime: external memory budget must be 16..31");
+   if (policy.metering != meter::none && policy.metering != meter::gas_trap &&
+       policy.metering != meter::gas_yield && policy.metering != meter::timeout)
+      throw std::invalid_argument("runtime: invalid metering mode");
+   inst->metering = policy.metering;
+   inst->gas_slice = policy.gas_slice;
+   inst->yield_handler = policy.yield_handler;
+   inst->yield_user_data = policy.yield_user_data;
 
    // Pick the backend impl per `policy.initial`. The factory throws on
    // backends gated out of this build (jit/jit2 on non-x86/arm,
@@ -503,13 +527,20 @@ instance runtime::instantiate(const module_handle& tmpl,
    auto table_copy = mod->table;
 
    char*    ext_base  = policy.external_memory;
-   uint32_t ext_bytes = policy.mem_budget > 0
+   uint32_t ext_bytes = ext_base
       ? (1u << policy.mem_budget)
       : 0;
 
    inst->be = impl_->factory(
       be_kind, mod->wasm_copy, std::move(table_copy), mod->host_ptr,
-      ext_base, ext_bytes);
+      ext_base, ext_bytes, policy.metering != meter::none);
+
+   inst->be->set_gas_budget(policy.metering == meter::none ? gas_budget_unlimited :
+      policy.metering == meter::gas_trap ? policy.gas_budget : policy.gas_slice);
+   inst->wall_deadline = std::chrono::steady_clock::now() +
+      std::chrono::milliseconds(policy.timeout_ms);
+   if (policy.metering == meter::timeout || policy.metering == meter::gas_yield)
+      inst->be->set_gas_handler(&instance_impl::on_deadline, inst.get());
 
    // Publish the instance's be pointer on the module so any bridge
    // lambdas registered on the module's table (by a prior bind()) can
@@ -528,8 +559,10 @@ instance runtime::instantiate(const module_handle& tmpl,
       }
       inst->pool = policy.pool;
       inst->be->set_gas_budget(*lease);
-      inst->be->set_gas_handler(&pool_yield_handler, policy.pool.get());
+      inst->be->set_gas_handler(&instance_impl::on_deadline, inst.get());
    }
+
+   inst->be->initialize_start(mod->host_ptr);
 
    return instance{std::move(inst)};
 }

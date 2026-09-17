@@ -126,19 +126,17 @@ struct instance_policy {
       none,        // no counter, no checks
       gas_trap,    // consumed >= deadline → trap
       gas_yield,   // consumed >= deadline → yield fiber, advance deadline
-      timeout,     // consumed >= deadline → check wall clock, advance or trap
+      timeout,     // gas-checkpoint wall-clock polling; starts before module initialization
    };
 
    meter_mode  metering   = meter_mode::gas_trap;
    uint64_t    gas_budget = 1'000'000;
    uint64_t    gas_slice  = 10'000;
    uint32_t    timeout_ms = 5000;
-
-   // ── Gas sharing ─────────────────────────────────────────────────
-   // If set, this instance shares the gas counter with other instances
-   // that hold the same shared_ptr. DEPRECATED (pre-pool stop-gap).
-   // Orphaned from codegen today — the live path is `pool` below.
-   std::shared_ptr<gas_state> shared_gas;
+   // gas_yield requires a handler which yields and advances the deadline.
+   // The caller owns user_data for the instance's lifetime.
+   gas_handler_t yield_handler = nullptr;
+   void*         yield_user_data = nullptr;
 
    // Multi-module gas tracking. When set, this instance leases gas from
    // the shared pool at lease boundaries (handler entry and instance
@@ -258,8 +256,8 @@ public:
    std::size_t memory_size() const;
 
    // ── Run start ───────────────────────────────────────────────────
-   // Convenience: run module.start (if present) then resolve and call
-   // `_start`. Returns the WASI exit code captured from
+   // Call `_start`. The module's start section runs once during instantiate,
+   // after resource limits and bindings are installed. Returns the WASI exit code from
    // wasi_exit_exception, or 0 if `_start` returns normally without
    // calling proc_exit. Other psizam exceptions propagate.
    int run_start();

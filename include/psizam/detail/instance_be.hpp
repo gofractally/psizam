@@ -75,7 +75,9 @@ public:
    virtual char*    linear_memory()       noexcept = 0;
    virtual uint32_t current_pages() const noexcept = 0;
 
-   // Run module.start (if present) then resolve and call `_start`. The host
+   virtual void initialize_start(void* host_ptr) = 0;
+
+   // Resolve and call `_start`. Module initialization has already run. The host
    // pointer flows through to host-function trampolines. Returns the WASI
    // exit code captured from `wasi_host::wasi_exit_exception`; returns 0 if
    // `_start` returns normally without proc_exit. Other psizam / std
@@ -135,6 +137,7 @@ public:
    // them at teardown to credit unused lease back to a shared pool).
 
    virtual void set_gas_budget(uint64_t budget) = 0;
+   virtual gas_state& gas() noexcept = 0;
    virtual void set_gas_handler(void (*handler)(gas_state*, void*),
                                 void* user_data) = 0;
    virtual uint64_t gas_consumed_raw() const = 0;
@@ -156,7 +159,8 @@ std::unique_ptr<instance_be> make_instance_be(
    host_function_table table,
    void* host_ptr,
    char* external_base = nullptr,
-   uint32_t external_budget_bytes = 0);
+   uint32_t external_budget_bytes = 0,
+   bool gas_metering = true);
 
 // The optional LLVM library supplies this factory. Selecting it at the call
 // site gives static linkers a strong reference and keeps psizam-exec usable
@@ -165,7 +169,7 @@ using instance_backend_factory = decltype(&make_instance_be);
 std::unique_ptr<instance_be> make_llvm_instance_be(
    backend_kind kind, const std::vector<uint8_t>& wasm,
    host_function_table table, void* host_ptr,
-   char* external_base, uint32_t external_budget_bytes);
+   char* external_base, uint32_t external_budget_bytes, bool gas_metering);
 
 } // namespace detail
 } // namespace psizam

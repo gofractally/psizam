@@ -20,12 +20,13 @@ public:
    instance_be_impl(backend_kind kind,
                     const std::vector<uint8_t>& wasm,
                     host_function_table table,
-                    void* host_ptr)
+                    void* host_ptr, bool gas_metering = true)
       : kind_(kind)
    {
       auto& code = const_cast<std::vector<uint8_t>&>(wasm);
       be_ = std::make_unique<backend_t>(
-         code, std::move(table), host_ptr, &alloc_);
+         code, std::move(table), host_ptr, &alloc_,
+         default_options{.gas_metering = gas_metering, .defer_start = true});
    }
 
    // Caller-provided mode: allocator uses pre-allocated buffer.
@@ -34,13 +35,14 @@ public:
                     host_function_table table,
                     void* host_ptr,
                     char* external_base,
-                    uint32_t external_bytes)
+                    uint32_t external_bytes, bool gas_metering = true)
       : alloc_(external_base, external_bytes)
       , kind_(kind)
    {
       auto& code = const_cast<std::vector<uint8_t>&>(wasm);
       be_ = std::make_unique<backend_t>(
-         code, std::move(table), host_ptr, &alloc_);
+         code, std::move(table), host_ptr, &alloc_,
+         default_options{.gas_metering = gas_metering, .defer_start = true});
    }
 
    // Pooled mode: allocator uses a pre-mapped guarded region from
@@ -51,13 +53,14 @@ public:
                     host_function_table table,
                     void* host_ptr,
                     wasm_allocator::pooled_tag tag,
-                    char* pooled_raw)
+                    char* pooled_raw, bool gas_metering = true)
       : alloc_(tag, pooled_raw)
       , kind_(kind)
    {
       auto& code = const_cast<std::vector<uint8_t>&>(wasm);
       be_ = std::make_unique<backend_t>(
-         code, std::move(table), host_ptr, &alloc_);
+         code, std::move(table), host_ptr, &alloc_,
+         default_options{.gas_metering = gas_metering, .defer_start = true});
    }
 
    backend_kind kind()         const noexcept override { return kind_; }
@@ -70,12 +73,14 @@ public:
       return be_->get_context().current_linear_memory();
    }
 
+   void initialize_start(void* host_ptr) override {
+      auto& mod = be_->get_module();
+      if (mod.start != std::numeric_limits<uint32_t>::max())
+         be_->call_by_index(host_ptr, mod.start);
+   }
+
    int run_start(void* host_ptr) override {
       try {
-         auto& mod = be_->get_module();
-         if (mod.start != std::numeric_limits<uint32_t>::max()) {
-            be_->call_by_index(host_ptr, mod.start);
-         }
          be_->call(host_ptr, std::string_view{"_start"});
       } catch (const wasi_host::wasi_exit_exception& e) {
          return e.code;
@@ -209,6 +214,7 @@ public:
    }
 
    // ── Gas plumbing ──────────────────────────────────────────────────
+   gas_state& gas() noexcept override { return be_->get_context().gas(); }
    void set_gas_budget(uint64_t budget) override {
       be_->get_context().set_gas_budget(gas_units{budget});
    }
