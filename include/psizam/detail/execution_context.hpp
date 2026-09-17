@@ -758,8 +758,9 @@ namespace psizam::detail {
       template <typename TC = psizam::type_converter<standalone_function_t>, typename... Args>
       inline std::optional<operand_stack_elem> execute(void* host, jit_visitor vis, uint32_t func_index, Args&&... args)
       {
-         stack_allocator alt_stack(get_maximum_stack_size());
-         return execute<TC>(alt_stack, host, vis, func_index, std::forward<Args>(args)...);
+         return _entry_stacks.execute(get_maximum_stack_size(), [&](stack_allocator& alt_stack) {
+            return execute<TC>(alt_stack, host, vis, func_index, std::forward<Args>(args)...);
+         });
       }
 
       /// Dynamic dispatch — call a function with pre-built native_value arguments.
@@ -767,8 +768,9 @@ namespace psizam::detail {
       inline std::optional<operand_stack_elem> execute_dynamic(void* host, uint32_t func_index,
                                                                native_value* args_raw, size_t args_count)
       {
-         stack_allocator alt_stack(get_maximum_stack_size());
-         return execute_dynamic(alt_stack, host, func_index, args_raw, args_count);
+         return _entry_stacks.execute(get_maximum_stack_size(), [&](stack_allocator& alt_stack) {
+            return execute_dynamic(alt_stack, host, func_index, args_raw, args_count);
+         });
       }
 
       inline std::optional<operand_stack_elem> execute_dynamic(stack_allocator& alt_stack, void* host,
@@ -782,6 +784,8 @@ namespace psizam::detail {
          _host = host;
          this->_host_ptr = host;
 
+         const auto saved_call_depth = this->_remaining_call_depth;
+         auto restore_call_depth = scope_guard([&] { this->_remaining_call_depth = saved_call_depth; });
          const auto& ft = _mod->get_function_type(func_index);
          native_value_extended result;
 
@@ -795,11 +799,6 @@ namespace psizam::detail {
                   _mod->code[func_index - _mod->get_imported_functions_size()].jit_code_offset);
                auto saved_call_depth = this->_remaining_call_depth;
                auto depth_guard = scope_guard([&](){ this->_remaining_call_depth = saved_call_depth; });
-
-               if (alt_stack.guard_base()) {
-                  stack_guard_range = std::span<std::byte>(
-                     static_cast<std::byte*>(alt_stack.guard_base()), alt_stack.guard_size());
-               }
 
                invoke_with_signal_handler([&]() {
                   if (alt_stack.top()) {
@@ -816,7 +815,8 @@ namespace psizam::detail {
                      result.vector.low  = args_raw[0].i64;
                      result.vector.high = args_raw[1].i64;
                   }
-               }, &handle_signal, _mod->allocator, base_type::get_wasm_allocator());
+               }, &handle_signal, _mod->allocator, base_type::get_wasm_allocator(),
+                     {static_cast<std::byte*>(alt_stack.guard_base()), alt_stack.guard_size()});
             } else {
                void* stack = alt_stack.top();
 #ifdef __x86_64__
@@ -828,15 +828,11 @@ namespace psizam::detail {
                   _mod->code[func_index - _mod->get_imported_functions_size()].jit_code_offset
                   + _mod->allocator._code_base);
 
-               if (alt_stack.guard_base()) {
-                  stack_guard_range = std::span<std::byte>(
-                     static_cast<std::byte*>(alt_stack.guard_base()), alt_stack.guard_size());
-               }
-
                invoke_with_signal_handler([&]() {
                   result = get_execute()(this, base_type::linear_memory(), args_raw, fn, stack,
                                         static_cast<uint64_t>(args_count), ft.return_type == types::v128);
-               }, &handle_signal, _mod->allocator, base_type::get_wasm_allocator());
+               }, &handle_signal, _mod->allocator, base_type::get_wasm_allocator(),
+                     {static_cast<std::byte*>(alt_stack.guard_base()), alt_stack.guard_size()});
             }
          } catch(wasm_exit_exception&) {
             return {};
@@ -926,12 +922,6 @@ namespace psizam::detail {
                auto saved_call_depth = this->_remaining_call_depth;
                auto depth_guard = scope_guard([&](){ this->_remaining_call_depth = saved_call_depth; });
 
-               // Register the stack guard page so the signal handler catches overflow
-               if (alt_stack.guard_base()) {
-                  stack_guard_range = std::span<std::byte>(
-                     static_cast<std::byte*>(alt_stack.guard_base()), alt_stack.guard_size());
-               }
-
                invoke_with_signal_handler([&]() {
                   if (alt_stack.top()) {
                      // Execute on the dedicated stack — isolates WASM from host C stack
@@ -952,7 +942,8 @@ namespace psizam::detail {
                      result.vector.low  = args_raw[0].i64;
                      result.vector.high = args_raw[1].i64;
                   }
-               }, &handle_signal, _mod->allocator, base_type::get_wasm_allocator());
+               }, &handle_signal, _mod->allocator, base_type::get_wasm_allocator(),
+                     {static_cast<std::byte*>(alt_stack.guard_base()), alt_stack.guard_size()});
             } else {
                // Native JIT path: use assembly trampoline at _code_base
                void* stack = alt_stack.top();
@@ -975,12 +966,6 @@ namespace psizam::detail {
                auto saved_call_depth = this->_remaining_call_depth;
                auto depth_guard = scope_guard([&](){ this->_remaining_call_depth = saved_call_depth; });
 
-               // Register the stack guard page so the signal handler catches overflow
-               if (alt_stack.guard_base()) {
-                  stack_guard_range = std::span<std::byte>(
-                     static_cast<std::byte*>(alt_stack.guard_base()), alt_stack.guard_size());
-               }
-
                if constexpr(EnableBacktrace) {
 #ifndef PSIZAM_COMPILE_ONLY
                   sigset_t block_mask;
@@ -995,12 +980,14 @@ namespace psizam::detail {
 
                   invoke_with_signal_handler([&]() {
                      result = execute<args_count>(args_raw, fn, this, base_type::linear_memory(), stack, ft.return_type);
-                  }, &handle_signal, _mod->allocator, base_type::get_wasm_allocator());
+                  }, &handle_signal, _mod->allocator, base_type::get_wasm_allocator(),
+                     {static_cast<std::byte*>(alt_stack.guard_base()), alt_stack.guard_size()});
 #endif
                } else {
                   invoke_with_signal_handler([&]() {
                      result = execute<args_count>(args_raw, fn, this, base_type::linear_memory(), stack, ft.return_type);
-                  }, &handle_signal, _mod->allocator, base_type::get_wasm_allocator());
+                  }, &handle_signal, _mod->allocator, base_type::get_wasm_allocator(),
+                     {static_cast<std::byte*>(alt_stack.guard_base()), alt_stack.guard_size()});
                }
             }
          } catch(wasm_exit_exception&) {
@@ -1352,6 +1339,7 @@ namespace psizam::detail {
       uint32_t        jit_eh_exnref = 0;      // staging: exnref index for *_ref catch kinds
 
    protected:
+      entry_stack_cache _entry_stacks;
       void* _host = nullptr;
       std::vector<jit_eh_frame>      _jit_eh_stack;
       std::vector<jit_eh_catch>      _jit_eh_catches;

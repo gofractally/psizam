@@ -89,7 +89,20 @@ template<class Impl> void run(psizam::wasm_code code,bool gas,bool check_only) {
       hb.fail=false;
       require(a.call_by_index(&ha,reenter,int32_t(7),int32_t(4))->to_ui32()==get_value(7),"recovery failed");
    }
-   // Host grows the active guest memory, then the same entry reads the new page.
+   // Exercise actual A -> B -> A execution on distinct leased large stacks.
+   auto max_a=a.get_module().maximum_stack,max_b=b.get_module().maximum_stack;
+   a.get_module().maximum_stack=b.get_module().maximum_stack=8192;
+   const auto prior_guard=psizam::detail::stack_guard_range;
+   for(int i=0;i<3;++i) {
+      require(a.call_by_index(&ha,reenter,int32_t(17),int32_t(4))->to_ui32()==get_value(17),"large-stack reentry mismatch");
+      require(psizam::detail::stack_guard_range.data()==prior_guard.data(),"stale stack guard after return");
+      hb.fail=true;
+      expect_throw([&]{a.call_by_index(&ha,reenter,int32_t(1),int32_t(1));});
+      hb.fail=false;
+      require(psizam::detail::stack_guard_range.data()==prior_guard.data(),"stale stack guard after trap");
+   }
+   a.get_module().maximum_stack=max_a;b.get_module().maximum_stack=max_b;
+   // Host grows the active guest memory; the following entry reads the new page.
    ha.on_get=[&]{require(a.call_with_return(&ha,"grow")->to_i32()==1,"growth failed");};
    a.call_by_index(&ha,leaf,int32_t(9));ha.on_get={};
    require(a.call_with_return(&ha,"read",int32_t(65536))->to_i32()==0,"new memory not visible");

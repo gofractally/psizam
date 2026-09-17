@@ -110,6 +110,45 @@ namespace psizam {
    };
 #endif
 
+   // Reuse guarded entry stacks. Each active reentrant entry leases a distinct
+   // stack, so A -> host -> B -> host -> A never resets a suspended stack.
+   // Like execution_context, this cache is confined to its executing thread.
+   class entry_stack_cache {
+      struct entry {
+         std::size_t capacity;
+         stack_allocator stack;
+         explicit entry(std::size_t size) : capacity(size), stack(size) {}
+      };
+      std::vector<std::unique_ptr<entry>> _stacks;
+      std::size_t _active = 0;
+   public:
+      std::size_t cached_stack_count() const { return _stacks.size(); }
+      template<typename F>
+      decltype(auto) execute(std::size_t size, F&& f) {
+         if (size <= 4*1024*1024) {
+            stack_allocator stack(size);
+            return std::forward<F>(f)(stack);
+         }
+         return execute_large(size, std::forward<F>(f));
+      }
+   private:
+      template<typename F>
+      [[gnu::noinline]] decltype(auto) execute_large(std::size_t size, F&& f) {
+         if (_active == _stacks.size())
+            _stacks.push_back(std::make_unique<entry>(size));
+         else if (_stacks[_active]->capacity < size)
+            _stacks[_active] = std::make_unique<entry>(size);
+         // The pointee is stable even if a nested call grows the vector.
+         auto& stack = _stacks[_active]->stack;
+         ++_active;
+         struct release {
+            std::size_t& active;
+            ~release() { --active; }
+         } lease{_active};
+         return std::forward<F>(f)(stack);
+      }
+   };
+
 #ifdef PSIZAM_COMPILE_ONLY
    class contiguous_allocator {
       public:

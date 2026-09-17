@@ -28,7 +28,7 @@ namespace psizam::detail {
    }
 
    template<typename F, typename E>
-   auto invoke_with_signal_handler(F&& f, E&&, growable_allocator&, wasm_allocator*) {
+   auto invoke_with_signal_handler(F&& f, E&&, growable_allocator&, wasm_allocator*, std::span<std::byte> = {}) {
       return f();
    }
 
@@ -369,7 +369,8 @@ namespace psizam::detail {
    ///
    // Make this noinline to prevent possible corruption of the caller's local variables.
    template<typename F, typename E>
-   [[gnu::noinline]] auto invoke_with_signal_handler(F&& f, E&& e, growable_allocator& code_allocator, wasm_allocator* mem_allocator) {
+   [[gnu::noinline]] auto invoke_with_signal_handler(F&& f, E&& e, growable_allocator& code_allocator, wasm_allocator* mem_allocator,
+                                                         std::span<std::byte> entry_stack_guard = {}) {
       setup_signal_handler();
       sigjmp_buf dest;
       const auto old_code_memory_range = code_memory_range;
@@ -377,6 +378,7 @@ namespace psizam::detail {
       active_code_allocator = &code_allocator;
       const auto old_memory_range = memory_range;
       const auto old_stack_guard_range = stack_guard_range;
+      if (!entry_stack_guard.empty()) stack_guard_range = entry_stack_guard;
       sigjmp_buf* old_trap_ptr = trap_jmp_ptr;
       code_memory_range = code_allocator.get_code_span();
       memory_range = mem_allocator->get_span();

@@ -974,17 +974,12 @@ namespace psizam {
       auto scoped_execution(F&& f) {
          stack_allocator alt_stack(ctx->get_maximum_stack_size());
 
-         // Register the stack guard page
-         if (alt_stack.guard_base()) {
-            detail::stack_guard_range = std::span<std::byte>(
-               static_cast<std::byte*>(alt_stack.guard_base()), alt_stack.guard_size());
-         }
-
          return detail::invoke_with_signal_handler(
             std::forward<F>(f),
             &context_t::handle_signal,
             mod->allocator,
-            memory_alloc);
+            memory_alloc,
+            {static_cast<std::byte*>(alt_stack.guard_base()), alt_stack.guard_size()});
       }
 
       /// Convenience: get a typed function that captures its own stack allocation.
