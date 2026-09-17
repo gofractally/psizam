@@ -92,7 +92,7 @@ inline native_value invoke_host_trampoline(void* host, native_value* args,
 
 // Catch host exceptions before crossing generated frames. Their unwind
 // descriptions do not preserve every callee-saved register.
-// Args are already in forward order (packed by the JIT stub).
+// Args retain reverse Wasm stack order; the table path converts them.
 // remaining_stack is synced to context for recursive host→WASM calls.
 inline native_value call_host_function(void* ctx, native_value* args,
                                        uint32_t idx, uint32_t remaining_stack) {
@@ -109,9 +109,7 @@ inline native_value call_host_function(void* ctx, native_value* args,
             return;
          }
       }
-      uint32_t mapped_index = context->_mod->import_functions[idx];
-      result = context->_table->call(context->get_host_ptr(), mapped_index, args,
-                                     context->linear_memory());
+      result = context->call_host_function(args, idx);
    });
    context->_remaining_call_depth = saved;
    return result;

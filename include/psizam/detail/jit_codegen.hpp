@@ -535,58 +535,57 @@ namespace psizam::detail {
          emit_inline_host_call(funcnum, extra);
       }
 
-      // Inline trampoline dispatch — calls trampoline directly without call_host_function.
+      // Direct trampoline dispatch with a canonical table fallback.
       // Trampoline signature: native_value(*)(void* host, native_value* args, char* memory)
       // SysV ABI: rdi=host_ptr, rsi=args_buf, rdx=linear_memory
       static constexpr int32_t trampoline_ptrs_offset() { return 160; }
       static constexpr int32_t host_ptr_offset() { return 168; }
 
       void emit_inline_host_call(uint32_t funcnum, uint32_t extra) {
-         // Zero-copy host call: pass WASM stack pointer directly to reverse-order trampoline.
-         // Trampoline signature: native_value(*)(void* host, native_value* args, char* memory)
-         // SysV ABI: rdi=host_ptr, rsi=stack_args, rdx=linear_memory
+         // Keep the existing reverse-order argument buffer for direct bindings.
+         // Canonical bindings have no direct trampoline and need table dispatch.
+         this->emit_bytes(0x57, 0x56); // save context and linear memory
+         this->emit_mov(rsi, rdx); // direct-call memory argument
+         this->emit_bytes(0x48, 0x8d, 0x74, 0x24, static_cast<uint8_t>(24 + extra));
+         // RSI now points at the last Wasm argument, before stack alignment.
+         this->emit_bytes(0x48, 0x89, 0xe0);
+         this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
+         this->emit_bytes(0x50, 0x50);
 
-         this->emit_bytes(0x57);             // pushq %rdi  (save ctx)
-         this->emit_bytes(0x56);             // pushq %rsi  (save mem_base)
-
-         // Load trampoline and host_ptr from context while rdi is still valid.
-         // r8=trampoline, r9=host_ptr, r10=mem_base (all caller-saved).
-         this->emit_mov(*(rdi + trampoline_ptrs_offset()), rax);  // rax = _host_trampoline_ptrs
-         this->emit_mov(*(rax + static_cast<int32_t>(funcnum * 8)), rax); // rax = trampoline[funcnum]
-         this->emit_mov(rax, r8);            // r8 = trampoline
-         this->emit_mov(*(rdi + host_ptr_offset()), r9);   // r9 = host_ptr
-         this->emit_mov(rsi, r10);           // r10 = mem_base
-
-         // rsi = pointer to args on WASM stack (already in reverse order).
-         // Stack layout: [rsp]=saved_rsi, [rsp+8]=saved_rdi, [rsp+16]=ret_addr,
-         //               [rsp+24+extra]=paramN-1, [rsp+32+extra]=paramN-2, ...
-         this->emit_bytes(0x48, 0x8d, 0x74, 0x24); // lea N(%rsp), %rsi
-         this->emit_bytes(static_cast<uint8_t>(24 + extra)); // rsi = &args[0] (reverse order)
-
-         // Set up remaining SysV args
-         this->emit_mov(r10, rdx);           // rdx = memory (SysV arg 3)
-         this->emit_mov(r9, rdi);            // rdi = host_ptr (SysV arg 1)
-
-         // Align stack and enter the C++ exception boundary
-         this->emit_bytes(0x48, 0x89, 0xe0); // mov %rsp, %rax (save rsp)
-         this->emit_bytes(0x48, 0x83, 0xe4, 0xf0); // andq $-16, %rsp
-         this->emit_bytes(0x50);             // push %rax (save restore point)
-         this->emit_bytes(0x50);             // push %rax
-         this->emit_mov(r8, rcx); // fourth argument: trampoline
+         this->emit_mov(*(rdi + trampoline_ptrs_offset()), rax);
+         this->emit_bytes(0x48, 0x85, 0xc0); // test %rax, %rax
+         auto* no_table = this->emit_branchcc32(base::JZ);
+         this->emit_mov(*(rax + static_cast<int32_t>(funcnum * 8)), rcx);
+         this->emit_bytes(0x48, 0x85, 0xc9); // test %rcx, %rcx
+         auto* no_trampoline = this->emit_branchcc32(base::JZ);
+         this->emit_mov(*(rdi + host_ptr_offset()), rdi);
          this->emit_bytes(0x48, 0xb8);
          emit_reloc(reloc_symbol::jit_invoke_host_trampoline);
          this->emit_operand_ptr(&invoke_host_trampoline);
-         this->emit_bytes(0xff, 0xd0); // call exception-safe host bridge
-         // Restore stack
-         this->emit_bytes(0x48, 0x8b, 0x24, 0x24); // mov (%rsp), %rsp
-         this->emit_bytes(0x5e);             // popq %rsi
-         this->emit_bytes(0x5f);             // popq %rdi
+         this->emit_bytes(0xff, 0xd0);
+         this->emit_bytes(0xe9);
+         auto* done = this->emit_branch_target32();
+
+         base::fix_branch(no_table, code);
+         base::fix_branch(no_trampoline, code);
+         // RDI is still the context; the fallback reverses scalar slots on
+         // the native stack and retains the C++ exception escape boundary.
+         this->emit_mov(funcnum, edx);
+         this->emit_mov(*(rdi + 16), ecx);
+         this->emit_bytes(0x48, 0xb8);
+         emit_reloc(reloc_symbol::call_host_function);
+         this->emit_operand_ptr(&call_host_function);
+         this->emit_bytes(0xff, 0xd0);
+         base::fix_branch(done, code);
+
+         this->emit_bytes(0x48, 0x8b, 0x24, 0x24); // restore native stack
+         this->emit_bytes(0x5e, 0x5f);
          if (_enable_backtrace) {
-            this->emit_bytes(0x31, 0xd2);       // xorl %edx, %edx
-            this->emit_bytes(0x48, 0x89, 0x17); // movq %rdx, (%rdi)
-            this->emit_bytes(0x5d);             // popq %rbp
+            this->emit_bytes(0x31, 0xc9); // preserve RAX:RDX return values
+            this->emit_bytes(0x48, 0x89, 0x0f);
+            this->emit_bytes(0x5d);
          }
-         this->emit_bytes(0xc3);             // retq
+         this->emit_bytes(0xc3);
       }
 
       // ──────── Function prologue/epilogue ────────

@@ -7528,59 +7528,56 @@ namespace psizam::detail {
          emit_inline_host_call(funcnum, extra);
       }
 
-      // Inline trampoline dispatch — calls trampoline directly without call_host_function.
+      // Direct trampoline dispatch with a canonical table fallback.
       // Trampoline signature: native_value(*)(void* host, native_value* args, char* memory)
       // SysV ABI: rdi=host_ptr, rsi=args_buf, rdx=linear_memory
       static constexpr int32_t trampoline_ptrs_offset() { return 160; }
       static constexpr int32_t host_ptr_offset() { return 168; }
 
       void emit_inline_host_call(uint32_t funcnum, uint32_t extra) {
-         // Zero-copy host call: pass WASM stack pointer directly to reverse-order trampoline.
-         // Trampoline signature: native_value(*)(void* host, native_value* args, char* memory)
-         // SysV ABI: rdi=host_ptr, rsi=stack_args, rdx=linear_memory
+         // Keep the existing reverse-order argument buffer for direct bindings.
+         // Canonical bindings have no direct trampoline and need table dispatch.
+         emit_bytes(0x57, 0x56); // save context and linear memory
+         emit_mov(ebx, *(rdi + 16)); // synchronize recursive-call depth
+         emit_mov(rsi, rdx); // direct-call memory argument
+         emit_bytes(0x48, 0x8d, 0x74, 0x24, static_cast<uint8_t>(24 + extra));
+         // RSI now points at the last Wasm argument, before stack alignment.
+         emit_bytes(0x48, 0x89, 0xe0);
+         emit_bytes(0x48, 0x83, 0xe4, 0xf0);
+         emit_bytes(0x50, 0x50);
 
-         emit_bytes(0x57);                    // pushq %rdi  (save ctx)
-         emit_bytes(0x56);                    // pushq %rsi  (save mem_base)
-
-         // Sync depth register (ebx) to context for recursive host→WASM calls
-         emit_mov(ebx, *(rdi + 16));          // ctx->_remaining_call_depth = ebx
-
-         // Load trampoline and host_ptr from context while rdi is still valid.
-         // r8=trampoline, r9=host_ptr, r10=mem_base (all caller-saved).
-         emit_mov(*(rdi + trampoline_ptrs_offset()), rax);  // rax = _host_trampoline_ptrs
-         emit_mov(*(rax + static_cast<int32_t>(funcnum * 8)), rax); // rax = trampoline[funcnum]
-         emit_mov(rax, r8);                   // r8 = trampoline
-         emit_mov(*(rdi + host_ptr_offset()), r9);   // r9 = host_ptr
-         emit_mov(rsi, r10);                  // r10 = mem_base
-
-         // rsi = pointer to args on WASM stack (already in reverse order).
-         // Stack layout: [rsp]=saved_rsi, [rsp+8]=saved_rdi, [rsp+16]=ret_addr,
-         //               [rsp+24+extra]=paramN-1, [rsp+32+extra]=paramN-2, ...
-         emit_bytes(0x48, 0x8d, 0x74, 0x24);  // lea N(%rsp), %rsi
-         emit_bytes(static_cast<uint8_t>(24 + extra)); // rsi = &args[0] (reverse order)
-
-         // Set up remaining SysV args
-         emit_mov(r10, rdx);                  // rdx = memory (SysV arg 3)
-         emit_mov(r9, rdi);                   // rdi = host_ptr (SysV arg 1)
-
-         // Align stack and enter the C++ exception boundary
-         emit_bytes(0x48, 0x89, 0xe0);        // mov %rsp, %rax (save rsp)
-         emit_bytes(0x48, 0x83, 0xe4, 0xf0);  // andq $-16, %rsp
-         emit_bytes(0x50);                     // push %rax (save restore point)
-         emit_bytes(0x50);                     // push %rax
-         emit_mov(r8, rcx); // fourth argument: trampoline
+         emit_mov(*(rdi + trampoline_ptrs_offset()), rax);
+         emit_bytes(0x48, 0x85, 0xc0); // test %rax, %rax
+         auto* no_table = emit_branchcc32(JZ);
+         emit_mov(*(rax + static_cast<int32_t>(funcnum * 8)), rcx);
+         emit_bytes(0x48, 0x85, 0xc9); // test %rcx, %rcx
+         auto* no_trampoline = emit_branchcc32(JZ);
+         emit_mov(*(rdi + host_ptr_offset()), rdi);
          emit_bytes(0x48, 0xb8);
          emit_operand_ptr(&invoke_host_trampoline);
-         emit_bytes(0xff, 0xd0);         // call exception-safe host bridge
-         // Restore stack
-         emit_restore_stack();                 // mov (%rsp), %rsp
-         emit_bytes(0x5e);                     // popq %rsi
-         emit_bytes(0x5f);                     // popq %rdi
+         emit_bytes(0xff, 0xd0);
+         emit_bytes(0xe9);
+         auto* done = emit_branch_target32();
+
+         fix_branch(no_table, code);
+         fix_branch(no_trampoline, code);
+         // RDI is still the context; the fallback reverses scalar slots on
+         // the native stack and retains the C++ exception escape boundary.
+         emit_mov(funcnum, edx);
+         emit_mov(*(rdi + 16), ecx);
+         emit_bytes(0x48, 0xb8);
+         emit_operand_ptr(&call_host_function);
+         emit_bytes(0xff, 0xd0);
+         fix_branch(done, code);
+
+         emit_bytes(0x48, 0x8b, 0x24, 0x24); // restore native stack
+         emit_bytes(0x5e, 0x5f);
          if (_enable_backtrace) {
-            emit_restore_backtrace_basic();
-            emit_bytes(0x5d);                  // popq %rbp
+            emit_bytes(0x31, 0xc9); // preserve RAX:RDX return values
+            emit_bytes(0x48, 0x89, 0x0f);
+            emit_bytes(0x5d);
          }
-         emit_bytes(0xc3);                     // retq
+         emit_bytes(0xc3);
       }
 
       // Needs to run before saving %rdi.  Returns the number of bytes pushed onto the stack.
@@ -7622,7 +7619,7 @@ namespace psizam::detail {
 
       // Catch host exceptions before they cross generated frames: their unwind
       // descriptions do not preserve every callee-saved register.
-      // Args are already in forward order (packed by the JIT stub).
+      // Args retain reverse Wasm stack order; the table path converts them.
       // remaining_stack is synced to context for recursive host→WASM calls.
       static native_value call_host_function(void* ctx, native_value* args, uint32_t idx, uint32_t remaining_stack) {
          auto* context = static_cast<jit_execution_context<false>*>(ctx);
@@ -7638,8 +7635,7 @@ namespace psizam::detail {
                   return;
                }
             }
-            uint32_t mapped_index = context->_mod->import_functions[idx];
-            result = context->_table->call(context->get_host_ptr(), mapped_index, args, context->linear_memory());
+            result = context->call_host_function(args, idx);
          });
          context->_remaining_call_depth = saved;
          return result;
