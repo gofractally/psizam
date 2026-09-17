@@ -26,9 +26,14 @@ def main():
             if sha(w/'source'/repo/name)!=digest:raise ValueError('Frozen source changed: '+repo+'/'+name)
     if kit.exists():raise ValueError('Refusing to overwrite kit')
     shutil.copytree(w/'source',kit/'source');e=kit/'evidence';e.mkdir()
+    for name,digest in data['config'].get('orchestration',{}).items():
+        source=w/name
+        if sha(source)!=digest:raise ValueError('Orchestration script changed: '+name)
+        directory=kit/'orchestration';directory.mkdir(exist_ok=True)
+        shutil.copy2(source,directory/name)
     for item in w.iterdir():
         if item.is_file() and item.suffix in ['.json','.jsonl']:shutil.copy2(item,e/item.name)
-    for name in ['logs','sources','validation-evidence']:
+    for name in ['logs','sources','validation-evidence','platform-config','platform-reference']:
         if (w/name).exists():shutil.copytree(w/name,e/name)
     (e/'modules').mkdir()
     for item in (w/'modules').glob('*.wasm'):
@@ -66,11 +71,14 @@ def main():
             shutil.copy2(Path(__file__).resolve().parents[2]/'docs'/name,engineering/name)
     for name in ['summary.json','psizam-cranelift-report.pdf','report.html','charts.json',
                  *sorted(p.name for p in out.glob('*.csv')),*json.loads((out/'charts.json').read_text())]:
+        (kit/name).parent.mkdir(parents=True,exist_ok=True)
         shutil.copy2(out/name,kit/name)
+    if (out/'platform-comparison').exists():
+        shutil.copytree(out/'platform-comparison',kit/'platform-comparison',dirs_exist_ok=True)
     shutil.copy2(Path(__file__).parent/('COMPREHENSIVE.md' if a.comprehensive else 'README.md'),kit/'README.md')
     # Report presentation may evolve independently of the frozen measured engine.
     renderer=kit/'report-source';renderer.mkdir()
-    for name in ['report.py','visual_report.py','extended_report.py','service_report.py','size_report.py','provenance.py','run.py','sources.lock.json']:
+    for name in ['report.py','visual_report.py','extended_report.py','service_report.py','size_report.py','provenance.py','run.py','compare_platforms.py','sources.lock.json']:
         shutil.copy2(Path(__file__).parent/name,renderer/name)
     (renderer/'README.md').write_text('Requires Python 3.11 or newer, matplotlib and reportlab. From the kit root, verify the kit and regenerate the report with:\n\n```sh\npython3 experiment-source/verify_package.py .\nPYTHONDONTWRITEBYTECODE=1 python3 report-source/report.py --work evidence --out ../regenerated-report'+(' --comprehensive' if a.comprehensive else '')+'\n```\n\nThe source/ directory preserves the compute/compiler snapshot. evidence/public-release/source preserves the measured call build; the JIT1 source location is recorded in artifact-sizes.json. Native artifacts are omitted explicitly; inspected sizes and SHA-256 identities are retained. report-source/ contains the renderer for the included report.\n')
     save(kit/'MANIFEST.json',{str(f.relative_to(kit)):{'sha256':sha(f),'bytes':f.stat().st_size} for f in sorted(kit.rglob('*')) if f.is_file()})

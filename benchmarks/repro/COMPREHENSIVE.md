@@ -36,12 +36,39 @@ build. `evidence/artifact-sizes.json` identifies the JIT1 writer snapshot used f
 saved-file sizes and release validation. Timing cells never pool different builds.
 No native executable or native-code cache is needed to regenerate charts.
 
+When `platform-comparison/` is included, it preserves the prior ARM summary
+and a comparison against this run, also included in the PDF. The archived
+`evidence/platform-reference/arm-summary.json` makes full report regeneration
+include those comparison pages automatically. Regenerate just its bars with:
+
+```sh
+python3 experiment-source/compare_platforms.py \
+  --arm platform-comparison/arm-summary.json --x86 summary.json \
+  --out ../regenerated-platform-comparison
+```
+
+The comparison requires identical compute Wasm hashes, compiler fixtures and
+Wasmtime versions. Each host supplies its own Wasmtime reference; the resulting
+ratios describe the measured platforms, without isolating instruction-set effects.
+
 ## Build and rerun the measurements
 
-Use macOS ARM64, LLVM 22.1.2, WASI SDK 32, CMake, Ninja, WABT, Python 3,
-Wasmtime CLI 48.0.2 and its matching C API distribution. The recorded machine is
-an Apple M5 Max; other machines are new experimental conditions. A Clang artifact
-compilation has a 3,660-second watchdog. Reserve several hours for the full run.
+Use WASI SDK 32, CMake, Ninja, WABT, Python 3, Wasmtime CLI 48.0.2 and its matching
+C API distribution. The report and `evidence/config.json` identify the measured
+host. The recorded compiler/platform pairings are LLVM 22.1.2 on Apple M5 Max
+macOS ARM64 and LLVM 20.1.8 on the Linux x86-64 VPS. Other machines are new
+experimental conditions. A Clang artifact compilation has a 3,660-second
+watchdog. Reserve several hours for the full run.
+
+The Linux x86-64 VPS experiment is a separate set of conditions: AMD EPYC-Turin
+virtual CPU, LLVM 20.1.8, WASI SDK 32 and Wasmtime 48.0.2. Runtime subprocesses
+are pinned to vCPU 2; artifact compilation can use all vCPUs. LLVM and Cranelift
+compiler-worker budgets are 1/16 for compute and 4/16 for Clang. The VPS kit's
+`orchestration/` directory retains the exact build, validation, CPU-affinity and
+serial execution scripts. Per-process steal-time observations accompany the
+runtime evidence. Hardware instruction/cycle counters are unavailable there;
+missing counters are never represented as zero. The Mac and VPS results do not
+isolate instruction-set effects from CPU, OS, compiler or source differences.
 
 Keep the supplied frozen sources intact. This command verifies the kit, creates
 working copies of all three source snapshots, overlays only the experiment harness,
@@ -54,6 +81,15 @@ sh experiment-source/replay-comprehensive.sh \
   /path/to/wasmtime /absolute/path/new-report
 ```
 
+For the recorded Linux configuration, prefix that command with `BENCH_CPU=2` and
+`BENCH_LLVM_DIR="$PWD/evidence/platform-config/llvm20-cmake"`, using
+`/usr/lib/llvm-20` as the LLVM prefix. The retained CMake wrapper selects the
+distro LLVM headers without introducing libc++ headers into the libstdc++
+build. Both X86 and AArch64 LLVM targets are enabled, including the API's
+cross-compilation checks. Adjust paths for another distribution. Worker budgets are read
+from the kit's recorded compute and compiler matrices. CPU affinity applies
+to execution; compilation retains the available CPU set.
+
 Use a new measurement directory. The script refuses to overwrite trial files.
 It verifies pinned input hashes, records every process command and output,
 checks exact compiler-object hashes and requires all timing cells. A failed
@@ -65,6 +101,32 @@ must also be run using `source/psizam/docs/validation.md` and labeled separately
 The scalar spec suite has one unsupported multiple-memory case; the report
 states that limitation explicitly.
 
+## Running the compiler with Wasmtime
+
+The pinned `clang.wasm` imports only WASI Preview 1 functions. It runs with
+Wasmtime's standard WASI implementation; a psizam-specific host is unnecessary.
+Both compiler workloads in this suite run the same guest compiler under
+Wasmtime and psizam and require the same output-object SHA-256.
+
+For example, with the pinned files under `fixtures/` and an existing `output/`:
+
+```sh
+wasmtime run -C compiler=cranelift,cache=n \
+  -W max-wasm-stack=16777216 \
+  --dir "$PWD/fixtures::/fixtures" --dir "$PWD/output::/output" \
+  fixtures/clang.wasm -cc1 -triple wasm32-unknown-wasi -emit-obj \
+  -O2 -std=c++17 -x c++-cpp-output /fixtures/SipHash.cpp.ii \
+  -o /output/result.o
+```
+
+Ordinary unpreprocessed inputs additionally need accessible headers and a
+sysroot. A complete build must orchestrate compiler and linker jobs outside
+the guest: WASI Preview 1 does not provide the process spawning used by a
+native Clang driver. `scripts/pzam-clang-driver.py` currently performs that
+orchestration for PZAM; an equivalent wrapper can invoke Wasmtime for Clang
+and the Wasm linker. This is separate from implementing custom Wasm imports.
+Wasmtime uses its own saved native-code artifact, not `.pzam`.
+
 ## Definitions and interpretation
 
 - Compute: five trials plus one excluded warmup per cell. The eight workloads
@@ -72,13 +134,16 @@ states that limitation explicitly.
 - CoreMark: three trials plus one warmup for each of two CRC seed sets, with
   every run at least ten seconds. Counts are calibrated per engine and held
   fixed across its limit settings. Compare iterations/second across engines.
-- Clang preparation: three trials per artifact, with 4 and 18 workers for LLVM
-  and Cranelift; JIT2 uses one. Time includes compilation and saving. Page
+- Clang preparation: three trials per artifact, with 4 and 18 workers on the
+  Mac, or 4 and 16 on the VPS, for LLVM and Cranelift; JIT2 uses one.
+  Time includes compilation and saving. Page
   timeout uses the exact unrestricted psizam artifact. Cranelift epoch code is
   separately compiled. Budgets count compiler workers, not guest threads.
 - C++ jobs: five trials plus one warmup, including startup, fresh engine
-  compilation where applicable, guest Clang work and object writing. Saved LLVM
-  and Cranelift use the 18-worker artifact consistently. Whole-module LLVM ORC
+  compilation where applicable, guest Clang work and object writing. Fresh JITs
+  use one compiler worker; this is not the fastest parallel Cranelift startup.
+  Saved LLVM
+  and Cranelift use the higher-worker artifact consistently. Whole-module LLVM ORC
   cold Clang startup and a full Clang self-bootstrap are outside this test.
 - Boundaries: five trials plus one warmup, ten million scalar calls per path.
   Checked and cached/unchecked API paths have different semantics, stated in
@@ -111,6 +176,6 @@ states that limitation explicitly.
   show only work-budget and time-limit overhead, including negative variation.
 
 Raw trials and observed ranges are retained. Medians are descriptive estimates
-on a desktop machine, not proof of statistical equivalence. Source-confirmed
+on the recorded host, not proof of statistical equivalence. Source-confirmed
 extra work and controlled ablations are distinguished from optimization
 hypotheses that need further experiments.

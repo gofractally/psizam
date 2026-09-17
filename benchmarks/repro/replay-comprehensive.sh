@@ -28,6 +28,26 @@ case "$(uname -m)" in
   *) echo 'Unsupported host architecture.' >&2; exit 2 ;;
 esac
 python3 "$bench_kit/experiment-source/verify_package.py" "$bench_kit"
+bench_threads=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(",".join(map(str,sorted({int(v.split("/j")[1].split("/")[0]) for v in d["matrix"] if v.startswith(("llvm-o2-pzam/","cranelift-aot/"))}))))' "$bench_kit/evidence/resources.json")
+bench_clang_threads=$(python3 -c 'import json,sys; print(",".join(map(str,json.load(open(sys.argv[1]))["threads"])))' "$bench_kit/evidence/clang-resource-config.json")
+bench_run() {
+  if [ -n "${BENCH_CPU:-}" ]; then
+    python3 "$bench_kit/orchestration/run-stage.py" "$@"
+  else
+    python3 "$@"
+  fi
+}
+bench_call_run() {
+  if [ -n "${BENCH_CPU:-}" ]; then
+    taskset -c "$BENCH_CPU" python3 "$@"
+  else
+    python3 "$@"
+  fi
+}
+if [ -n "${BENCH_CPU:-}" ] && [ ! -f "$bench_kit/orchestration/run-stage.py" ]; then
+  echo 'BENCH_CPU requires the Linux affinity adapter included in the VPS kit.' >&2
+  exit 2
+fi
 bench_service=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["directory"])' "$bench_kit/evidence/service-cohort.json")
 bench_writer=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["jit1_provenance"]["directory"])' "$bench_kit/evidence/artifact-sizes.json")
 mkdir "$bench_build/replay-source"
@@ -42,16 +62,30 @@ for bench_cohort in compute calls writer; do
     "$bench_llvm" "$bench_api" "$bench_sdk"
 done
 bench_scripts="$bench_build/replay-source/compute/psizam/benchmarks/repro"
-python3 "$bench_scripts/run.py" prepare --work "$bench_work" \
+bench_run "$bench_scripts/run.py" prepare --work "$bench_work" \
   --wasi-sdk "$bench_sdk" --native-cc "$bench_llvm/bin/clang" \
   --engine-bin "$bench_build/compute/engine/bin" --runner "$bench_build/compute/runner/repro-psizam" \
   --wasmtime "$bench_wt" --psio-source "$bench_build/replay-source/compute/psio" \
   --source-cache "$bench_kit/evidence/sources"
-python3 "$bench_scripts/resources.py" --work "$bench_work" --threads 1,18 --samples 5 --compile-samples 3
-python3 "$bench_scripts/clang_resources.py" prepare --work "$bench_work" --fixtures "$bench_kit/evidence/compiler-fixtures"
-python3 "$bench_scripts/clang_resources.py" compile --work "$bench_work"
-python3 "$bench_scripts/clang_resources.py" measure --work "$bench_work"
-python3 "$bench_scripts/boundary.py" --work "$bench_work" --runner "$bench_build/compute/runner/repro-boundary" --samples 5
+if [ -n "${BENCH_CPU:-}" ]; then
+  python3 - "$bench_work/config.json" "$BENCH_CPU" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]);config=json.loads(p.read_text())
+cpu=sys.argv[2]
+config['execution_cpu_affinity']=cpu
+config['placement_notes']='Linux runtime subprocesses pinned to CPU '+cpu+'; compiler subprocesses retain the available CPU set. Physical-core isolation, frequency and temperature are not controlled.'
+for line in Path('/proc/cpuinfo').read_text().splitlines():
+    if line.startswith('model name'):
+        config['hardware']={'machdep.cpu.brand_string':line.split(':',1)[1].strip()};break
+p.write_text(json.dumps(config,indent=2)+'\n')
+PY
+fi
+bench_run "$bench_scripts/resources.py" --work "$bench_work" --threads "$bench_threads" --samples 5 --compile-samples 3
+bench_run "$bench_scripts/clang_resources.py" prepare --work "$bench_work" --fixtures "$bench_kit/evidence/compiler-fixtures" --threads "$bench_clang_threads"
+bench_run "$bench_scripts/clang_resources.py" compile --work "$bench_work"
+bench_run "$bench_scripts/clang_resources.py" measure --work "$bench_work"
+bench_run "$bench_scripts/boundary.py" --work "$bench_work" --runner "$bench_build/compute/runner/repro-boundary" --samples 5
 for bench_policy in none gas; do
   bench_gas=off
   if [ "$bench_policy" = gas ]; then bench_gas=on; fi
@@ -72,19 +106,19 @@ config={repo:source_identity(source/repo) for repo in ['psizam','psio']}
 digest=freeze_source(SimpleNamespace(work=directory,config=config))
 save(work/'service-cohort.json',dict(directory=directory.name,commit=config['psizam']['commit'],source_manifest_sha256=digest))
 PY
-python3 "$bench_build/replay-source/calls/psizam/benchmarks/call-boundary/run.py" \
+bench_call_run "$bench_build/replay-source/calls/psizam/benchmarks/call-boundary/run.py" \
   --binary "$bench_build/calls/calls/call-boundary" --fixture "$bench_build/calls/calls/calls.wasm" \
   --aot-dir "$bench_build/calls/calls" --out "$bench_work/public-release/service-calls" --samples 5
-python3 "$bench_build/replay-source/calls/psizam/benchmarks/call-boundary/run_runtime.py" \
+bench_call_run "$bench_build/replay-source/calls/psizam/benchmarks/call-boundary/run_runtime.py" \
   --binary "$bench_build/calls/calls/call-runtime" \
   --fixtures "$bench_build/calls/engine/examples/composition" --out "$bench_work/public-release/runtime-calls" --samples 5
-python3 "$bench_scripts/run.py" prepare --work "$bench_work/coremark" \
+bench_run "$bench_scripts/run.py" prepare --work "$bench_work/coremark" \
   --wasi-sdk "$bench_sdk" --native-cc "$bench_llvm/bin/clang" \
   --engine-bin "$bench_work/tools" --runner "$bench_work/tools/repro-psizam" \
   --wasmtime "$bench_work/tools/wasmtime" --psio-source "$bench_build/replay-source/compute/psio" \
   --source-cache "$bench_kit/evidence/sources"
-python3 "$bench_scripts/resources.py" --work "$bench_work/coremark" --only coremark --threads 1 --samples 3 --compile-samples 3
-python3 "$bench_scripts/native_coremark.py" --work "$bench_work/coremark" --samples 3
+bench_run "$bench_scripts/resources.py" --work "$bench_work/coremark" --only coremark --threads 1 --samples 3 --compile-samples 3
+bench_run "$bench_scripts/native_coremark.py" --work "$bench_work/coremark" --samples 3
 python3 "$bench_scripts/artifact_sizes.py" --work "$bench_work" \
   --probe "$bench_build/writer/runner/repro-code-size" --readobj "$bench_llvm/bin/llvm-readobj" \
   --jit1-compiler "$bench_build/writer/engine/bin/pzam-compile" \

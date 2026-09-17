@@ -52,13 +52,16 @@ def summarize_experiments(work, main):
     if any(not r['valid'] for r in core['enforcement']+core['measurements']):
         raise ValueError('CoreMark gate failure')
     core_rows=core['measurements']
+    counters_available=all('process_instructions' in r and 'process_cycles' in r for r in core_rows)
     for r in core_rows:
         if r['execution_s']<10:raise ValueError('CoreMark trial shorter than ten seconds')
-        r['instructions_per_iteration']=r['process_instructions']/r['iterations']
-        r['cycles_per_iteration']=r['process_cycles']/r['iterations']
+        if counters_available:
+            r['instructions_per_iteration']=r['process_instructions']/r['iterations']
+            r['cycles_per_iteration']=r['process_cycles']/r['iterations']
         r['outside_fraction']=(r['wall_s']-r['execution_s'])/r['wall_s']
+    counter_metrics=['instructions_per_iteration','cycles_per_iteration'] if counters_available else []
     core_cells=cells(core_rows,['mode','profile','phase'],core['samples'],
-                     ['score','execution_s','iterations','peak_rss_bytes','instructions_per_iteration','cycles_per_iteration','outside_fraction'])
+                     ['score','execution_s','iterations','peak_rss_bytes','outside_fraction',*counter_metrics])
     expected={f'{v.split("/")[0]}/{p}/{seed}' for v in core['matrix'] for p in POLICIES for seed in ['performance','validation']}
     if set(core_cells)!=expected:raise ValueError('Incomplete CoreMark cells')
     native=read('coremark/native-coremark.json')
@@ -103,6 +106,7 @@ def summarize_experiments(work, main):
                if '__pycache__' not in Path(name).parts):
             raise ValueError('Release validation source differs from JIT1 writer')
     return {'coremark':{'cells':core_cells,'samples':core['samples'],'enforcement_checks':len(core['enforcement']),
+                       'counters_available':counters_available,
                        'trials':len(core_rows),'source_manifest_sha256':core['source_manifest_sha256'],
                        'native':native_cells,'native_compiler':native['compiler']},
             'clang':{'config':cc,'compilation':comp_cells,'jobs':job_cells,'trials':len(jobs)},
@@ -118,6 +122,8 @@ def render(s,out,title,para,picture,charts,phase):
     from matplotlib.ticker import PercentFormatter
     from visual_report import WORKLOAD_TEXT
     ext=s['extended'];profiles=s['runtime_profiles'];names=s['workloads']
+    host=html.escape(s['config'].get('hardware',{}).get('machdep.cpu.brand_string',s['config']['machine']))
+    is_arm=s['config']['machine'] in ['arm64','aarch64']
     def label(v):return LABELS[v.split('/')[0]]
     def bars(filename,labels,series,xlabel,percent=False):
         fig,ax=plt.subplots(figsize=(9,max(2.8,len(labels)*.66+1.1)),layout='constrained')
@@ -150,15 +156,23 @@ def render(s,out,title,para,picture,charts,phase):
         core_gap={p:100*(1-core['llvm-o2-pzam/'+p+'/performance']['score']/core['cranelift-aot/'+p+'/performance']['score']) for p in ['none','gas']}
         comp=ext['clang']['compilation'];large=ext['clang']['config']['runtime_workers']
         sizes=ext['artifact_sizes']['cells']
+        jobs=ext['clang']['jobs']
+        compiler_ratios=[jobs[n+'/llvm-o2-pzam/none']['wall_s']/jobs[n+'/cranelift-aot/none']['wall_s'] for n in ['SipHash.cpp','APInt.cpp']]
+        mixed_service_case=(means['none']>1 and ours['repeated_host_query_ns']<theirs['repeated_host_query_ns']
+                            and call_delta>0 and core_gap['none']>0 and min(compiler_ratios)>1)
         title('Abstract: engine choice for psibase services')
-        para('<b>Assessment:</b> The results support psizam as a competitive choice for services that reuse compiled code. They establish neither a universal winner nor a compelling execution-performance case for switching to Cranelift. Our strongest measured execution tier is saved LLVM code. For database-dominated applications, the remaining call gap may have little effect on user latency; extremely frequent, lightweight service calls favor Cranelift. This is a workload-dependent judgment, not proof of equal performance.')
-        para(f'<b>Compute and calls:</b> Saved LLVM runs the eight compute workloads {means["none"]:.2f}x as fast as Cranelift AOT on their equal-weight geometric mean, and {means["gas"]:.2f}x with gas/fuel. CoreMark favors Cranelift: LLVM throughput is {core_gap["none"]:.1f}% lower without limits and {core_gap["gas"]:.1f}% lower with them. Neither workload mix establishes a psibase transaction-throughput ranking. Repeated scalar host queries favor LLVM ({ours["repeated_host_query_ns"]:.2f} versus {theirs["repeated_host_query_ns"]:.2f} ns). A protected service round trip favors cached Cranelift ({theirs[call_metric]:.2f} versus {ours[call_metric]:.2f} ns), a {call_delta:.1f} ns gap; the gas/fuel gap is {gas_delta:.1f} ns. The relevant competitor is its cached API, not its slower checked API.')
-        para(f'<b>Practical significance:</b> As an illustration, eliminating {call_delta:.1f} ns once in a 1-microsecond transaction saves {call_delta/10:.2f}% of total time; once in a 10-microsecond transaction saves {call_delta/100:.2f}%. One million such calls accumulate {call_delta:.1f} ms of execution time. These are arithmetic scenarios, assuming unchanged surrounding work, not measured application improvements. Database access, payload handling and application logic can dilute the gap. Call-dense workloads, CPU saturation and infrastructure cost can still justify closing it.')
+        assessment=('Engine choice depends on the application mix: compute, repeated host queries, protected service calls and preparation costs have different winners. The results below compare saved LLVM with Cranelift AOT for compute and cached Cranelift for service calls. Database work and payload handling can dilute a call-boundary difference; call-dense applications need representative transaction measurements. These microbenchmarks do not establish a universal winner or equal application performance.' if not mixed_service_case else
+                    'For reusable psibase services, psizam remains a credible choice: saved LLVM leads this compute mix and its repeated host queries are faster. Cached Cranelift wins protected service calls, CoreMark and complete Clang jobs. The results support focused optimization of specific costs. They do not establish a reason to replace the engine for all applications, or prove equal transaction performance. A production decision still needs representative latency and capacity measurements.')
+        para('<b>Assessment:</b> '+assessment)
+        para(f'<b>Compute and calls:</b> Saved LLVM runs the eight compute workloads {means["none"]:.2f}x as fast as Cranelift AOT on their equal-weight geometric mean, and {means["gas"]:.2f}x with gas/fuel. Its CoreMark throughput is {1-core_gap["none"]/100:.2f}x Cranelift without limits and {1-core_gap["gas"]/100:.2f}x with them. Neither workload mix establishes a psibase transaction-throughput ranking. Repeated scalar host queries take {ours["repeated_host_query_ns"]:.2f} ns for LLVM versus {theirs["repeated_host_query_ns"]:.2f} ns for Cranelift. A protected service round trip takes {ours[call_metric]:.2f} versus {theirs[call_metric]:.2f} ns, a signed LLVM-minus-Cranelift difference of {call_delta:.1f} ns; with gas/fuel, the difference is {gas_delta:.1f} ns. The relevant competitor is its cached API.')
+        para(f'<b>Practical significance:</b> For scale, a {abs(call_delta):.1f} ns boundary difference accounts for {abs(call_delta)/10:.2f}% of a 1-microsecond transaction, or {abs(call_delta)/100:.2f}% of a 10-microsecond transaction. Across one million such calls, the difference totals {abs(call_delta):.1f} ms. These are arithmetic scenarios, assuming unchanged surrounding work, not measured application improvements. Database access, payload handling and application logic can dilute the gap. Call-dense workloads, CPU saturation and infrastructure cost can still justify closing it.')
         para(f'<b>Preparation and deployment:</b> Preparing Clang takes {comp[f"cranelift-aot/{large}/none"]["wall_s"]:.2f} s with Cranelift versus {comp[f"llvm-o2-pzam/{large}/none"]["wall_s"]:.1f} s with LLVM at {large} workers; saved files are {sizes["clang/cranelift-aot/none"]["artifact_bytes"]/2**20:.1f} versus {sizes["clang/llvm-o2-pzam/none"]["artifact_bytes"]/2**20:.1f} MiB. psizam can use JIT2 for initial runs while LLVM AOT is prepared or loaded into cache, then use cached AOT for subsequent runs. Full AOT preparation therefore need not block initial service availability. Background compilation still consumes CPU and memory; this report measures the tiers separately, not concurrent preparation or switchover.')
-        para('<b>Engineering decision:</b> Retain psizam and pursue inexpensive, measured improvements. Prioritize correctness and representative transaction measurements over costly rewrites to erase a nanosecond-scale microbenchmark deficit. Accept the residual gap when end-to-end latency and capacity targets are met; this report alone cannot certify that users will never notice it. A controlled full-LLVM-O2 comparison remains justified before settling the optimized tier.')
-        para('<b>Scope:</b> One Apple M5 Max. Compute compares saved artifacts; call tests compare loaded LLVM PZAM with warm Cranelift C API modules, excluding compilation and linking. They measure scalar boundaries, not database execution, payload serialization, full IPC, concurrent load or tail latency. Canonical runtime proxies lack a matching Cranelift comparison. The report\'s LLVM O2 label means backend code generation at level 2 plus a custom IR pass sequence, not LLVM\'s full default O2 pipeline.','Small')
+        compiler_gap=max(compiler_ratios)
+        compiler_note=(f'The complete Clang jobs reach {compiler_gap:.2f}x Wasmtime AOT latency, so compiler-service work deserves separate load/setup and execution profiling. ' if compiler_gap>1.2 else '')
+        para('<b>Engineering decision:</b> Pursue inexpensive improvements to protected calls. '+compiler_note+'Accept a residual gap when end-to-end latency and capacity targets are met; this report cannot certify that users will never notice it. A controlled full-LLVM-O2 comparison remains justified before settling the optimized tier.')
+        para('<b>Scope:</b> '+host+'. Compute compares saved artifacts; call tests compare loaded LLVM PZAM with warm Cranelift C API modules, excluding compilation and linking. They measure scalar boundaries, not database execution, payload serialization, full IPC, concurrent load or tail latency. Canonical runtime proxies lack a matching Cranelift comparison. The report\'s LLVM O2 label means backend code generation at level 2 plus a custom IR pass sequence, not LLVM\'s full default O2 pipeline.','Small')
         title('Wasm engines: performance and development priorities')
-        para('A practical guide to choosing and improving psizam execution backends. The report measures seven engine configurations, eight compute workloads, CoreMark, two real C++ compiler jobs, host queries, protected service round trips and canonical runtime bindings on one Apple M5 Max.')
+        para('A practical guide to choosing and improving psizam execution backends. The report measures seven engine configurations, eight compute workloads, CoreMark, two real C++ compiler jobs, host queries, protected service round trips and canonical runtime bindings on '+host+'.')
         para('<b>Three separate questions:</b> How quickly does compiled code run? What does enforcing a work budget or deadline add? What does it cost to prepare, load and call that code? The charts keep these costs separate.')
         means={p:gm(s['cells'][n][ref+'/'+p]['median_s']/s['cells'][n][llvm+'/'+p]['median_s'] for n in names) for p in POLICIES}
         gas=[100*(s['relative_time'][v]['gas']-1) for v in [llvm,ref]]
@@ -181,12 +195,17 @@ def render(s,out,title,para,picture,charts,phase):
         simd=gm(s['cells'][n][jit2+'/none']['median_s']/s['cells'][n][llvm+'/none']['median_s'] for n in ['gemm-simd','jacobi-simd'])
         boundary=ext['boundary']['cells'];checked=boundary['jit2/none']['host_to_guest_checked_ns'];typed=boundary['jit2/none']['host_to_guest_optimized_ns']
         service=ext['services']['service-calls']['cells']
+        jobs=ext['clang']['jobs']
+        compiler_ratios={n:jobs[n+'/llvm-o2-pzam/none']['wall_s']/jobs[n+'/cranelift-aot/none']['wall_s'] for n in ['SipHash.cpp','APInt.cpp']}
+        code_priority=(f'LLVM O2 reaches {ratio:.2f}x Cranelift AOT CoreMark throughput. Its weakest relative compute result is {WORKLOAD_TEXT[worst]["short"]}, at {speedups[worst]:.2f}x. Use those kernels and compiler jobs to guide IR and native-code inspection, then validate changes across all workloads. Counters alone do not identify the cause.' if is_arm else
+                       f'Complete saved-LLVM Clang jobs take {compiler_ratios["SipHash.cpp"]:.2f}x Wasmtime AOT time for SipHash and {compiler_ratios["APInt.cpp"]:.2f}x for APInt. These are process-wall measurements. First separate file loading, deserialization, relocations, instantiation, guest compilation and output; target the dominant phase before changing code generation. CoreMark reaches {ratio:.2f}x Wasmtime throughput. Also compare live LLVM with saved LLVM on scalar matrix multiplication, where the kernel timings expose a separate disparity.')
         call_priority=f"Protected A→host→B round trips cost {service['jit2/none']['service_a_host_service_b_ns']:.1f} ns for JIT2, {service['llvm-aot/none']['service_a_host_service_b_ns']:.1f} ns for LLVM O2 PZAM and {service['cranelift-cached/none']['service_a_host_service_b_ns']:.1f} ns for cached Cranelift. Profile remaining trap-entry and argument-adapter costs. Keep per-call protection and use the focused query and nested-call benchmarks before broader reruns."
         priorities=[
             ('1. Reduce protected call-entry and import overhead',call_priority),
             ('2. Optimize expensive preparation paths',f'Clang artifact creation takes {lt:.1f} s with LLVM O2 and {ct:.1f} s with Cranelift at {large} workers (no CPU limits). JIT2 can serve initial runs while AOT becomes available in cache, so this cost need not delay first service availability. Profile optimization, code generation, batching and memory to reduce background resource use and time until optimized execution.'),
-            ('3. Improve code quality where application work is slow',f'LLVM O2 reaches {ratio:.2f}x Cranelift AOT CoreMark throughput. Its weakest relative compute result is {WORKLOAD_TEXT[worst]["short"]}, at {speedups[worst]:.2f}x. Use those kernels and compiler jobs to guide IR and native-code inspection, then validate changes across all workloads. Counters alone do not identify the cause.'),
-            ('4. Address ARM vector execution in the fast compilers',f'Across the two SIMD workloads, JIT2 takes {simd:.1f}x the LLVM O2 execution time without CPU limits. JIT1/JIT2 ARM floating-point SIMD uses helper routines. Investigate native lowering while retaining the required floating-point semantics and complete SIMD validation.'),
+            ('3. '+('Improve code quality where application work is slow' if is_arm else 'Separate loading costs from generated-code costs'),code_priority),
+            (('4. Investigate vector execution in the fast compilers',f'Across the two SIMD workloads, JIT2 takes {simd:.1f}x the LLVM O2 execution time without CPU limits. JIT1/JIT2 ARM floating-point SIMD uses helper routines. Investigate native lowering while retaining the required floating-point semantics and complete SIMD validation.') if is_arm else
+             ('4. Complete JIT1 hardware-deterministic floating point','The x86 JIT1 scalar arithmetic emitters select software helpers for every mode except fast, including the requested hardware-deterministic mode. This is a concrete implementation cost to address before treating its floating-point results as a limit of the JIT design. Add native arithmetic with the required NaN, rounding and trap behavior, then validate against softfloat and rerun focused floating-point kernels.')),
         ]
         for heading,text in priorities:para('<b>'+heading+'</b><br/>'+text)
         para('<b>Release gate:</b> Keep exact compiler-output checks, scalar/SIMD suites and real gas/deadline exhaustion in standard validation. The measured compiler jobs cover two translation units; they do not prove a complete Clang self-bootstrap. Concurrent execution and other host architectures require separate acceptance runs.','Small')
@@ -255,30 +274,48 @@ def render(s,out,title,para,picture,charts,phase):
               [('Iterations per second',[ext['coremark']['native']['performance']['score']]+[core[m+'/none/performance']['score'] for m in modes],'#267CA4')],
               'CoreMark iterations per second | higher is better',
               'Native C is a different compilation target and execution model, without the Wasm sandbox. It is context, not another Wasm engine or a limit-enabled competitor. Three measured trials and one excluded warmup use both CRC seed sets and at least ten seconds per trial. Native compiler: '+html.escape(ext['coremark']['native_compiler'].splitlines()[0])+'.',height=375)
-    counters=['instructions_per_iteration','cycles_per_iteration']
-    title('CoreMark: evidence for code-generation analysis')
-    para('Whole-process hardware counters help determine whether a runtime gap accompanies more instructions, more cycles, or both. They are supporting evidence; they do not identify an optimization defect by themselves.')
-    for metric in counters:
-        filename='coremark-'+metric+'.png'
-        bars(filename,['LLVM O2 PZAM','Cranelift AOT'],[(POLICY_NAMES[p],[core[m+'/'+p+'/performance'][metric]/1000 for m in ['llvm-o2-pzam','cranelift-aot']],COLORS[p]) for p in ['none','gas']],
-             ('Thousands of retired instructions' if metric.startswith('instructions') else 'Thousands of elapsed cycles')+' per CoreMark iteration')
-        picture(filename,195)
-    frac=max(core[m+'/'+p+'/performance']['outside_fraction'] for m in ['llvm-o2-pzam','cranelift-aot'] for p in ['none','gas'])
-    para(f'Counters come from macOS /usr/bin/time -l and include process setup and teardown; they are divided by the trial\'s iteration count. The largest median share of process time outside the CoreMark timer is {100*frac:.2f}% across these four cells. Counters are not isolated function measurements and may include timer-thread work.','Small')
+    if ext['coremark']['counters_available']:
+        title('CoreMark: evidence for code-generation analysis')
+        para('Whole-process hardware counters help determine whether a runtime gap accompanies more instructions, more cycles, or both. They are supporting evidence; they do not identify an optimization defect by themselves.')
+        for metric in ['instructions_per_iteration','cycles_per_iteration']:
+            filename='coremark-'+metric+'.png'
+            bars(filename,['LLVM O2 PZAM','Cranelift AOT'],[(POLICY_NAMES[p],[core[m+'/'+p+'/performance'][metric]/1000 for m in ['llvm-o2-pzam','cranelift-aot']],COLORS[p]) for p in ['none','gas']],
+                 ('Thousands of retired instructions' if metric.startswith('instructions') else 'Thousands of elapsed cycles')+' per CoreMark iteration')
+            picture(filename,195)
+        frac=max(core[m+'/'+p+'/performance']['outside_fraction'] for m in ['llvm-o2-pzam','cranelift-aot'] for p in ['none','gas'])
+        para(f'Counters come from macOS /usr/bin/time -l and include process setup and teardown; they are divided by the trial\'s iteration count. The largest median share of process time outside the CoreMark timer is {100*frac:.2f}% across these four cells. Counters are not isolated function measurements and may include timer-thread work.','Small')
+    else:
+        title('CoreMark: memory use and measurement limits')
+        bars('coremark-memory.png',[LABELS[m] for m in modes],
+             [(POLICY_NAMES[p],[core[m+'/'+p+'/performance']['peak_rss_bytes']/2**20 for m in modes],COLORS[p]) for p in POLICIES],
+             'Peak resident memory during CoreMark, MiB | lower is smaller')
+        picture('coremark-memory.png',340)
+        para('Retired-instruction and cycle counters are unavailable for this run. No instruction-count, cycle-count or instructions-per-cycle comparison is claimed. Elapsed time, guest time, process CPU time where recorded, peak RSS and output checks remain in the raw evidence.')
+        para('A timing gap alone cannot distinguish extra instructions from scheduling, clock frequency, memory behavior or compiler choices. Use generated-code inspection and a host with counter access for causal analysis.')
     title('LLVM investigation plan: measure each proposed change')
     para('The measured LLVM path includes psizam\'s Wasm lowering, runtime helpers, IR optimization and native code generation. Source inspection identifies several controlled experiments that can explain the observed workload differences.')
     para('<b>IR optimization:</b> The O2 label selects LLVM backend code-generation level 2. psizam uses a custom function-level IR pass sequence with promotion, scalar replacement, common-subexpression elimination, instruction combining, control-flow simplification, value numbering and loop-invariant motion. It does not run LLVM\'s full default O2 module pipeline or a general interprocedural inliner.')
     para('<b>Proposed experiment:</b> Compare the existing pipeline with selected inlining and module-level passes on CoreMark and the compiler jobs. Track execution time, preparation time and memory together; faster runtime with sharply higher compile cost can still be unsuitable for short-lived modules.')
     para('<b>Runtime helpers:</b> Wasm global access and call-depth accounting emit helper calls. Profile the hot functions before changing these paths. Test whether direct context access or more precise helper effects improve generated code while retaining bounds, traps and call-stack limits.')
-    para('<b>Host tuning:</b> The AArch64 AOT target uses an empty CPU name and reserves x18, rather than explicitly selecting the measured Apple CPU. Test host-specific tuning against the portable artifact target, documenting any reduced portability and measuring both preparation and execution.')
+    if is_arm:
+        para('<b>Host tuning:</b> The AArch64 AOT target uses an empty CPU name and reserves x18, rather than explicitly selecting the measured Apple CPU. Test host-specific tuning against the portable artifact target, documenting any reduced portability and measuring both preparation and execution.')
+    else:
+        para('<b>x86 target choices:</b> Saved LLVM targets x86-64-v2 and uses the Large code model, allowing arbitrary 64-bit helper addresses. Measure host-feature tuning and shorter internal-call sequences separately, preserving artifact feature compatibility and correctness when helpers are far from the code mapping. These source choices are investigation targets, not quantified causes of a timing gap. Virtual-machine CPU exposure and physical-host scheduling are additional conditions.')
+    if not is_arm:
+        live=next(v for v in profiles if v.startswith('llvm-jit/'))
+        live_gap=s['cells']['gemm-scalar'][live+'/none']['median_s']/s['cells']['gemm-scalar'][llvm+'/none']['median_s']
+        live_meter=s['cells']['gemm-scalar'][live+'/gas']['median_s']/s['cells']['gemm-scalar'][live+'/none']['median_s']
+        meter_note=(f' Its gas-instrumented variant takes {live_meter:.2f}x its unrestricted time; compare both generated-code variants in the same investigation.'
+                    if live_meter < .8 or live_meter > 1.2 else '')
+        para(f'<b>Live LLVM versus saved LLVM:</b> The live JIT takes {live_gap:.2f}x the saved LLVM kernel time on scalar matrix multiplication without CPU limits. The live path builds one module through ORC LLJIT; the saved path explicitly creates its target machine and compiles functions or batches. Compare their target settings, optimized IR and assembly on this kernel before changing the shared optimization pipeline.'+meter_note+' These timings establish investigation targets, not their causes.')
     para('<b>Acceptance:</b> Change one factor at a time, preserve the unrestricted/gas/timeout matrix, run exact-output and scalar/SIMD validation, then rerun sustained CoreMark and both C++ jobs. These are source-grounded investigation targets; the current measurements do not assign a fraction of the runtime gap to any one of them.','Small')
-    para('Source references in the reproduction kit: source/psizam/src/llvm_ir_translator.cpp (optimization passes and helper calls), source/psizam/src/llvm_aot_compiler.cpp (target and backend level).','Small')
+    para('Source references in the reproduction kit: source/psizam/src/llvm_ir_translator.cpp (optimization passes and helper calls), source/psizam/src/llvm_aot_compiler.cpp (saved-code target and backend level), source/psizam/src/llvm_jit_compiler.cpp (ORC setup), source/psizam/include/psizam/detail/x86_64.hpp (JIT1 scalar floating-point emission).','Small')
     comp=ext['clang']['compilation'];config=ext['clang']['config'];jobs=ext['clang']['jobs']
     entries=[('jit2-pzam',1)]+[(m,t) for m in ['llvm-o2-pzam','cranelift-aot'] for t in config['threads']]
     for metric,filename,heading,xlabel,div in [('wall_s','clang-build-time.png','Preparing Clang.wasm for execution','Compile and save Clang, seconds | lower is better',1),
                                                ('peak_rss_bytes','clang-build-memory.png','Memory needed to prepare the compiler','Peak resident memory during artifact creation, MiB',2**20)]:
         chartpage(filename,heading,
-                  'Ahead-of-time compilation converts the pinned Clang.wasm module into saved native code. Four and eighteen workers expose the tradeoff between preparation time and memory.',
+                  'Ahead-of-time compilation converts the pinned Clang.wasm module into saved native code. Worker budgets of '+', '.join(map(str,config['threads']))+' expose the tradeoff between preparation time and memory.',
                   [LABELS[m]+f' / {t} '+('worker' if t==1 else 'workers') for m,t in entries],
                   [(POLICY_NAMES[p],[comp[f'{m}/{t}/{p}'][metric]/div for m,t in entries],COLORS[p]) for p in ['none','gas']],xlabel,
                   f'Median of {config["compile_samples"]} fresh compiler processes. The command includes startup, code generation and writing the artifact. A {config["compile_watchdog"]}-second watchdog allows long LLVM compilations. psizam timeouts reuse the exact no-limit code artifact; Cranelift epoch artifacts are separately measured and retained in summary.json. JIT2 can handle initial runs while LLVM AOT is prepared or loaded into cache, followed by cached AOT execution. These bars measure artifact preparation, not time to first service response under that strategy. Background contention and switchover are unmeasured; compilation and execution were timed separately.',height=390)
@@ -315,6 +352,8 @@ def render(s,out,title,para,picture,charts,phase):
     para(f'<b>Measured experiments:</b> {s["validation_checks"]} compute output comparisons and {s["enforcement_checks"]} resource checks pass. CoreMark contributes {ext["coremark"]["trials"]} CRC-validated runs across both seed sets and {ext["coremark"]["enforcement_checks"]} resource checks. All {ext["clang"]["trials"]} C++ jobs produce the expected object hashes. All {ext["boundary"]["trials"]} host-call processes pass exact integer checks. Counts include excluded warmups where applicable.')
     para('Source-matched standard-validation evidence is retained for the compute/compiler build. The current release-source acceptance results follow on the next page. All evidence includes test logs and binary identities. A replay on another host requires separate host acceptance.','Small')
     para('<b>Outstanding compatibility scope:</b> The scalar suite reports an unsupported multiple-memory memory.grow case. This remains a release-scope decision or implementation item. The benchmark workloads do not exercise every Wasm proposal, shared modules across concurrently executing instances, or blocked host calls.')
+    for gap in v.get('coverage_gaps',[]):
+        para('<b>Harness coverage gap:</b> '+gap,'Small')
     para('<b>Next acceptance milestone:</b> Reproduce a complete Clang self-bootstrap from pinned C++ sources and SDK; verify reproducible artifacts and output hashes, then run the independent-checkout validation on each supported host architecture. The two measured C++ translation units establish a narrower compiler-execution check.','Small')
     title('Public library acceptance and release scope')
     para('Public library acceptance is recorded against the separately archived JIT1 writer and release build. These checks exercise the installed runtime and saved-code APIs; the preceding performance measurements retain their own exact build identities.')
@@ -326,6 +365,6 @@ def render(s,out,title,para,picture,charts,phase):
         ('Resource controls', 'Public counters, budgets and interrupt requests use executing backend state. Finite budgets apply before initialization. The public timeout policy polls wall time at gas checkpoints; lower-level code-page interruption is the timeout mechanism measured in the engine comparison.'),
         ('Installed packages and diagnostics', 'Independent base and LLVM consumers use find_package. Base execution consumers load LLVM-generated PZAM without the LLVM compiler. Raw, prepared and cached modules report missing functions, signature mismatches, unsupported imports and missing dispatch implementations.'),
         ('Remaining contracts', 'Review memory, stack and compilation-policy enforcement; allocation-free public code-page deadlines; immutable code caching; instance-specific nonscalar bindings; gas-pool credits; library linking; logical WIT compatibility and dynamic cross-memory marshalling.'),
-        ('Compatibility and bootstrap', 'Review full compiler/options/runtime-ABI cache identity and malformed metadata bounds. Run native acceptance on supported ARM64 and x86-64 hosts, including 4 KiB and 16 KiB page layouts. Reproduce the complete Clang self-bootstrap. The Wasm-hosted pzam compiler also needs its 32-bit context layout and exception configuration resolved.')]:
+        ('Compatibility and bootstrap', 'Review full compiler/options/runtime-ABI cache identity and malformed metadata bounds. Keep native ARM64 and x86-64 acceptance in the release gate, including 4 KiB and 16 KiB page layouts. Reproduce the complete Clang self-bootstrap. The Wasm-hosted pzam compiler also needs its 32-bit context layout and exception configuration resolved.')]:
         para('<b>'+heading+':</b> '+description)
     para('The engineering/runtime-release-review.md checklist in the reproduction kit records source-review findings and test references. Working CLI paths and scalar call benchmarks establish narrower capabilities than a stable public-library contract.','Small')

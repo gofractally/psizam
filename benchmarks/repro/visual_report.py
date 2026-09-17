@@ -135,7 +135,10 @@ def generate(s,out,extension=None):
     fastest=speed[ranked[0]]
     para('<b>What this means for applications:</b> This measures the compute portion of CPU-heavy Wasm jobs, such as numerical simulation, matrix multiplication and stencil processing. '+label(ranked[0])+f' leads this aggregate at {fastest:.2f}x the reference speed. If an application\'s compute achieved that same speedup, that portion would take {100*(1-1/fastest):.0f}% less time. If it accounted for half of request latency, total latency would fall about {50*(1-1/fastest):.0f}%, with all other work unchanged. This is an illustration, not a measured application result; I/O, host calls, startup and compilation need separate measurements.')
     para('<b>Terms:</b> JIT compiles code when a module is loaded; AOT prepares code ahead of execution. PZAM is psizam\'s saved-code format; O2 names a compiler optimization level. Scalar Wasm expresses arithmetic on one value at a time; SIMD instructions operate on several values at once, within the same execution thread.','Small')
-    para('All compute profiles request canonical floating-point behavior. JIT1/JIT2 ARM floating-point SIMD uses helper routines; LLVM and Cranelift can use hardware vectors. Memory and call-stack safety checks remain enabled in all profiles.','Small')
+    vector_note=('JIT1/JIT2 ARM floating-point SIMD uses helper routines; LLVM and Cranelift can use hardware vectors. '
+                 if s['config']['machine'] in ['arm64','aarch64'] else
+                 'The runner requests hardware-deterministic floating point, but x86 JIT1 currently routes scalar FP arithmetic through software helpers. Its measurements include that implementation cost. ')
+    para('All compute profiles request canonical floating-point behavior. '+vector_note+'Memory and call-stack safety checks remain enabled in all profiles.','Small')
     for name in names:
         description=WORKLOAD_TEXT[name]
         title(description['title']+'<br/>Cost of work limits and timeouts')
@@ -151,7 +154,8 @@ def generate(s,out,extension=None):
         para('<b>Application relevance:</b> '+description['application'],'Small')
     if compilation:
         title('Time to compile and save executable code')
-        para('Ahead-of-time compilation (AOT) prepares native code before an application runs. PZAM is psizam\'s saved-code format. This chart measures preparing those files for the compute tests, including runs with one or 18 compiler workers.')
+        workers=sorted({r['threads'] for r in s['compilation']})
+        para('Ahead-of-time compilation (AOT) prepares native code before an application runs. PZAM is psizam\'s saved-code format. This chart measures preparing those files for the compute tests, using compiler worker budgets of '+', '.join(map(str,workers))+'.')
         picture('artifact-creation.png',390)
         para('Full command time includes process startup, compilation and writing the saved file. Each value is the median of per-test medians. Raw trials, file hashes and sizes are retained in resources.json. Requested workers are a budget; small modules may not use all workers.')
         para('LLVM O2 uses per-function compilation with one worker and batched compilation with multiple workers. That comparison includes batching and scheduling effects. No heavy compilation runs concurrently with execution timing.','Small')
@@ -159,6 +163,40 @@ def generate(s,out,extension=None):
         render(s,out,title,para,picture,charts,'details')
     if extension is not None:
         extension(s,out,title,para,picture,charts,'details')
+    if 'platform_reference' in s:
+        comparison=json.loads((out/'platform-comparison/platform-comparison.json').read_text())
+        title('How relative performance changes across platforms')
+        para('Each host supplies its own Wasmtime reference. A value of 1.20x means psizam achieves 20% higher throughput for the measured work on that host. Comparing these ratios shows whether psizam becomes more competitive in the recorded VPS environment.')
+        para('These are platform comparisons, not isolated instruction-set measurements: CPU, operating system, LLVM version and engine revision differ. All eight compute Wasm binaries, CoreMark, the service-call fixture and both compiler-job fixture manifests match exactly. The Wasmtime version is also identical.','Small')
+        rows=[['Saved LLVM / Wasmtime speed','Apple M5 Max','EPYC-Turin VPS']]
+        metrics=[('Eight compute workloads',{'kind':'compute'}),('CoreMark',{'kind':'coremark'}),
+                 ('Clang: SipHash C++ job',{'kind':'clang','workload':'SipHash.cpp'}),
+                 ('Clang: APInt C++ job',{'kind':'clang','workload':'APInt.cpp'})]
+        for name,fields in metrics:
+            values=[]
+            for platform in ['ARM','x86']:
+                matches=[r['relative_speed'] for r in comparison['rows']
+                         if r['platform']==platform and r['mode']=='llvm-o2-pzam' and r['policy']=='none'
+                         and all(r.get(k)==v for k,v in fields.items())]
+                if len(matches)!=1:raise ValueError('Missing platform comparison: '+name)
+                values.append(f'{matches[0]:.2f}x')
+            rows.append([name,*values])
+        table=Table([[Paragraph(x,styles['Small']) for x in row] for row in rows],colWidths=[270,117,117])
+        table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#E9F0F4')),('VALIGN',(0,0),(-1,-1),'TOP'),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)]))
+        story.append(table);web.append('<table>'+''.join('<tr>'+''.join('<td>'+x+'</td>' for x in row)+'</tr>' for row in rows)+'</table>')
+        para('No CPU limits in this table. Compute uses an equal-weight geometric mean; other rows retain their own timer definitions. These measures must not be combined into a transaction-throughput score. The following bars separate compute, resource limits and service-call paths.','Small')
+        descriptions={
+            'platform-compute-none.png':'Compute speed across platforms: no CPU limits',
+            'platform-compute-gas.png':'Compute speed across platforms: gas and fuel',
+            'platform-llvm-workloads-none.png':'LLVM by workload across platforms: no CPU limits',
+            'platform-llvm-workloads-gas.png':'LLVM by workload across platforms: gas and fuel',
+            'platform-entry_by_index_ns.png':'Protected guest entry across platforms',
+            'platform-repeated_host_query_ns.png':'Repeated host queries across platforms',
+            'platform-service_a_host_service_b_ns.png':'Protected service round trips across platforms'}
+        for name in comparison['charts']:
+            title(descriptions[name]);picture('platform-comparison/'+name,390)
+            charts.append('platform-comparison/'+name)
+            para('Wasmtime is 100 on each host. Higher bars favor psizam; a higher VPS bar than its ARM counterpart indicates improved relative performance for that measurement. Compute uses Wasmtime AOT. Call tests use the cached Wasmtime API with per-entry trap protection and tiny scalar payloads. These are not complete psibase IPC measurements.','Small')
     title('How the tests were run and what they cover')
     config=s['config'];hardware=config.get('hardware',{}).get('machdep.cpu.brand_string',config['machine'])
     para(html.escape(hardware+' | '+config['platform']+' | '+config['date_utc']))
@@ -168,14 +206,16 @@ def generate(s,out,extension=None):
     para('Gas/fuel units differ between engines and are not equivalent amounts of work. Performance budgets are deliberately non-exhausting. Both instrumented execution and actual exhaustion are tested. Timeout profiles omit gas accounting; the no-check profile omits both resource mechanisms.')
     para(f'<b>Correctness:</b> {s["enforcement_checks"]} resource checks pass, including finite completion, infinite loops and nonterminating module initialization. psizam must report its exact gas/timeout exception; Wasmtime must report its fuel/interrupt trap. The outer {s["outer_watchdog_s"]}-second process watchdog is distinct and never counts as successful enforcement.')
     para(f'{s["validation_checks"]} output comparisons pass against native output where applicable. PolyBench compares its printed arrays; this is not bitwise floating-point equality. CoreMark, if included, requires both CRC seed sets and at least ten seconds per accepted run.')
-    para('Execution trials run serially in fixed-seed randomized order, after one excluded warmup per cell. Artifact creation uses '+str(s['compile_samples'])+' measured fresh-process trials with no excluded warmup; small-module builds follow the fixed matrix order, while Clang builds are randomized when included. Filesystem caches are warm. The machine remains a desktop environment; CPU placement, frequency and temperature are not fixed. Medians and observed minima/maxima are in summary.json; raw commands and output remain in the work directory. No statistical significance claim is made.','Small')
+    placement=config.get('placement_notes','The machine remains a desktop environment; CPU placement, frequency and temperature are not fixed.')
+    para('Execution trials run serially in fixed-seed randomized order, after one excluded warmup per cell. Artifact creation uses '+str(s['compile_samples'])+' measured fresh-process trials with no excluded warmup; small-module builds follow the fixed matrix order, while Clang builds are randomized when included. Filesystem caches are warm. '+html.escape(placement)+' Medians and observed minima/maxima are in summary.json; raw commands and output remain in the work directory. No statistical significance claim is made.','Small')
     runtime_workers=sorted({int(v.split('/j')[1]) for v in profiles})
     selection='the one-worker build' if runtime_workers==[1] else 'the lowest compiler worker count available for each engine'
     para('Compute runtime charts and tables show one entry per engine, using '+selection+' consistently across tests and limit settings. Build parallelism is compared on the compilation page. Measurements from all compiler configurations remain in the raw data; they are not pooled into runtime results.','Small')
     para(s.get('scope_text') or ('This report covers eight compute workloads, sustained CoreMark, Clang artifact creation and two C++ jobs, and scalar host-call microbenchmarks. It does not measure a complete Clang bootstrap, cold-cache deployment, concurrent instances, or blocked host calls. ' if 'extended' in s else 'This report covers only the workloads listed in its charts. It does not measure a complete Clang bootstrap, host-call microbenchmarks, cold-cache deployment, concurrent instances, or blocked host calls. ')+'Page interruption is exercised with one execution owning its module.','Small')
     if 'extended' in s:
         title('Source identities and reproducibility')
-        para('Compute, CoreMark and compiler jobs use the same frozen CLI binaries. The supplementary scalar-boundary runner matches that source; the natural-signature service and canonical-proxy experiments use their independently archived public-runtime build. CoreMark has three measured trials for each seed set; C++ jobs and host calls have five; artifact creation has three. Clang runtime uses the 18-worker saved builds; compute runtime uses the one-worker saved builds. The reproduction kit records each experiment separately and retains all commands and outputs. Compiler-worker counts are never pooled or shown as extra runtime engines.','Small')
+        clang_workers=s['extended']['clang']['config']['runtime_workers']
+        para(f'Compute, CoreMark and compiler jobs use the same frozen CLI binaries. The supplementary scalar-boundary runner matches that source; the natural-signature service and canonical-proxy experiments use their independently archived public-runtime build. CoreMark has three measured trials for each seed set; C++ jobs and host calls have five; artifact creation has three. Clang runtime uses the {clang_workers}-worker saved builds; compute runtime uses the one-worker saved builds. The reproduction kit records each experiment separately and retains all commands and outputs. Compiler-worker counts are never pooled or shown as extra runtime engines.','Small')
     if 'extended' in s:
         e=s['extended']; writer=e['artifact_sizes']['jit1_provenance']
         para('Service-call source commit: '+e['service_cohort']['commit']+'; manifest: '+e['service_cohort']['source_manifest_sha256']+'.<br/>JIT1 saved-file writer / release source commit: '+writer['config']['psizam']['commit']+'; manifest: '+writer['source_manifest_sha256']+'. Each experiment retains its own source archive, compiler hash and inputs. No different builds are pooled within a timing cell.','Small')
@@ -193,7 +233,7 @@ def generate(s,out,extension=None):
                 if heading!='Contents':self.notify('TOCEntry',(0,heading,self.page,key))
     doc=ReportDocument(str(out/'psizam-cranelift-report.pdf'),pagesize=(612,792),rightMargin=54,leftMargin=54,topMargin=43,bottomMargin=48,title='psizam and Cranelift: '+('completed benchmark results' if extension else 'comprehensive performance and release readiness' if 'extended' in s else 'compute speed, work budgets and timeouts'))
     if comprehensive:
-        toc=TableOfContents();toc.levelStyles=[ParagraphStyle(name='ContentsEntry',fontName='Helvetica',fontSize=8.5,leading=10.5,spaceBefore=0,textColor=colors.HexColor('#19364B'))]
+        toc=TableOfContents();toc.levelStyles=[ParagraphStyle(name='ContentsEntry',fontName='Helvetica',fontSize=8.5,leading=10,spaceBefore=0,textColor=colors.HexColor('#19364B'))]
         toc.tableStyle.add('TOPPADDING',(0,0),(-1,-1),0)
         toc.tableStyle.add('BOTTOMPADDING',(0,0),(-1,-1),0)
         first_break=next(i for i,f in enumerate(story) if isinstance(f,PageBreak))

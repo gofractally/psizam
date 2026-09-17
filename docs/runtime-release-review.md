@@ -13,8 +13,9 @@ separate capabilities; a working CLI path does not establish public API parity.
 | Cached PZAM instantiation | `runtime_release`: saved JIT1, JIT2 and LLVM O2 code, ordered import arguments, indirect calls, isolated memories, gas compatibility and instance lifetime. Installed base consumers execute LLVM PZAM without LLVM. |
 | Import diagnostics | `runtime_release`: missing imports, signature mismatch, absent dispatch, nonfunction imports, prepared and cached bindings, WIT signatures and malformed Wasm. |
 
-The focused public acceptance target passes 232 assertions on ARM64 with LLVM
-and 175 on x86-64 under Rosetta without LLVM. Gas-handler tests also
+Recorded focused public acceptance passes 232 assertions on native ARM64/macOS
+and native x86-64/Linux with LLVM; each run retains its source identity.
+The x86-64 Rosetta run without LLVM passes 175 assertions. Gas-handler tests also
 verify that exceptions leave generated code safely, release their exception object
 and permit subsequent calls. The installed-consumer gate covers both base and LLVM
 packages. These gates establish the items above, not all pending contracts below.
@@ -60,16 +61,31 @@ packages. These gates establish the items above, not all pending contracts below
 - **Cache identity and loader hardening.** Review compiler identity, compilation
   options and runtime ABI invalidation, malformed relocation/metadata bounds,
   architecture selection and 4 KiB versus 16 KiB JIT page layouts.
-- **Saved-artifact storage.** The measured unmetered Clang LLVM artifact has
-  2,803,016 relocation entries and 59.03 MiB outside its native region. Classify
+- **Saved-artifact storage.** Use each run's `artifact-sizes.json` to inspect
+  Clang's relocation counts and bytes outside the native region. Classify
   remaining relocation kinds and distinguish module data from serialization
   overhead before changing the representation. Same-batch PC-relative function
   calls already have an optimization; investigate other base-independent
   relocations and cold loading with focused measurements. These are proposed
   storage/load-time improvements, not measured runtime gains.
-- **Supported platforms and spec scope.** Run native x86-64 and ARM acceptance;
+- **Supported platforms and spec scope.** Keep native x86-64 and ARM acceptance
+  in the release gate;
   document multiple memories as unsupported. The current scalar suite's
   `memory_grow_2` failures are in this unsupported feature, not a passing gate.
+- **Generated specification coverage.** WABT 1.0.40 cannot parse the GC syntax
+  in the pinned `table_init.wast`; the generated `table_init_tests.cpp` is empty
+  on both recorded hosts. Split supported table-initialization cases from
+  unsupported proposal cases and retain a generation coverage manifest. An
+  omitted source must be visible in CI and must not count as a passing suite.
+- **Validation build cost.** The largest generated SIMD `pmin`/`pmax` translation
+  units dominate the observed native Release validation build. Split these
+  generated files into smaller compilation units while preserving all assertions
+  and optimized builds, so routine correctness checks remain practical.
+- **Hardware-deterministic floating point in x86 JIT1.** The scalar arithmetic
+  emitters in `detail/x86_64.hpp` route every non-`fast` mode through software
+  helpers, including `hw_deterministic`. Implement the promised native path with
+  explicit NaN canonicalization, rounding and trap semantics; validate against
+  the softfloat oracle before using focused benchmarks to assess the gain.
 - **Compiler bootstrap.** The measured Clang jobs compile two C++ translation
   units. They do not establish a complete Clang self-bootstrap. Reproduce and
   retain the full `clang.wasm -> clang.pzam -> clang.wasm` chain before claiming

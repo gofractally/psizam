@@ -2,9 +2,13 @@
 """Report one complete, current-source CPU-resource matrix; never merge batches."""
 import argparse
 import csv
+import hashlib
 import json
 import math
 import statistics as stats
+import shutil
+import subprocess
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -66,7 +70,17 @@ def main():
         from extended_report import summarize_experiments
         s['extended']=summarize_experiments(a.work,data)
     a.out.mkdir(parents=True,exist_ok=True)
+    baseline=a.work/'platform-reference/arm-summary.json'
+    if a.comprehensive and baseline.exists():
+        s['platform_reference']={'file':'platform-reference/arm-summary.json',
+                                 'sha256':hashlib.sha256(baseline.read_bytes()).hexdigest()}
     (a.out/'summary.json').write_text(json.dumps(s,indent=2)+'\n')
+    if 'platform_reference' in s:
+        comparison=a.out/'platform-comparison';comparison.mkdir(exist_ok=True)
+        shutil.copy2(baseline,comparison/'arm-summary.json')
+        subprocess.run([sys.executable,str(Path(__file__).with_name('compare_platforms.py')),
+                        '--arm',str(comparison/'arm-summary.json'),'--x86',str(a.out/'summary.json'),
+                        '--out',str(comparison)],check=True)
     def write_csv(name,rows):
         fields=sorted(set().union(*(r.keys() for r in rows)))
         with (a.out/name).open('w') as f:

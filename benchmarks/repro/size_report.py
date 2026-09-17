@@ -99,7 +99,7 @@ def render(data, chartpage, title, para):
         chartpage(filename,heading,'The same pinned Clang.wasm is compiled by each engine. These sizes affect artifact transfer, disk/cache capacity and the amount of native code available for mapping.', LABELS,
             [(label,[value('clang',m,p,metric)/2**20 for m in MODES],color) for p,label,color in POLICIES],
             axis+', MiB | lower is smaller',
-            'Uses the exact runtime artifacts. Four- and eighteen-worker variants remain in the raw size data; worker counts are not separate runtime or size categories. '+note,height=340)
+            'Uses the exact runtime artifacts. All compiler-worker variants remain in the raw size data; worker counts are not separate runtime or size categories. '+note,height=340)
     if 'coremark' in data['workloads']:
         for metric,filename,heading in [
             ('artifact_bytes','coremark-artifact-size.png','Saved files for mixed integer tasks'),
