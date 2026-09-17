@@ -23,7 +23,7 @@ namespace {
    [[noreturn]] void escape_or_throw(const char* msg) {
       if (trap_jmp_ptr) {
          saved_exception = std::make_exception_ptr(E{msg});
-         longjmp(*trap_jmp_ptr, -1);
+         siglongjmp(*trap_jmp_ptr, -1);
       }
       throw E{msg};
    }
@@ -31,7 +31,7 @@ namespace {
    [[noreturn]] void escape_exception(std::exception_ptr eptr) {
       if (trap_jmp_ptr) {
          saved_exception = std::move(eptr);
-         longjmp(*trap_jmp_ptr, -1);
+         siglongjmp(*trap_jmp_ptr, -1);
       }
       std::rethrow_exception(eptr);
    }

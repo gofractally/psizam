@@ -455,3 +455,10 @@ if(TARGET psizam_runtime_resource)
    add_test(NAME wit_resource_integration COMMAND psizam_runtime_resource)
    set_tests_properties(wit_resource_integration PROPERTIES TIMEOUT 30)
 endif()
+
+# Small trap-entry regression target; does not require building the full suite.
+add_executable(psizam_signal_tests main.cpp signals_tests.cpp)
+target_link_libraries(psizam_signal_tests PRIVATE psizam psizam-exec Catch2::Catch2)
+target_compile_definitions(psizam_signal_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS)
+add_test(NAME psizam_signal_tests COMMAND psizam_signal_tests)
+set_tests_properties(psizam_signal_tests PROPERTIES TIMEOUT 30)

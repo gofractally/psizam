@@ -89,3 +89,49 @@ TEST_CASE("Test signal handler forwarding", "[signal_handler_forward]") {
       CHECK(sig_handled == 142 + SIGFPE);
    }
 }
+
+TEST_CASE("Trap entry restores nested state and interrupted signal masks", "[call-entry][signals]") {
+   using namespace psizam::detail;
+   setup_signal_handler();
+   sigset_t original;
+   REQUIRE(pthread_sigmask(SIG_SETMASK, nullptr, &original) == 0);
+   auto restore_mask = psizam::scope_guard{[&] { pthread_sigmask(SIG_SETMASK, &original, nullptr); }};
+   psizam::growable_allocator outer_code, inner_code;
+   psizam::wasm_allocator outer_memory, inner_memory;
+   auto* original_trap = trap_jmp_ptr;
+   for (bool block_prof : {false, true}) {
+      sigset_t desired = original;
+      sigaddset(&desired, SIGUSR2);
+      if (block_prof) sigaddset(&desired, SIGPROF);
+      else sigdelset(&desired, SIGPROF);
+      REQUIRE(pthread_sigmask(SIG_SETMASK, &desired, nullptr) == 0);
+      auto check_mask = [&] {
+         sigset_t actual;
+         REQUIRE(pthread_sigmask(SIG_SETMASK, nullptr, &actual) == 0);
+         for (int signal = 1; signal < NSIG; ++signal)
+            CHECK(sigismember(&actual, signal) == sigismember(&desired, signal));
+      };
+      for (int repeat = 0; repeat < 3; ++repeat) {
+         invoke_with_signal_handler([&] {
+            auto* outer_trap = trap_jmp_ptr;
+            const auto outer_range = memory_range;
+            CHECK_THROWS_AS(invoke_with_signal_handler([&] {
+               volatile auto value = *inner_memory.get_base_ptr<unsigned char>();
+               (void)value;
+            }, [](int) { throw test_exception{}; }, inner_code, &inner_memory), test_exception);
+            CHECK(trap_jmp_ptr == outer_trap);
+            CHECK(memory_range.data() == outer_range.data());
+            CHECK(memory_range.size() == outer_range.size());
+            check_mask();
+            CHECK_THROWS_AS(invoke_with_signal_handler([] {
+               longjmp_on_exception([] { throw test_exception{}; });
+            }, [](int) {}, inner_code, &inner_memory), test_exception);
+            CHECK(trap_jmp_ptr == outer_trap);
+            CHECK(saved_exception == nullptr);
+            check_mask();
+         }, [](int) { FAIL("unexpected outer signal"); }, outer_code, &outer_memory);
+         CHECK(trap_jmp_ptr == original_trap);
+         check_mask();
+      }
+   }
+}

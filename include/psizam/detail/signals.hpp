@@ -42,18 +42,15 @@ namespace psizam::detail {
 
 #include <signal.h>
 #include <setjmp.h>
+#include <sys/ucontext.h>
 
 namespace psizam::detail {
 
-   // Pointer to the active setjmp buffer for trap escape.  Uses setjmp/longjmp
-   // (not sigsetjmp/siglongjmp) to avoid the ~400ns per-call cost of
-   // saving/restoring the signal mask via kernel syscalls.  Each
-   // invoke_with_signal_handler allocates a jmp_buf on its stack frame and sets
-   // this pointer, supporting nested calls (WASM→host→WASM).  Signal handlers
-   // longjmp through this pointer; post-longjmp code throws a C++ exception.
-   // This matches what Wasmtime and V8 do for guard-page traps.
+   // Each protected entry owns a live sigjmp_buf. Explicitly omit the signal
+   // mask: plain setjmp saves it on Darwin and adds a syscall to every call.
+   // The signal handler restores its interrupted mask only on the trap path.
    __attribute__((visibility("default")))
-   inline thread_local jmp_buf* trap_jmp_ptr{nullptr};
+   inline thread_local sigjmp_buf* trap_jmp_ptr{nullptr};
 
    __attribute__((visibility("default")))
    inline thread_local std::span<std::byte> code_memory_range;
@@ -90,6 +87,14 @@ namespace psizam::detail {
    template<int Sig>
    inline struct sigaction prev_signal_handler;
 
+   [[noreturn]] inline void escape_signal(int result, void* uap) {
+      // siglongjmp does not return through sigreturn. Undo the handler's
+      // temporary mask (including SIGPROF), preserving the interrupted thread's
+      // mask, not an older entry-time mask. This syscall is on the trap path only.
+      sigprocmask(SIG_SETMASK, &static_cast<ucontext_t*>(uap)->uc_sigmask, nullptr);
+      siglongjmp(*trap_jmp_ptr, result);
+   }
+
    inline void signal_handler(int sig, siginfo_t* info, void* uap) {
       if (trap_jmp_ptr) {
          // SIGFPE from x86 `idiv` / `div` carries si_code distinguishing
@@ -109,7 +114,7 @@ namespace psizam::detail {
                saved_exception = std::make_exception_ptr(
                   wasm_interpreter_exception{"floating point error"});
             }
-            longjmp(*trap_jmp_ptr, -1);
+            escape_signal(-1, uap);
          }
          const void* addr = info->si_addr;
 
@@ -193,16 +198,16 @@ namespace psizam::detail {
 
          //neither range set means legacy catch-all behavior; useful for some of the old tests
          if ((!active_code_allocator || !active_code_allocator->has_code()) && code_memory_range.empty() && memory_range.empty())
-            longjmp(*trap_jmp_ptr, sig);
+            escape_signal(sig, uap);
 
          //a failure on the stack guard page means stack overflow
          if (!stack_guard_range.empty() &&
              addr >= stack_guard_range.data() && addr < stack_guard_range.data() + stack_guard_range.size())
-            longjmp(*trap_jmp_ptr, sig);
+            escape_signal(sig, uap);
 
          //a failure in the memory range is always jumped out of
          if (addr >= memory_range.data() && addr < memory_range.data() + memory_range.size())
-            longjmp(*trap_jmp_ptr, sig);
+            escape_signal(sig, uap);
 
          //a failure in the code range...
          if (in_active_code(reinterpret_cast<uintptr_t>(addr))) {
@@ -213,7 +218,7 @@ namespace psizam::detail {
             if ((sig == SIGSEGV || sig == SIGBUS) && timed_run_has_timed_out.load(std::memory_order_acquire) == false)
                return;
             //otherwise, jump out
-            longjmp(*trap_jmp_ptr, sig);
+            escape_signal(sig, uap);
          }
 
          // Read the faulting PC to classify the trap.  If the PC is inside
@@ -235,7 +240,7 @@ namespace psizam::detail {
          pc_val = ((ucontext_t*)uap)->uc_mcontext.pc;
 #endif
          if (pc_val != 0 && in_active_code(pc_val))
-            longjmp(*trap_jmp_ptr, sig);
+            escape_signal(sig, uap);
 
          // PC is outside the JIT code range (or we could not read it).  This
          // is either a corrupted return address landing on the stack or a
@@ -244,7 +249,7 @@ namespace psizam::detail {
          // rather than a memory fault.  Classify as interp_trap.
          saved_exception = std::make_exception_ptr(
             psizam::wasm_interpreter_exception{"jit control-flow corruption or stack overflow"});
-         longjmp(*trap_jmp_ptr, -1);
+         escape_signal(-1, uap);
       }
 
       struct sigaction* prev_action;
@@ -288,14 +293,14 @@ namespace psizam::detail {
          caught_exception = true;
       }
       if (caught_exception) {
-         longjmp(*trap_jmp_ptr, -1);
+         siglongjmp(*trap_jmp_ptr, -1);
       }
    }
 
    template<typename E>
    [[noreturn]] inline void signal_throw(const char* msg) {
       saved_exception = std::make_exception_ptr(E{msg});
-      longjmp(*trap_jmp_ptr, -1);
+      siglongjmp(*trap_jmp_ptr, -1);
    }
 
    inline void setup_signal_handler_impl() {
@@ -359,25 +364,24 @@ namespace psizam::detail {
    /// uses signal_throw() or longjmp_on_exception(), those also land here and
    /// rethrow the saved exception.
    ///
-   /// Uses setjmp/longjmp (not sigsetjmp/siglongjmp) to avoid ~400ns of
-   /// per-call kernel syscalls for signal mask save/restore.  Signals are
-   /// unblocked once per thread in setup_signal_handler().
+   /// sigsetjmp(..., 0) leaves the signal mask alone on successful calls.
+   /// Trap signals are unblocked once per thread in setup_signal_handler().
    ///
    // Make this noinline to prevent possible corruption of the caller's local variables.
    template<typename F, typename E>
    [[gnu::noinline]] auto invoke_with_signal_handler(F&& f, E&& e, growable_allocator& code_allocator, wasm_allocator* mem_allocator) {
       setup_signal_handler();
-      jmp_buf dest;
+      sigjmp_buf dest;
       const auto old_code_memory_range = code_memory_range;
       const auto* old_code_allocator = active_code_allocator;
       active_code_allocator = &code_allocator;
       const auto old_memory_range = memory_range;
       const auto old_stack_guard_range = stack_guard_range;
-      jmp_buf* old_trap_ptr = trap_jmp_ptr;
+      sigjmp_buf* old_trap_ptr = trap_jmp_ptr;
       code_memory_range = code_allocator.get_code_span();
       memory_range = mem_allocator->get_span();
       int sig;
-      if((sig = setjmp(dest)) == 0) {
+      if((sig = sigsetjmp(dest, 0)) == 0) {
          trap_jmp_ptr = &dest;
          try {
             f();

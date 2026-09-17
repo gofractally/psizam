@@ -109,7 +109,7 @@ void __psizam_eh_leave(void* ctx) {
    if (trap_jmp_ptr) {
       saved_exception = std::make_exception_ptr(
          wasm_exception(tag_index, payload, payload_count));
-      longjmp(*trap_jmp_ptr, -1);
+      siglongjmp(*trap_jmp_ptr, -1);
    }
    // Fallback: throw directly (should not happen in normal JIT execution)
    throw wasm_exception(tag_index, payload, payload_count);
@@ -120,7 +120,7 @@ void __psizam_eh_leave(void* ctx) {
       if (trap_jmp_ptr) {
          saved_exception = std::make_exception_ptr(
             wasm_interpreter_exception{"null exception reference"});
-         longjmp(*trap_jmp_ptr, -1);
+         siglongjmp(*trap_jmp_ptr, -1);
       }
       throw wasm_interpreter_exception{"null exception reference"};
    }
@@ -129,7 +129,7 @@ void __psizam_eh_leave(void* ctx) {
       if (trap_jmp_ptr) {
          saved_exception = std::make_exception_ptr(
             wasm_interpreter_exception{"invalid exception reference index"});
-         longjmp(*trap_jmp_ptr, -1);
+         siglongjmp(*trap_jmp_ptr, -1);
       }
       throw wasm_interpreter_exception{"invalid exception reference index"};
    }
