@@ -86,9 +86,11 @@ packages. These gates establish the items above, not all pending contracts below
   helpers, including `hw_deterministic`. Implement the promised native path with
   explicit NaN canonicalization, rounding and trap semantics; validate against
   the softfloat oracle before using focused benchmarks to assess the gain.
-- **Compiler bootstrap.** The measured Clang jobs compile two C++ translation
-  units. They do not establish a complete Clang self-bootstrap. Reproduce and
-  retain the full `clang.wasm -> clang.pzam -> clang.wasm` chain before claiming
+- **Compiler bootstrap.** The retained ARM checkpoint passes the functional
+  `clang.wasm -> clang.pzam -> clang.wasm` chain and final compile/link/run probe;
+  see [the bootstrap evidence](compiler-bootstrap.md). It does not establish a
+  byte-identical fixed point. Repeat the full chain on native x86 and establish
+  normalized reproducible outputs before claiming
   that release milestone.
 - **Debug support.** Review v128 locals, DWARF range endpoints, function pointers,
   accurate prologue frames and unsupported DWARF references. Separate debugger
