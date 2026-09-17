@@ -176,6 +176,11 @@ namespace psizam {
                        "unresolved imported function");
          return _entries[idx];
       }
+      // Use the same last-registration-wins lookup as resolve().
+      const entry* find_entry(const std::string& module_name, const std::string& function_name) const {
+         auto it = _name_map.find({module_name, function_name});
+         return it == _name_map.end() ? nullptr : &_entries[it->second];
+      }
       uint32_t size() const { return static_cast<uint32_t>(_entries.size()); }
       const std::vector<entry>& entries() const { return _entries; }
       std::vector<entry>& entries_mutable() { return _entries; }

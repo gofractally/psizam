@@ -152,3 +152,78 @@ TEST_CASE("public runtime executes cached native code with isolated instance sta
       CHECK(host.calls == 2);
    }
 }
+
+TEST_CASE("public runtime reports actionable unresolved imports", "[runtime-release][imports]") {
+   using reason = psizam::unresolved_import::reason_code;
+   psizam::runtime rt({.guarded_pool_size = 0});
+   policy p; p.initial = policy::compile_tier::interpret;
+   const auto wasm = fixture("import");
+   auto missing = rt.check(psizam::wasm_bytes{wasm});
+   REQUIRE(missing.size() == 1);
+   CHECK(missing[0].module_name == "env");
+   CHECK(missing[0].func_name == "subtract");
+   CHECK(missing[0].reason == reason::missing);
+   CHECK(missing[0].expected_signature == "(i32, i32) -> (i32)");
+   rt.register_library("env", psizam::wasm_bytes{wasm});
+   CHECK(rt.check(psizam::wasm_bytes{wasm}).size() == 1);
+
+   auto mod = rt.prepare(psizam::wasm_bytes{wasm}, p);
+   psizam::host_function_table::entry entry;
+   entry.module_name = "env"; entry.func_name = "subtract";
+   entry.signature.params = {psizam::types::i64};
+   entry.signature.ret = {psizam::types::i64};
+   mod.table().add_entry(entry);
+   auto wrong = rt.check(mod);
+   REQUIRE(wrong.size() == 1);
+   CHECK(wrong[0].reason == reason::signature_mismatch);
+   CHECK(wrong[0].provided_signature == "(i64) -> (i64)");
+   entry.signature.params = {psizam::types::i32, psizam::types::i32};
+   entry.signature.ret = {psizam::types::i32};
+   mod.table().add_entry(entry);
+   auto unbound = rt.check(mod);
+   REQUIRE(unbound.size() == 1);
+   CHECK(unbound[0].reason == reason::missing_dispatch);
+   mod.table().add<&cache_host::subtract>("env", "subtract");
+   CHECK(rt.check(mod).empty()); // latest registration wins, just like resolve()
+   cache_host host; mod.set_host_ptr(&host);
+   auto inst = rt.instantiate(mod);
+   CHECK(inst.run_start() == 0);
+   CHECK(word(inst, 4) == 42);
+   auto independent = rt.prepare(psizam::wasm_bytes{wasm}, p);
+   CHECK(rt.check(independent).size() == 1);
+
+   auto unsupported = rt.check(psizam::wasm_bytes{fixture("nonfunction-import")});
+   REQUIRE(unsupported.size() == 3);
+   for (auto& issue : unsupported) CHECK(issue.reason == reason::unsupported_kind);
+   CHECK(rt.check(psizam::wasm_bytes{fixture("start")}).empty());
+   CHECK_THROWS(rt.check(psizam::wasm_bytes{std::vector<uint8_t>{0, 1, 2}}));
+   CHECK_THROWS_AS(rt.check(psizam::module_handle{}), std::invalid_argument);
+
+   auto bytes = psizam::pzam_compile(wasm, {.tier = psizam::pzam_tier_flags::jit2});
+   auto cached = rt.load_cached(psizam::pzam_bytes{{
+      reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()}});
+   auto cached_missing = rt.check(cached);
+   REQUIRE(cached_missing.size() == 1);
+   CHECK(cached_missing[0].expected_signature == missing[0].expected_signature);
+   cached.table().add<&cache_host::subtract>("env", "subtract");
+   CHECK(rt.check(cached).empty());
+}
+
+TEST_CASE("public runtime includes available WIT import signatures", "[runtime-release][imports]") {
+   auto wasm = fixture("import");
+   auto uleb = [](std::vector<uint8_t>& out, std::size_t size) {
+      do { auto byte = size & 127; size >>= 7; out.push_back(byte | (size ? 128 : 0)); } while (size);
+   };
+   const std::string name = "component-wit:env";
+   const std::string wit = "package test:diagnostics; interface env { subtract: func(a: u32, b: u32) -> u32; } world test { import env; }";
+   std::vector<uint8_t> payload;
+   uleb(payload, name.size());
+   payload.insert(payload.end(), name.begin(), name.end());
+   payload.insert(payload.end(), wit.begin(), wit.end());
+   wasm.push_back(0); uleb(wasm, payload.size());
+   wasm.insert(wasm.end(), payload.begin(), payload.end());
+   psizam::runtime rt({.guarded_pool_size = 0});
+   const auto result = rt.check(psizam::wasm_bytes{wasm});
+   REQUIRE(result.size() == 1);
+   CHECK(result[0].wit_signature.find("subtract: func(a: u32, b: u32) -> u32") != std::string::npos);
+}

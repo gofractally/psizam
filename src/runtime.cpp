@@ -7,6 +7,7 @@
 #include <psizam/runtime.hpp>
 #include "runtime_backend.hpp"
 #include "runtime_cached.hpp"
+#include "runtime_imports.hpp"
 #include <psizam/arena_budget.hpp>
 #include <psizam/backend.hpp>
 #include <psizam/detail/instance_be.hpp>
@@ -478,9 +479,18 @@ module_handle runtime::load_cached(pzam_bytes pzam) {
    return module_handle{std::move(mod)};
 }
 
-std::vector<unresolved_import> runtime::check(wasm_bytes) const {
-   // TODO: parse imports, check against registered libraries + host
-   return {};
+std::vector<unresolved_import> runtime::check(wasm_bytes wasm) const {
+   return detail::check_wasm_imports(wasm_code(wasm.data.begin(), wasm.data.end()), {});
+}
+
+std::vector<unresolved_import> runtime::check(const module_handle& tmpl) const {
+   if (!tmpl) throw std::invalid_argument("runtime::check: empty module handle");
+   auto& source = *tmpl.get();
+   if (source.pzam) {
+      auto mod = restore_module(source.pzam->metadata);
+      return detail::check_module_imports(mod, source.table);
+   }
+   return detail::check_wasm_imports(source.wasm_copy, source.table);
 }
 
 instance runtime::instantiate(const module_handle& tmpl) {

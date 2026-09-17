@@ -493,7 +493,7 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/../benchmarks/call-boundary/aot-tests.cmake
 set(runtime_release_dir "${CMAKE_CURRENT_BINARY_DIR}/runtime-release")
 file(MAKE_DIRECTORY "${runtime_release_dir}")
 set(runtime_release_fixtures)
-foreach(fixture start spin spin-start import)
+foreach(fixture start spin spin-start import nonfunction-import)
    add_custom_command(OUTPUT "${runtime_release_dir}/${fixture}.wasm"
       COMMAND "${PSIZAM_CALL_WAT2WASM}" "${CMAKE_CURRENT_SOURCE_DIR}/runtime-release/${fixture}.wat"
          -o "${runtime_release_dir}/${fixture}.wasm"

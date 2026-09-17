@@ -152,9 +152,13 @@ struct instance_policy {
 // ═════════════════════════════════════════════════════════════════════
 
 struct unresolved_import {
+   enum class reason_code { missing, signature_mismatch, unsupported_kind, missing_dispatch };
    std::string module_name;
    std::string func_name;
    std::string wit_signature;  // from component-wit section, if available
+   reason_code reason = reason_code::missing;
+   std::string expected_signature;
+   std::string provided_signature;
 };
 
 // ═════════════════════════════════════════════════════════════════════
@@ -341,7 +345,11 @@ public:
    module_handle load_cached(pzam_bytes pzam);
 
    // ── Import checking ─────────────────────────────────────────────
+   // Raw Wasm has no supplied host bindings. The handle overload checks the
+   // actual table populated by provide()/bind(). Registered library bytes alone
+   // do not resolve an import. Malformed Wasm throws a parser exception.
    std::vector<unresolved_import> check(wasm_bytes wasm) const;
+   std::vector<unresolved_import> check(const module_handle& mod) const;
 
    // ── Instantiation ───────────────────────────────────────────────
    instance instantiate(const module_handle& tmpl);
