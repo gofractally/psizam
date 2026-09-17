@@ -1,4 +1,5 @@
 #include <psizam/runtime.hpp>
+#include <psizam/pzam_compile.hpp>
 #include <catch2/catch.hpp>
 #include <cstring>
 #include <fstream>
@@ -95,5 +96,59 @@ TEST_CASE("public runtime resources and initialization", "[runtime-release][reso
       CHECK(pooled.gas_consumed() > 0);
       pooled.interrupt();
       CHECK_THROWS_AS(pooled.run_start(), psizam::wasm_gas_exhausted_exception);
+   }
+}
+
+namespace {
+struct cache_host {
+   unsigned calls = 0;
+   int32_t subtract(int32_t a, int32_t b) { ++calls; return a - b; }
+};
+}
+
+TEST_CASE("public runtime executes cached native code with isolated instance state", "[runtime-release][pzam]") {
+   const auto wasm = fixture("import");
+   std::vector<psizam::pzam_tier_flags> compiled_tiers{psizam::pzam_tier_flags::jit2};
+#ifdef PSIZAM_ENABLE_LLVM_BACKEND
+   compiled_tiers.push_back(psizam::pzam_tier_flags::llvm_O2);
+#endif
+   for (auto tier : compiled_tiers) for (bool metered : {false, true}) {
+      CAPTURE(static_cast<int>(tier), metered);
+      auto bytes = psizam::pzam_compile(wasm, {.tier = tier,
+         .flags = metered ? psizam::pzam_compile_flags::gas_meter : psizam::pzam_compile_flags::none});
+      psizam::instance survivor;
+      cache_host host;
+      {
+         psizam::runtime rt({.guarded_pool_size = 0});
+         auto mod = rt.load_cached(psizam::pzam_bytes{{
+            reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()}});
+         REQUIRE(mod.native_code_size() > 0);
+         mod.table().add<&cache_host::subtract>("env", "subtract");
+         mod.set_host_ptr(&host);
+         auto first = rt.instantiate(mod);
+         survivor = rt.instantiate(mod);
+         CHECK(first.kind() == (tier == psizam::pzam_tier_flags::jit2 ?
+            psizam::backend_kind::jit2 : psizam::backend_kind::jit_llvm));
+         CHECK(first.linear_memory() != survivor.linear_memory());
+         REQUIRE(word(first, 0) == 1);
+         CHECK(first.run_start() == 0);
+         CHECK(word(first, 4) == 42);
+         CHECK(word(first, 8) == 42);
+         CHECK(word(survivor, 4) == 0);
+         CHECK(host.calls == 1);
+         CHECK((first.gas_consumed() > 0) == metered);
+         if (metered) {
+            first.interrupt();
+            CHECK_THROWS_AS(first.run_start(), psizam::wasm_gas_exhausted_exception);
+         }
+         policy incompatible;
+         incompatible.metering = metered ? policy::meter_mode::none : policy::meter_mode::gas_trap;
+         CHECK_THROWS_AS(rt.instantiate(mod, incompatible), std::invalid_argument);
+      }
+      bytes.clear();
+      CHECK(survivor.run_start() == 0);
+      CHECK(word(survivor, 4) == 42);
+      CHECK(word(survivor, 8) == 42);
+      CHECK(host.calls == 2);
    }
 }

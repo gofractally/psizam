@@ -66,9 +66,8 @@ public:
    // future call-erasure code dispatch correctly.
    virtual backend_kind kind() const noexcept = 0;
 
-   // Pointer to the underlying `backend<std::nullptr_t, Impl>`.
-   // Callers that know the kind (e.g. typed proxy adapters in Step 10)
-   // can `static_cast` to the matching backend type.
+   // Internal opaque backend pointer. Saved-code implementations have distinct
+   // types; backend kind alone is not sufficient to cast this pointer.
    virtual void* raw_backend() noexcept = 0;
 
    // Linear memory + page count, type-erased. Always valid post-construction.

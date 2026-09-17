@@ -6,7 +6,7 @@
 
 int main(int argc, char** argv) {
    try {
-      if (argc != 2) throw std::runtime_error("expected fixture path");
+      if (argc < 2) throw std::runtime_error("expected fixture paths");
       std::ifstream in(argv[1], std::ios::binary);
       if (!in) throw std::runtime_error("fixture not found");
       std::vector<uint8_t> wasm{std::istreambuf_iterator<char>(in), {}};
@@ -26,7 +26,17 @@ int main(int argc, char** argv) {
       uint32_t result = 0;
       std::memcpy(&result, instance.linear_memory(), sizeof(result));
       if (result != 42) throw std::runtime_error("guest result mismatch");
-      std::cout << "Installed runtime factory and execution passed\n";
+      for (int i = 2; i < argc; ++i) {
+         std::ifstream input(argv[i], std::ios::binary);
+         if (!input) throw std::runtime_error("PZAM fixture not found");
+         std::vector<uint8_t> bytes{std::istreambuf_iterator<char>(input), {}};
+         auto cached = rt.load_cached(psizam::pzam_bytes{bytes});
+         auto saved = rt.instantiate(cached);
+         if (saved.run_start() != 0) throw std::runtime_error("saved guest failed");
+         std::memcpy(&result, saved.linear_memory(), sizeof(result));
+         if (result != 42) throw std::runtime_error("saved guest result mismatch");
+      }
+      std::cout << "Installed runtime factory and cached execution passed\n";
    } catch (const std::exception& e) {
       std::cerr << e.what() << '\n';
       return 1;

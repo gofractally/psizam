@@ -7,15 +7,23 @@
 
 namespace psizam::detail {
 
-template <typename Impl>
+template <typename Impl, typename Options = default_options>
 class instance_be_impl final : public instance_be {
-   using backend_t = backend<std::nullptr_t, Impl>;
+   using backend_t = backend<std::nullptr_t, Impl, Options>;
 
    wasm_allocator             alloc_;
    std::unique_ptr<backend_t> be_;
    backend_kind               kind_;
 
 public:
+   instance_be_impl(backend_kind kind, const std::vector<uint8_t>& wasm,
+                    host_function_table table, void* host_ptr, const Options& options)
+      : kind_(kind)
+   {
+      auto& code = const_cast<std::vector<uint8_t>&>(wasm);
+      be_ = std::make_unique<backend_t>(code, std::move(table), host_ptr, &alloc_, options);
+   }
+
    // Self-managed mode: allocator does its own mmap with guard pages.
    instance_be_impl(backend_kind kind,
                     const std::vector<uint8_t>& wasm,

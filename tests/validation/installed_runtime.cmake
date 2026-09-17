@@ -10,6 +10,14 @@ file(MAKE_DIRECTORY "${WORK}")
 checked("${CMAKE_COMMAND}" --install "${BUILD}" --prefix "${WORK}/install")
 checked("${WAT2WASM}" "${SOURCE}/tests/installed-runtime/smoke.wat"
    -o "${WORK}/smoke.wasm")
+checked("${COMPILER}" "--target=${ARCH}" --backend=jit2 --gas-metering=off
+   -o "${WORK}/smoke-jit2.pzam" "${WORK}/smoke.wasm")
+set(cached "${WORK}/smoke-jit2.pzam")
+if(HAVE_LLVM)
+   checked("${COMPILER}" "--target=${ARCH}" --backend=llvm --opt-level=2 --gas-metering=off
+      -o "${WORK}/smoke-llvm.pzam" "${WORK}/smoke.wasm")
+   list(APPEND cached "${WORK}/smoke-llvm.pzam")
+endif()
 set(variants OFF)
 if(HAVE_LLVM)
    list(APPEND variants ON)
@@ -21,6 +29,6 @@ foreach(variant IN LISTS variants)
       "-DCMAKE_CXX_COMPILER=${CXX}" "-DCMAKE_PREFIX_PATH=${WORK}/install"
       "-DLLVM_DIR=${LLVM_DIR}" "-DTEST_LLVM=${variant}")
    checked("${CMAKE_COMMAND}" --build "${consumer}" -j 2)
-   checked("${consumer}/runtime-consumer" "${WORK}/smoke.wasm")
+   checked("${consumer}/runtime-consumer" "${WORK}/smoke.wasm" ${cached})
 endforeach()
 message(STATUS "Installed runtime acceptance passed: ${variants}")

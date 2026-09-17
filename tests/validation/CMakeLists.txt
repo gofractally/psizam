@@ -164,6 +164,7 @@ if(PSIZAM_ENABLE_INSTALL)
          "-DCC=${CMAKE_C_COMPILER}" "-DCXX=${CMAKE_CXX_COMPILER}"
          "-DLLVM_DIR=${LLVM_DIR}" "-DHAVE_LLVM=${PSIZAM_ENABLE_LLVM}"
          "-DWAT2WASM=${PSIZAM_WAT2WASM}"
+         "-DCOMPILER=$<TARGET_FILE:pzam-compile>" "-DARCH=${_execution_arch}"
          -P "${CMAKE_CURRENT_SOURCE_DIR}/installed_runtime.cmake")
    set_tests_properties(execution.installed-runtime PROPERTIES
       LABELS "execution;release;runtime" TIMEOUT 300 RUN_SERIAL TRUE)

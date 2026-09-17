@@ -6,6 +6,7 @@
 
 #include <psizam/runtime.hpp>
 #include "runtime_backend.hpp"
+#include "runtime_cached.hpp"
 #include <psizam/arena_budget.hpp>
 #include <psizam/backend.hpp>
 #include <psizam/detail/instance_be.hpp>
@@ -111,11 +112,9 @@ struct module_handle_impl {
    // instantiate() time.
    std::vector<uint8_t>  wasm_copy;
 
-   // load_cached()-path state — fully relocated executable code +
-   // restored module ready for `jit_execution_context<>` construction
-   // at instantiate() time. Track A lands the loader; Track B will
-   // wire instantiate() to consume this state.
-   std::unique_ptr<detail::pzam_load_result> pzam;
+   // Parsed once; each instance relocates its own executable mapping and
+   // restores independent globals, tables and linear memory.
+   std::unique_ptr<pzam_file> pzam;
 
    // Late-bound back-pointer to the currently-live instance's
    // `instance_be*`. Set by `runtime::instantiate` and nulled by the
@@ -131,15 +130,6 @@ struct module_handle_impl {
 
    module_handle_impl() = default;
 
-   ~module_handle_impl() {
-      // Release the executable code page back to the JIT allocator if we
-      // own one. This is the only owner of the pzam exec_code; instances
-      // hold a non-owning view via the module reference.
-      if (pzam && pzam->exec_code) {
-         jit_allocator::instance().free(pzam->exec_code);
-         pzam->exec_code = nullptr;
-      }
-   }
 };
 
 host_function_table& module_handle::table() { return impl_->table; }
@@ -156,7 +146,7 @@ uint32_t module_handle::compile_time_ms() const {
 }
 uint32_t module_handle::native_code_size() const {
    if (!impl_) return 0;
-   if (impl_->pzam) return static_cast<uint32_t>(impl_->pzam->total_code_size);
+   if (impl_->pzam) return static_cast<uint32_t>(detail::pick_code_section(*impl_->pzam).code_blob.size());
    return 0;   // prepare()-path: real value lands with Track B's compile.
 }
 uint32_t module_handle::wasm_size() const {
@@ -464,15 +454,22 @@ module_handle runtime::load_cached(pzam_bytes pzam) {
    if (file.magic != PZAM_MAGIC)
       throw std::runtime_error{"runtime::load_cached: bad .pzam magic"};
 
-   // Run the full loader: pick code section, restore module, build symbol
-   // table, generate aarch64 veneers, allocate exec memory, apply
-   // relocations, flip RX, fix up function entries + element segments,
-   // derive trampoline direction.
-   auto loaded = std::make_unique<detail::pzam_load_result>(
-      detail::load_pzam(file));
-
    auto mod = std::make_shared<module_handle_impl>();
-   mod->pzam = std::move(loaded);
+   mod->pzam = std::make_unique<pzam_file>(std::move(file));
+   const auto& section = detail::pick_code_section(*mod->pzam);
+   PSIZAM_ASSERT(pzam_page_layout_compatible(section), wasm_parse_exception, pzam_page_layout_error);
+   switch (static_cast<pzam_opt_tier>(section.opt_tier)) {
+      case pzam_opt_tier::jit1: mod->policy.initial = instance_policy::compile_tier::jit1; break;
+      case pzam_opt_tier::jit2: mod->policy.initial = instance_policy::compile_tier::jit2; break;
+      case pzam_opt_tier::llvm_O0: case pzam_opt_tier::llvm_O1:
+      case pzam_opt_tier::llvm_O2: case pzam_opt_tier::llvm_O3:
+         mod->policy.initial = instance_policy::compile_tier::jit_llvm; break;
+      default: throw std::invalid_argument("runtime::load_cached: unsupported PZAM tier");
+   }
+   mod->policy.metering = section.instrumentation.gas_metering ?
+      instance_policy::meter_mode::gas_trap : instance_policy::meter_mode::none;
+   mod->policy.floats = section.instrumentation.softfloat ?
+      instance_policy::float_mode::soft : instance_policy::float_mode::native;
 
    const auto t1 = std::chrono::high_resolution_clock::now();
    mod->compile_ms = static_cast<uint32_t>(
@@ -531,9 +528,13 @@ instance runtime::instantiate(const module_handle& tmpl,
       ? (1u << policy.mem_budget)
       : 0;
 
-   inst->be = impl_->factory(
-      be_kind, mod->wasm_copy, std::move(table_copy), mod->host_ptr,
-      ext_base, ext_bytes, policy.metering != meter::none);
+   if (mod->pzam)
+      inst->be = detail::make_cached_instance_be(*mod->pzam, policy,
+         std::move(table_copy), mod->host_ptr, ext_base, ext_bytes);
+   else
+      inst->be = impl_->factory(
+         be_kind, mod->wasm_copy, std::move(table_copy), mod->host_ptr,
+         ext_base, ext_bytes, policy.metering != meter::none);
 
    inst->be->set_gas_budget(policy.metering == meter::none ? gas_budget_unlimited :
       policy.metering == meter::gas_trap ? policy.gas_budget : policy.gas_slice);
@@ -662,7 +663,7 @@ runtime::cache_stats runtime::stats() const {
    for (const auto& [_, weak] : impl_->module_cache) {
       if (auto live = weak.lock()) {
          ++modules;
-         if (live->pzam) pzam_bytes_total += live->pzam->total_code_size;
+         if (live->pzam) pzam_bytes_total += detail::pick_code_section(*live->pzam).code_blob.size();
          compile_time_total += live->compile_ms;
       }
    }

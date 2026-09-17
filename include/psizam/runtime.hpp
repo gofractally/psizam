@@ -334,6 +334,10 @@ public:
 
    // ── Module preparation ──────────────────────────────────────────
    module_handle prepare(wasm_bytes wasm, const instance_policy& policy);
+   // Parse a native container once. Instantiation loads its saved code without
+   // compiling Wasm or requiring LLVM. The selected code section determines the
+   // backend kind and default gas policy; an override must match its gas flag.
+   // Each instance owns its relocated code and mutable module/memory state.
    module_handle load_cached(pzam_bytes pzam);
 
    // ── Import checking ─────────────────────────────────────────────
