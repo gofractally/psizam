@@ -36,6 +36,22 @@ Large generated modules verify distant stack-overflow and division traps. A
 register-allocation test checks lifetime interference, repeated register reuse
 and call survival for both target register banks on every host.
 
+## Service-call checks
+
+`ctest -L calls --output-on-failure` runs the protected natural-signature call
+matrix, signal/guard restoration tests, and reflected runtime parity cases.
+These are also part of the standard `quick` and `execution` gates. The natural
+call matrix covers JIT1, JIT2, LLVM JIT and newly generated CLI LLVM O2 PZAM,
+with no CPU limits, gas, and actual page-timeout interruption and recovery.
+
+Regression cases cover nested A-to-B-to-A entry, stack and memory traps,
+repeated host exceptions with destructor checks, memory growth during a
+callback, cached stack leases, inline argument slots, missing or wrong export
+signatures, moved/expired instances, and canonical allocator state restoration.
+The runtime proxy checks configure backend gas directly; they do not certify
+the unfinished public facade's resource-state wiring. Reproduce focused timings
+with `benchmarks/call-boundary/README.md` before running the complete benchmarks.
+
 ## CPU-resource checks
 
 The quick execution target also builds `psizam_resource_runner` and the public

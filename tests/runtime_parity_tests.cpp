@@ -93,16 +93,16 @@ struct tier_jit_llvm
 // Both composition and runtime tests exercise all four backends.
 #if defined(PSIZAM_ENABLE_LLVM_BACKEND) && (defined(__x86_64__) || defined(__aarch64__))
   #define PARITY_TEST_CASE(name, tags) \
-    TEMPLATE_TEST_CASE(name, tags, tier_interpret, tier_jit1, tier_jit2, tier_jit_llvm)
+    TEMPLATE_TEST_CASE(name, tags "[execution][quick][calls]", tier_interpret, tier_jit1, tier_jit2, tier_jit_llvm)
 #elif defined(PSIZAM_ENABLE_LLVM_BACKEND)
   #define PARITY_TEST_CASE(name, tags) \
-    TEMPLATE_TEST_CASE(name, tags, tier_interpret, tier_jit1, tier_jit_llvm)
+    TEMPLATE_TEST_CASE(name, tags "[execution][quick][calls]", tier_interpret, tier_jit1, tier_jit_llvm)
 #elif defined(__x86_64__) || defined(__aarch64__)
   #define PARITY_TEST_CASE(name, tags) \
-    TEMPLATE_TEST_CASE(name, tags, tier_interpret, tier_jit1, tier_jit2)
+    TEMPLATE_TEST_CASE(name, tags "[execution][quick][calls]", tier_interpret, tier_jit1, tier_jit2)
 #else
   #define PARITY_TEST_CASE(name, tags) \
-    TEMPLATE_TEST_CASE(name, tags, tier_interpret, tier_jit1)
+    TEMPLATE_TEST_CASE(name, tags "[execution][quick][calls]", tier_interpret, tier_jit1)
 #endif
 
 // ── Helper: wire a live consumer ↔ provider pair through runtime ───────────
