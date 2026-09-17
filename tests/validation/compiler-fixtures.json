@@ -1,0 +1,15 @@
+{
+  "description": "Clang 22.1.2 compiling frozen LLVM translation units; expected objects independently matched LLVM O2 PZAM and Cranelift AOT.",
+  "llvm_revision": "5e48a2978cb565ff30b72b7671588fbd0139d55c",
+  "files": {
+    "clang.wasm": "644767c9f9004dc2ae3cdfc5e552978e82409100beb8a9407a9f180d582eaf3c",
+    "SipHash.cpp.ii": "5b0fd291a01d079c224f868989c598235e4a69ceb1ffc445334820f7687a599b",
+    "APInt.cpp.ii": "c0b1b59fbac66d10d5719a921b56c756fa3807025023411b351d1be6cff0643e"
+  },
+  "objects": {
+    "SipHash.cpp": "8379592ecf9cd628e1e1ee257c49a040be6f3bfa0cf36f169044bfb312d55473",
+    "APInt.cpp": "0daa34e941fdc3bf11e9328302c1b70189c16e254dc8e1b4b098273ad6b34467"
+  },
+  "guest_input_directory": "/fixtures",
+  "guest_output": "/output/result.o"
+}

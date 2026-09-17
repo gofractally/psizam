@@ -1,0 +1,186 @@
+[
+  {
+    "project": "coremark",
+    "repository": "eembc/coremark",
+    "revision": "1f483d5b8316753a742cbf5590caf5bd0a4e4777",
+    "path": "core_main.c",
+    "url": "https://raw.githubusercontent.com/eembc/coremark/1f483d5b8316753a742cbf5590caf5bd0a4e4777/core_main.c",
+    "sha256": "17884c93c5b94378eb0ff02b4df3725756cf2addb9b8cbcaa6200a4649ff5ca7"
+  },
+  {
+    "project": "coremark",
+    "repository": "eembc/coremark",
+    "revision": "1f483d5b8316753a742cbf5590caf5bd0a4e4777",
+    "path": "core_list_join.c",
+    "url": "https://raw.githubusercontent.com/eembc/coremark/1f483d5b8316753a742cbf5590caf5bd0a4e4777/core_list_join.c",
+    "sha256": "ca00e4e010ece47d7f040cb92aa50a95345a00d3171b59d088f6b243be06ce7b"
+  },
+  {
+    "project": "coremark",
+    "repository": "eembc/coremark",
+    "revision": "1f483d5b8316753a742cbf5590caf5bd0a4e4777",
+    "path": "core_matrix.c",
+    "url": "https://raw.githubusercontent.com/eembc/coremark/1f483d5b8316753a742cbf5590caf5bd0a4e4777/core_matrix.c",
+    "sha256": "ecdff717b5a5c4907d221a606760e25499899cbf617582c05d40db71c91351e4"
+  },
+  {
+    "project": "coremark",
+    "repository": "eembc/coremark",
+    "revision": "1f483d5b8316753a742cbf5590caf5bd0a4e4777",
+    "path": "core_state.c",
+    "url": "https://raw.githubusercontent.com/eembc/coremark/1f483d5b8316753a742cbf5590caf5bd0a4e4777/core_state.c",
+    "sha256": "f4b84bb0a3452c45a4daa664ab502bfdccbd31cb57d93e9ac490c60937717a4e"
+  },
+  {
+    "project": "coremark",
+    "repository": "eembc/coremark",
+    "revision": "1f483d5b8316753a742cbf5590caf5bd0a4e4777",
+    "path": "core_util.c",
+    "url": "https://raw.githubusercontent.com/eembc/coremark/1f483d5b8316753a742cbf5590caf5bd0a4e4777/core_util.c",
+    "sha256": "a3fbfcb9bb943b638624b8ece01c5836dd56a96d7bcde2697b248d077447327f"
+  },
+  {
+    "project": "coremark",
+    "repository": "eembc/coremark",
+    "revision": "1f483d5b8316753a742cbf5590caf5bd0a4e4777",
+    "path": "coremark.h",
+    "url": "https://raw.githubusercontent.com/eembc/coremark/1f483d5b8316753a742cbf5590caf5bd0a4e4777/coremark.h",
+    "sha256": "42642b9a06c7ed2b3bd9eda971b7c3868c4f5d27bf7ef6c4bba11291a0c2598a"
+  },
+  {
+    "project": "coremark",
+    "repository": "eembc/coremark",
+    "revision": "1f483d5b8316753a742cbf5590caf5bd0a4e4777",
+    "path": "posix/core_portme.c",
+    "url": "https://raw.githubusercontent.com/eembc/coremark/1f483d5b8316753a742cbf5590caf5bd0a4e4777/posix/core_portme.c",
+    "sha256": "f2b48f062058d528a5907e339ffd05d98f64d59e7c40d500fe05563eb5247ad0"
+  },
+  {
+    "project": "coremark",
+    "repository": "eembc/coremark",
+    "revision": "1f483d5b8316753a742cbf5590caf5bd0a4e4777",
+    "path": "posix/core_portme.h",
+    "url": "https://raw.githubusercontent.com/eembc/coremark/1f483d5b8316753a742cbf5590caf5bd0a4e4777/posix/core_portme.h",
+    "sha256": "a40e90ef4c5a5626d438afee1f8da628c2800105d4c3b5318e8810b34be554f2"
+  },
+  {
+    "project": "coremark",
+    "repository": "eembc/coremark",
+    "revision": "1f483d5b8316753a742cbf5590caf5bd0a4e4777",
+    "path": "LICENSE.md",
+    "url": "https://raw.githubusercontent.com/eembc/coremark/1f483d5b8316753a742cbf5590caf5bd0a4e4777/LICENSE.md",
+    "sha256": "9577b9c846f61fd69a0d8ac965998c6450c7d8969f71f0bb4a931b91aebad28a"
+  },
+  {
+    "project": "llvm-test-suite",
+    "repository": "llvm/llvm-test-suite",
+    "revision": "362edea0b56f70cc1185c078206e935255865a77",
+    "path": "LICENSE.TXT",
+    "url": "https://raw.githubusercontent.com/llvm/llvm-test-suite/362edea0b56f70cc1185c078206e935255865a77/LICENSE.TXT",
+    "sha256": "d110d0b221b92267e6d29a9d0a9b4140b59fed0a1fc3184152b0b20cd9f2df0c"
+  },
+  {
+    "project": "llvm-test-suite",
+    "repository": "llvm/llvm-test-suite",
+    "revision": "362edea0b56f70cc1185c078206e935255865a77",
+    "path": "SingleSource/Benchmarks/BenchmarkGame/fannkuch.c",
+    "url": "https://raw.githubusercontent.com/llvm/llvm-test-suite/362edea0b56f70cc1185c078206e935255865a77/SingleSource/Benchmarks/BenchmarkGame/fannkuch.c",
+    "sha256": "621885861a5206b369bc20314a043c37613202408a3586cd128fe04303fb65f0"
+  },
+  {
+    "project": "llvm-test-suite",
+    "repository": "llvm/llvm-test-suite",
+    "revision": "362edea0b56f70cc1185c078206e935255865a77",
+    "path": "SingleSource/Benchmarks/BenchmarkGame/n-body.c",
+    "url": "https://raw.githubusercontent.com/llvm/llvm-test-suite/362edea0b56f70cc1185c078206e935255865a77/SingleSource/Benchmarks/BenchmarkGame/n-body.c",
+    "sha256": "b11855531832c67ab915b848ce4e56ee51cc82f6fd7fe2266d7d79ae4426116b"
+  },
+  {
+    "project": "llvm-test-suite",
+    "repository": "llvm/llvm-test-suite",
+    "revision": "362edea0b56f70cc1185c078206e935255865a77",
+    "path": "SingleSource/Benchmarks/BenchmarkGame/nsieve-bits.c",
+    "url": "https://raw.githubusercontent.com/llvm/llvm-test-suite/362edea0b56f70cc1185c078206e935255865a77/SingleSource/Benchmarks/BenchmarkGame/nsieve-bits.c",
+    "sha256": "dc51518e3a6453486b7452d92d4720b39d3cc578b35cb7747e23aa68fce70464"
+  },
+  {
+    "project": "llvm-test-suite",
+    "repository": "llvm/llvm-test-suite",
+    "revision": "362edea0b56f70cc1185c078206e935255865a77",
+    "path": "SingleSource/Benchmarks/BenchmarkGame/spectral-norm.c",
+    "url": "https://raw.githubusercontent.com/llvm/llvm-test-suite/362edea0b56f70cc1185c078206e935255865a77/SingleSource/Benchmarks/BenchmarkGame/spectral-norm.c",
+    "sha256": "cc96d83a968503f2f2f7506756bb513e2ce499832e7432c1d13951caff8f6106"
+  },
+  {
+    "project": "llvm-test-suite",
+    "repository": "llvm/llvm-test-suite",
+    "revision": "362edea0b56f70cc1185c078206e935255865a77",
+    "path": "SingleSource/Benchmarks/BenchmarkGame/CMakeLists.txt",
+    "url": "https://raw.githubusercontent.com/llvm/llvm-test-suite/362edea0b56f70cc1185c078206e935255865a77/SingleSource/Benchmarks/BenchmarkGame/CMakeLists.txt",
+    "sha256": "c57dd42737107d95beb4d2da5839b73b1f2b8374588e0579ef8e45292149c387"
+  },
+  {
+    "project": "llvm-test-suite",
+    "repository": "llvm/llvm-test-suite",
+    "revision": "362edea0b56f70cc1185c078206e935255865a77",
+    "path": "SingleSource/Benchmarks/Polybench/linear-algebra/blas/gemm/gemm.c",
+    "url": "https://raw.githubusercontent.com/llvm/llvm-test-suite/362edea0b56f70cc1185c078206e935255865a77/SingleSource/Benchmarks/Polybench/linear-algebra/blas/gemm/gemm.c",
+    "sha256": "fa8692e619f6f5d5092856845df2a1c91c10ced8c66eb42263f12c5a2909c9b4"
+  },
+  {
+    "project": "llvm-test-suite",
+    "repository": "llvm/llvm-test-suite",
+    "revision": "362edea0b56f70cc1185c078206e935255865a77",
+    "path": "SingleSource/Benchmarks/Polybench/linear-algebra/blas/gemm/gemm.h",
+    "url": "https://raw.githubusercontent.com/llvm/llvm-test-suite/362edea0b56f70cc1185c078206e935255865a77/SingleSource/Benchmarks/Polybench/linear-algebra/blas/gemm/gemm.h",
+    "sha256": "69147d88e4d87e4e5e0be1fdfa0e766863072bc23aa73739a9d3fc378304ba52"
+  },
+  {
+    "project": "llvm-test-suite",
+    "repository": "llvm/llvm-test-suite",
+    "revision": "362edea0b56f70cc1185c078206e935255865a77",
+    "path": "SingleSource/Benchmarks/Polybench/stencils/jacobi-2d/jacobi-2d.c",
+    "url": "https://raw.githubusercontent.com/llvm/llvm-test-suite/362edea0b56f70cc1185c078206e935255865a77/SingleSource/Benchmarks/Polybench/stencils/jacobi-2d/jacobi-2d.c",
+    "sha256": "24a99667e83363adc5d2d713fc43fe5b546a4e22d20311a7ace23e23d9a5142a"
+  },
+  {
+    "project": "llvm-test-suite",
+    "repository": "llvm/llvm-test-suite",
+    "revision": "362edea0b56f70cc1185c078206e935255865a77",
+    "path": "SingleSource/Benchmarks/Polybench/stencils/jacobi-2d/jacobi-2d.h",
+    "url": "https://raw.githubusercontent.com/llvm/llvm-test-suite/362edea0b56f70cc1185c078206e935255865a77/SingleSource/Benchmarks/Polybench/stencils/jacobi-2d/jacobi-2d.h",
+    "sha256": "6ccf8928f16646cbf2f90a509c8d01a231063a08a76a670b7802b3b979f61770"
+  },
+  {
+    "project": "llvm-test-suite",
+    "repository": "llvm/llvm-test-suite",
+    "revision": "362edea0b56f70cc1185c078206e935255865a77",
+    "path": "SingleSource/Benchmarks/Polybench/utilities/polybench.c",
+    "url": "https://raw.githubusercontent.com/llvm/llvm-test-suite/362edea0b56f70cc1185c078206e935255865a77/SingleSource/Benchmarks/Polybench/utilities/polybench.c",
+    "sha256": "5de1de319495831bdb589a1ae8c2bfaf336f55c5549ab428c83d9d5905177f58"
+  },
+  {
+    "project": "llvm-test-suite",
+    "repository": "llvm/llvm-test-suite",
+    "revision": "362edea0b56f70cc1185c078206e935255865a77",
+    "path": "SingleSource/Benchmarks/Polybench/utilities/polybench.h",
+    "url": "https://raw.githubusercontent.com/llvm/llvm-test-suite/362edea0b56f70cc1185c078206e935255865a77/SingleSource/Benchmarks/Polybench/utilities/polybench.h",
+    "sha256": "a1c8a13f06722886a70648e6be2016420e684251687345d19b2c60aa87e5e276"
+  },
+  {
+    "project": "llvm-test-suite",
+    "repository": "llvm/llvm-test-suite",
+    "revision": "362edea0b56f70cc1185c078206e935255865a77",
+    "path": "SingleSource/Benchmarks/Polybench/LICENSE",
+    "url": "https://raw.githubusercontent.com/llvm/llvm-test-suite/362edea0b56f70cc1185c078206e935255865a77/SingleSource/Benchmarks/Polybench/LICENSE",
+    "sha256": "051cd26bce2f040209767780e375fb048efb14eb97001b24259f532f54917a4f"
+  },
+  {
+    "project": "coremark",
+    "repository": "eembc/coremark",
+    "revision": "1f483d5b8316753a742cbf5590caf5bd0a4e4777",
+    "path": "posix/core_portme_posix_overrides.h",
+    "url": "https://raw.githubusercontent.com/eembc/coremark/1f483d5b8316753a742cbf5590caf5bd0a4e4777/posix/core_portme_posix_overrides.h",
+    "sha256": "1dc67b5c1b9c773cccc740b911d708333d3bf154c3313f77b8a52e18209eda59"
+  }
+]

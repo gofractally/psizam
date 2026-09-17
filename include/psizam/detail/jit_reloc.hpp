@@ -79,6 +79,10 @@ namespace psizam::detail {
       // SIMD helpers
       simd_popcnt4_table,
 
+      #define PSIZAM_JIT_HELPER(symbol, function) symbol,
+      #include <psizam/detail/jit_helper_symbols.def>
+      #undef PSIZAM_JIT_HELPER
+
       // Standard library
       libc_memset,
       libc_memmove,
@@ -242,7 +246,10 @@ namespace psizam::detail {
                                   void* const* symbol_table) {
       for (uint32_t i = 0; i < num_relocs; i++) {
          const auto& r = relocs[i];
+         PSIZAM_ASSERT(static_cast<uint32_t>(r.symbol) < static_cast<uint32_t>(reloc_symbol::NUM_SYMBOLS),
+                       wasm_parse_exception, "PZAM relocation symbol out of range");
          void* addr = symbol_table[static_cast<uint32_t>(r.symbol)];
+         PSIZAM_ASSERT(addr != nullptr, wasm_parse_exception, "Unresolved PZAM relocation symbol");
          uint64_t target = reinterpret_cast<uint64_t>(addr);
          char* patch_site = code_base + r.code_offset;
 

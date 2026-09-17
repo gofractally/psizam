@@ -93,9 +93,7 @@ inline const pzam_code_section& pick_code_section(const pzam_file& pzam) {
 // Step (3) — initialize the symbol table for the current architecture.
 inline void init_symbol_table(void** symbol_table) {
 #if defined(__aarch64__)
-   std::memset(symbol_table,
-               0,
-               sizeof(void*) * static_cast<std::size_t>(reloc_symbol::NUM_SYMBOLS));
+   build_symbol_table<>(symbol_table);
    using jit_cg = jit_codegen_a64;
    symbol_table[static_cast<uint32_t>(reloc_symbol::call_host_function)]     = reinterpret_cast<void*>(&jit_cg::call_host_function);
    symbol_table[static_cast<uint32_t>(reloc_symbol::current_memory)]         = reinterpret_cast<void*>(&jit_cg::current_memory);
@@ -144,11 +142,13 @@ inline bool derive_reverse_host_args(uint8_t opt_tier) noexcept {
 inline pzam_load_result load_pzam(const pzam_file& pzam)
 {
    const pzam_code_section& cs = pick_code_section(pzam);
+   PSIZAM_ASSERT(pzam_page_layout_compatible(cs), wasm_parse_exception, pzam_page_layout_error);
 
    pzam_load_result out;
 
    // (2) Restore the module from embedded metadata.
    out.mod = restore_module(pzam.metadata);
+   out.mod.gas_metering = cs.instrumentation.gas_metering != 0;
    out.mod.allocator.use_default_memory();
 
    if (cs.functions.size() != out.mod.code.size())

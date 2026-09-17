@@ -342,6 +342,13 @@ namespace psizam::detail {
 
       // Perform linear scan register allocation.
       // Assigns phys_reg to each interval, or spill_slot if no register available.
+      template<bool AArch64 =
+#ifdef __aarch64__
+         true
+#else
+         false
+#endif
+      >
       static uint32_t allocate_registers(ir_function& func) {
          if (func.interval_count == 0) return 0;
 
@@ -458,22 +465,13 @@ namespace psizam::detail {
                       return a.start < b.start;
                    });
 
-         static constexpr int NUM_REGS = static_cast<int>(phys_reg::count);
+         static constexpr int NUM_REGS = AArch64 ? 21 : 9;
+         static constexpr int CALLER_SAVED = AArch64 ? 14 : 4;
          static constexpr int NUM_XMM = 12;
          static constexpr int XMM_BASE = 4; // first allocatable = xmm4
-         // ARM64 has no XMM registers for integer spill — evict directly to memory
-#ifdef __aarch64__
-         static constexpr int INT_XMM_SPILL_COUNT = 0;
-#else
-         static constexpr int INT_XMM_SPILL_COUNT = NUM_XMM;
-#endif
          uint32_t active[NUM_REGS];
          bool reg_used[NUM_REGS] = {};
          int num_active = 0;
-         // XMM registers used as integer spill (when GPRs exhausted)
-         bool int_xmm_used[NUM_XMM] = {};
-         uint32_t int_xmm_active[NUM_XMM];
-         int num_int_xmm_active = 0;
          uint32_t next_spill_slot = 0;
 
          for (uint32_t i = 0; i < func.interval_count; ++i) {
@@ -483,9 +481,8 @@ namespace psizam::detail {
             if (interval.type == types::v128) continue;
             // On x86_64, f32/f64 get XMM registers in the second pass.
             // On ARM64, f32/f64 are GPR bit patterns — allocate them here with integers.
-#ifndef __aarch64__
-            if (interval.type == types::f32 || interval.type == types::f64) continue;
-#endif
+            if constexpr (!AArch64)
+               if (interval.type == types::f32 || interval.type == types::f64) continue;
 
             // Vregs whose live range spans an eh_setjmp must live in memory —
             // see ir_live_interval::crosses_setjmp.
@@ -526,17 +523,6 @@ namespace psizam::detail {
                   ++j;
                }
             }
-            // Expire old intervals (integer XMM spills)
-            for (int j = 0; j < num_int_xmm_active; ) {
-               auto& active_iv = func.intervals[int_xmm_active[j]];
-               if (active_iv.end < interval.start) {
-                  int_xmm_used[active_iv.phys_xmm - XMM_BASE] = false;
-                  int_xmm_active[j] = int_xmm_active[--num_int_xmm_active];
-               } else {
-                  ++j;
-               }
-            }
-
             // Register coalescing: if this vreg is defined by a mov,
             // try to reuse the source's physical register (eliminates the mov).
             int hint_reg = -1;
@@ -550,7 +536,7 @@ namespace psizam::detail {
                         if (func.intervals[k].vreg == src_vreg && func.intervals[k].phys_reg >= 0) {
                            int sr = func.intervals[k].phys_reg;
                            if (!reg_used[sr] &&
-                               (!crosses_call || sr >= static_cast<int>(phys_reg::caller_saved_count)))
+                               (!crosses_call || sr >= CALLER_SAVED))
                               hint_reg = sr;
                            break;
                         }
@@ -564,7 +550,7 @@ namespace psizam::detail {
                assigned = hint_reg;
             } else if (crosses_call) {
                // Must use callee-saved register (survives calls)
-               for (int r = static_cast<int>(phys_reg::caller_saved_count); r < NUM_REGS; ++r) {
+               for (int r = CALLER_SAVED; r < NUM_REGS; ++r) {
                   if (!reg_used[r]) {
                      assigned = r;
                      break;
@@ -584,8 +570,8 @@ namespace psizam::detail {
                interval.phys_reg = static_cast<int8_t>(assigned);
                reg_used[assigned] = true;
                active[num_active++] = i;
-               if (assigned >= static_cast<int>(phys_reg::caller_saved_count)) {
-                  func.callee_saved_used |= (1 << (assigned - static_cast<int>(phys_reg::caller_saved_count)));
+               if (assigned >= CALLER_SAVED) {
+                  func.callee_saved_used |= (1 << (assigned - CALLER_SAVED));
                }
             } else {
                // No free GPR. Evict lowest-weight active interval if new one is hotter.
@@ -598,91 +584,45 @@ namespace psizam::detail {
                   if (w < min_weight) {
                      int r = aiv.phys_reg;
                      // Don't evict to a caller-saved reg if we cross a call
-                     if (crosses_call && r < static_cast<int>(phys_reg::caller_saved_count))
+                     if (crosses_call && r < CALLER_SAVED)
                         continue;
                      min_weight = w;
                      evict_idx = j;
                   }
                }
                if (evict_idx >= 0) {
-                  // Evict cold interval: take its GPR, spill it to XMM or memory
+                  // Evict cold interval; the second pass may promote it to XMM
                   auto& victim = func.intervals[active[evict_idx]];
                   assigned = victim.phys_reg;
                   victim.phys_reg = -1;
-                  int xmm_v = -1;
-                  for (int x = 0; x < INT_XMM_SPILL_COUNT; ++x)
-                     if (!int_xmm_used[x]) { xmm_v = x; break; }
-                  if (xmm_v >= 0) {
-                     victim.phys_xmm = static_cast<int8_t>(xmm_v + XMM_BASE);
-                     int_xmm_used[xmm_v] = true;
-                     int_xmm_active[num_int_xmm_active++] = active[evict_idx];
-                  } else {
-                     victim.spill_slot = static_cast<int16_t>(next_spill_slot++);
-                  }
+                  victim.spill_slot = static_cast<int16_t>(next_spill_slot++);
                   interval.phys_reg = static_cast<int8_t>(assigned);
                   active[evict_idx] = i;
                } else {
-                  // New interval is colder — spill it to XMM or memory
+                  // New interval is colder; defer XMM assignment to the second pass
                   interval.phys_reg = -1;
-                  int xmm_assigned = -1;
-                  for (int x = 0; x < INT_XMM_SPILL_COUNT; ++x)
-                     if (!int_xmm_used[x]) { xmm_assigned = x; break; }
-                  if (xmm_assigned >= 0) {
-                     interval.phys_xmm = static_cast<int8_t>(xmm_assigned + XMM_BASE);
-                     interval.spill_slot = -1;
-                     int_xmm_used[xmm_assigned] = true;
-                     int_xmm_active[num_int_xmm_active++] = i;
-                  } else {
-                     interval.spill_slot = static_cast<int16_t>(next_spill_slot++);
-                  }
+                  interval.spill_slot = static_cast<int16_t>(next_spill_slot++);
                }
             }
          }
 
-         // ── Second pass: XMM register allocation for v128/f32/f64 vregs ──
-         // Integer spills may occupy some XMMs. Pre-populate xmm_used so
-         // float intervals processed before integer intervals see the conflict.
+         // Allocate XMMs in one ordered pass for floats, vectors and integer
+         // spills. Separate integer/float passes miss lifetime conflicts and can
+         // overflow the active set when many disjoint integer spills reuse XMMs.
          bool xmm_used[NUM_XMM] = {};
          uint32_t xmm_active[NUM_XMM];
          int num_xmm_active = 0;
-
-         // Pre-scan: mark all integer XMM assignments as initially used.
-         // They'll be expired normally during the pass as their intervals end.
-         for (uint32_t i = 0; i < func.interval_count; ++i) {
-            auto& iv = func.intervals[i];
-            if (iv.phys_xmm >= XMM_BASE && iv.type != types::v128
-                && iv.type != types::f32 && iv.type != types::f64) {
-               xmm_used[iv.phys_xmm - XMM_BASE] = true;
-            }
-         }
-
-         // Re-sort intervals (may have been modified by GPR pass)
-         std::sort(func.intervals, func.intervals + func.interval_count,
-                   [](const ir_live_interval& a, const ir_live_interval& b) {
-                      return a.start < b.start;
-                   });
 
          for (uint32_t i = 0; i < func.interval_count; ++i) {
             auto& interval = func.intervals[i];
             if (interval.start == UINT32_MAX) continue;
 
-            // Integer vregs with XMM spill: track in active set for expiry
-            if (interval.phys_xmm >= XMM_BASE && interval.type != types::v128
-                && interval.type != types::f32 && interval.type != types::f64) {
-               // Already assigned XMM from integer pass — just track it
-               int xmm_idx = interval.phys_xmm - XMM_BASE;
-               xmm_used[xmm_idx] = true;
-               xmm_active[num_xmm_active++] = i;
+            if constexpr (AArch64) {
+               // ARM64 scalars use GPRs or memory, never this XMM pool.
+               if (interval.type != types::v128) continue;
+            } else if (interval.phys_reg >= 0) {
                continue;
             }
-
-            // On ARM64, f32/f64 are allocated as GPRs in the first pass — skip here
-#ifdef __aarch64__
-            if (interval.type != types::v128) continue;
-#else
-            if (interval.type != types::v128 && interval.type != types::f32
-                && interval.type != types::f64) continue;
-#endif
 
             // Cross-setjmp vregs must go to memory. All XMM regs are caller-saved
             // on SysV x86_64 (and NEON regs behave the same through longjmp), so
@@ -741,7 +681,7 @@ namespace psizam::detail {
                interval.phys_xmm = static_cast<int8_t>(assigned + XMM_BASE);
                xmm_used[assigned] = true;
                xmm_active[num_xmm_active++] = i;
-            } else if (xmm_crosses_call && interval.type != types::v128
+            } else if (xmm_crosses_call && (interval.type == types::f32 || interval.type == types::f64)
                        && interval.phys_reg < 0) {
                // f32/f64 crossing a call: try a callee-saved GPR to hold the
                // float bits across the call (faster than memory spill).
@@ -750,11 +690,11 @@ namespace psizam::detail {
                // Must check for overlap with existing GPR intervals (reg_used
                // from first pass is stale at this point).
                int gpr = -1;
-               for (int r = static_cast<int>(phys_reg::caller_saved_count); r < NUM_REGS; ++r) {
+               for (int r = CALLER_SAVED; r < NUM_REGS; ++r) {
                   bool in_use = false;
                   for (uint32_t k = 0; k < func.interval_count; ++k) {
                      auto& kiv = func.intervals[k];
-                     if (kiv.phys_reg == r && kiv.start < interval.end && kiv.end > interval.start) {
+                     if (kiv.phys_reg == r && kiv.start <= interval.end && kiv.end >= interval.start) {
                         in_use = true;
                         break;
                      }
@@ -763,10 +703,8 @@ namespace psizam::detail {
                }
                if (gpr >= 0) {
                   interval.phys_reg = static_cast<int8_t>(gpr);
-                  reg_used[gpr] = true;
-                  active[num_active++] = i;
-                  if (gpr >= static_cast<int>(phys_reg::caller_saved_count))
-                     func.callee_saved_used |= (1 << (gpr - static_cast<int>(phys_reg::caller_saved_count)));
+                  if (gpr >= CALLER_SAVED)
+                     func.callee_saved_used |= (1 << (gpr - CALLER_SAVED));
                } else {
                   // All callee-saved GPRs taken — fall back to memory spill
                   interval.phys_xmm = -1;
@@ -778,6 +716,18 @@ namespace psizam::detail {
                interval.phys_xmm = -1;
                interval.spill_slot = static_cast<int16_t>(next_spill_slot);
                next_spill_slot += (interval.type == types::v128) ? 2 : 1;
+            }
+         }
+
+         // Promotions to XMM/GPR no longer need their provisional spill slots.
+         // Compact the final frame and clear stale memory assignments.
+         next_spill_slot = 0;
+         for (uint32_t i = 0; i < func.interval_count; ++i) {
+            auto& iv = func.intervals[i];
+            iv.spill_slot = -1;
+            if (iv.start != UINT32_MAX && iv.phys_reg < 0 && iv.phys_xmm < 0) {
+               iv.spill_slot = static_cast<int16_t>(next_spill_slot);
+               next_spill_slot += iv.type == types::v128 ? 2 : 1;
             }
          }
 

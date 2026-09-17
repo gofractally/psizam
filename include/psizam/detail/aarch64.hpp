@@ -760,11 +760,7 @@ namespace psizam::detail {
             emit_call_c_function(&__psizam_resolve_indirect);
             emit_restore_context();
             // X0 = code_ptr (null on error → branch to handler)
-            {
-               int64_t offset = (static_cast<uint8_t*>(call_indirect_handler) - code) / 4;
-               // CBZ X0, call_indirect_handler
-               emit32(0xB4000000 | ((static_cast<uint32_t>(offset) & 0x7FFFF) << 5) | X0);
-            }
+            emit_cbz_to_handler64(X0, call_indirect_handler);
             emit32(0xAA0003E8); // MOV X8, X0
             emit32(0xD63F0100); // BLR X8
          } else {
@@ -4923,8 +4919,10 @@ namespace psizam::detail {
             void* skip = code;
             emit32(0x54000000 | invert_condition(cond)); // B.inv_cond skip
             // Load handler address and branch
-            emit_mov_imm64(X8, reinterpret_cast<uint64_t>(handler));
-            emit32(0xD61F0100); // BR X8
+            // Inline PC-relative trampoline. Code buffers are page-aligned
+            // before and after relocation; no scratch-buffer address escapes.
+            write_veneer(code, handler);
+            code += VENEER_SLOT_SIZE;
             fix_branch(skip, code);
          }
       }
@@ -4937,8 +4935,10 @@ namespace psizam::detail {
          } else {
             void* skip = code;
             emit32(0x35000000 | rn); // CBNZ Wn, skip
-            emit_mov_imm64(X8, reinterpret_cast<uint64_t>(handler));
-            emit32(0xD61F0100); // BR X8
+            // Inline PC-relative trampoline. Code buffers are page-aligned
+            // before and after relocation; no scratch-buffer address escapes.
+            write_veneer(code, handler);
+            code += VENEER_SLOT_SIZE;
             fix_branch(skip, code);
          }
       }
@@ -4950,8 +4950,10 @@ namespace psizam::detail {
          } else {
             void* skip = code;
             emit32(0xB5000000 | rn); // CBNZ Xn, skip
-            emit_mov_imm64(X8, reinterpret_cast<uint64_t>(handler));
-            emit32(0xD61F0100);
+            // Inline PC-relative trampoline. Code buffers are page-aligned
+            // before and after relocation; no scratch-buffer address escapes.
+            write_veneer(code, handler);
+            code += VENEER_SLOT_SIZE;
             fix_branch(skip, code);
          }
       }
@@ -5064,6 +5066,7 @@ namespace psizam::detail {
       // can later widen the imm via patch_gas_imm_add_extra.
       void* emit_gas_charge(int64_t cost) {
          emit_validate_watermark();
+         if (!_mod.gas_metering) return nullptr;
          using ctx_t = jit_execution_context<false>;
          const uint32_t consumed_off = static_cast<uint32_t>(ctx_t::gas_consumed_offset());
          const uint32_t deadline_off = static_cast<uint32_t>(ctx_t::gas_deadline_offset());
@@ -5777,9 +5780,8 @@ namespace psizam::detail {
       // ===================================================================
 
       // Host call with fast trampoline dispatch.
-      // On platforms with .eh_frame support (x86_64, Linux aarch64), exceptions
-      // propagate naturally. On macOS aarch64 (compact unwind, no .eh_frame),
-      // longjmp_on_exception is needed to safely unwind through JIT frames.
+      // Catch in the host frame; restore registers via the trap boundary instead
+      // of unwinding through generated frames.
       static native_value call_host_function(void* ctx, native_value* args, uint32_t idx, uint32_t remaining_stack) {
          auto* context = static_cast<jit_execution_context<false>*>(ctx);
          auto saved = context->_remaining_call_depth;
@@ -5803,11 +5805,7 @@ namespace psizam::detail {
                fwd[i] = args[np - 1 - i];
             result = context->_table->call(context->get_host_ptr(), mapped_index, fwd, context->linear_memory());
          };
-#if defined(__APPLE__) && defined(__aarch64__)
          longjmp_on_exception(do_call);
-#else
-         do_call();
-#endif
          context->_remaining_call_depth = saved;
          return result;
       }

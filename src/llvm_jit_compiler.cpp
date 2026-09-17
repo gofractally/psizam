@@ -8,6 +8,11 @@
 #include <psizam/detail/softfloat.hpp>
 
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
+#include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
+#include <llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h>
+#include <llvm/ExecutionEngine/JITLink/JITLink.h>
+#include <algorithm>
+#include <mutex>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/TargetSelect.h>
@@ -27,9 +32,61 @@ namespace psizam::detail {
    }
    static bool llvm_targets_initialized = init_llvm_targets();
 
+   // Observe executable sections without changing ORC's linker or memory manager.
+   // Record page-aligned ranges after allocation; execution begins only after all
+   // entry lookups have forced this module to materialize.
+   struct executable_pages : llvm::orc::ObjectLinkingLayer::Plugin {
+      std::mutex mutex;
+      std::vector<std::pair<uintptr_t, uintptr_t>> ranges;
+      void add_range(uintptr_t start, size_t size) {
+         if (!size) return;
+         const auto page = static_cast<uintptr_t>(::sysconf(_SC_PAGESIZE));
+         std::lock_guard lock(mutex);
+         ranges.emplace_back(start & ~(page-1), (start + size + page-1) & ~(page-1));
+      }
+      void modifyPassConfig(llvm::orc::MaterializationResponsibility&,
+                            llvm::jitlink::LinkGraph&,
+                            llvm::jitlink::PassConfiguration& config) override {
+         config.PostFixupPasses.push_back([this](llvm::jitlink::LinkGraph& graph) {
+            const auto page = static_cast<uintptr_t>(::sysconf(_SC_PAGESIZE));
+            std::lock_guard lock(mutex);
+            for (auto& section : graph.sections()) {
+               if ((static_cast<unsigned>(section.getMemProt()) &
+                    static_cast<unsigned>(llvm::orc::MemProt::Exec)) == 0) continue;
+               for (auto* block : section.blocks()) {
+                  if (block->getSize() == 0) continue;
+                  auto start = block->getAddress().getValue();
+                  ranges.emplace_back(start & ~(page-1), (start + block->getSize() + page-1) & ~(page-1));
+               }
+            }
+            return llvm::Error::success();
+         });
+      }
+      llvm::Error notifyFailed(llvm::orc::MaterializationResponsibility&) override { return llvm::Error::success(); }
+      llvm::Error notifyRemovingResources(llvm::orc::JITDylib&, llvm::orc::ResourceKey) override { return llvm::Error::success(); }
+      void notifyTransferringResources(llvm::orc::JITDylib&, llvm::orc::ResourceKey, llvm::orc::ResourceKey) override {}
+      void publish(growable_allocator& alloc) {
+         std::lock_guard lock(mutex);
+         std::sort(ranges.begin(), ranges.end());
+         for (auto [begin, end] : ranges) {
+            auto& result = alloc.external_code_ranges;
+            if (!result.empty()) {
+               auto& last = result.back();
+               auto start = reinterpret_cast<uintptr_t>(last.first);
+               if (begin <= start + last.second) {
+                  last.second = std::max(start + last.second, end) - start;
+                  continue;
+               }
+            }
+            result.emplace_back(reinterpret_cast<std::byte*>(begin), end-begin);
+         }
+      }
+   };
+
    struct llvm_jit_compiler::impl {
       llvm_jit_options opts;
       std::unique_ptr<llvm::orc::LLJIT> jit;
+      std::shared_ptr<executable_pages> pages = std::make_shared<executable_pages>();
 
       impl(const llvm_jit_options& options) : opts(options) {
          auto jit_or_err = llvm::orc::LLJITBuilder().create();
@@ -40,6 +97,16 @@ namespace psizam::detail {
             throw std::runtime_error("Failed to create LLVM JIT: " + err);
          }
          jit = std::move(*jit_or_err);
+         if (auto* layer = llvm::dyn_cast<llvm::orc::ObjectLinkingLayer>(&jit->getObjLinkingLayer())) {
+            layer->addPlugin(pages);
+         } else if (auto* layer = llvm::dyn_cast<llvm::orc::RTDyldObjectLinkingLayer>(&jit->getObjLinkingLayer())) {
+            layer->setNotifyLoaded([pages = pages](llvm::orc::MaterializationResponsibility&,
+                                                  const llvm::object::ObjectFile& object,
+                                                  const llvm::RuntimeDyld::LoadedObjectInfo& loaded) {
+               for (auto section : object.sections())
+                  if (section.isText()) pages->add_range(loaded.getSectionLoadAddress(section), section.getSize());
+            });
+         }
       }
    };
 
@@ -198,6 +265,7 @@ namespace psizam::detail {
          // (for LLVM backend, this is an absolute address, not a relative offset)
          mod.code[i].jit_code_offset = reinterpret_cast<std::size_t>(addr);
       }
+      _impl->pages->publish(mod.allocator);
    }
 
    void* llvm_jit_compiler::lookup(const std::string& name) {

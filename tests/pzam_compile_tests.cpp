@@ -3,6 +3,7 @@
 #include <psizam/pzam_compile.hpp>
 #include <psizam/detail/pzam_loader.hpp>
 #include <psizam/backend.hpp>
+#include <psizam/detail/execution_limits.hpp>
 
 using namespace psizam;
 namespace {
@@ -60,12 +61,18 @@ TEST_CASE("pzam_compile rejects requests it cannot fulfill", "[pzam-compile]") {
    for (auto tier : {pzam_tier_flags::none, pzam_tier_flags::jit1,
                      pzam_tier_flags::all_jit, static_cast<pzam_tier_flags>(128)})
       CHECK_THROWS_AS(pzam_compile(add_wasm, {.tier=tier}), std::invalid_argument);
-   for (auto flags : {pzam_compile_flags::gas_meter, pzam_compile_flags::debug_info,
+   for (auto flags : {pzam_compile_flags::debug_info,
                       pzam_compile_flags::softfloat, static_cast<pzam_compile_flags>(128)})
       CHECK_THROWS_AS(pzam_compile(add_wasm, {.flags=flags}), std::invalid_argument);
 #ifndef PSIZAM_ENABLE_LLVM_BACKEND
    CHECK_THROWS_AS(pzam_compile(add_wasm, {.tier=pzam_tier_flags::llvm_O2}), std::invalid_argument);
 #endif
+}
+
+TEST_CASE("JIT PZAM rejects an incompatible memory page layout", "[pzam-compile]") {
+   auto file = pzam_load(pzam_compile(add_wasm, {.tier=pzam_tier_flags::jit2}));
+   file.code_sections.front().page_size = wasm_allocator::table_size() == 4096 ? 16384 : 4096;
+   CHECK_THROWS_WITH(psizam::detail::load_pzam(file), pzam_page_layout_error);
 }
 
 TEST_CASE("pzam_compile emits actual code for each requested target and tier", "[pzam-compile]") {
@@ -121,4 +128,60 @@ TEST_CASE("pzam_compile preserves identity for empty modules and instrumentation
    CHECK(instrumented.code_sections[0].instrumentation.async_backtrace == 1);
    CHECK(instrumented.code_sections[0].instrumentation.softfloat == !!(flags & pzam_compile_flags::softfloat));
    execute(instrumented);
+}
+
+namespace {
+const std::vector<uint8_t> resource_recovery_wasm{0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,3,2,1,0,7,7,1,3,114,117,110,0,0,10,13,1,11,0,3,64,32,0,13,0,11,65,42,11};
+template<class Impl> void check_page_timeout_recovery() {
+   auto wasm = resource_recovery_wasm;
+   wasm_allocator wa;
+   default_options options;
+   options.gas_metering = false;
+   backend<std::nullptr_t, Impl> engine(wasm, &wa, options);
+   for (int trial = 0; trial < 2; ++trial) {
+      CHECK_THROWS_AS(engine.timed_run(detail::watchdog{std::chrono::milliseconds(10)}, [&] {
+         engine.call("env", "run", uint32_t{1});
+      }), timeout_exception);
+      CHECK(engine.get_context().gas().consumed == 0);
+      auto value = engine.call_with_return("env", "run", uint32_t{0});
+      REQUIRE(value);
+      CHECK(value->to_ui32() == 42);
+   }
+}
+}
+
+TEST_CASE("page interruption restores reusable code without gas checks", "[resource-limits]") {
+   check_page_timeout_recovery<interpreter>();
+   check_page_timeout_recovery<jit>();
+   check_page_timeout_recovery<jit2>();
+#ifdef PSIZAM_ENABLE_LLVM_BACKEND
+   check_page_timeout_recovery<jit_llvm>();
+#endif
+}
+
+TEST_CASE("PZAM gas instrumentation is effective and correctly labeled", "[resource-limits][pzam-compile]") {
+   std::vector<pzam_tier_flags> tiers{pzam_tier_flags::jit2};
+#ifdef PSIZAM_ENABLE_LLVM_BACKEND
+   tiers.push_back(pzam_tier_flags::llvm_O2);
+#endif
+   for (auto tier : tiers) {
+      std::vector<uint8_t> plain;
+      for (bool meter : {false, true}) {
+         auto file = pzam_load(pzam_compile(add_wasm, {.tier=tier,
+            .flags=meter ? pzam_compile_flags::gas_meter : pzam_compile_flags::none}));
+         CHECK(file.code_sections[0].instrumentation.gas_metering == meter);
+         if (!meter) plain = file.code_sections[0].code_blob;
+         else CHECK(file.code_sections[0].code_blob != plain);
+         auto loaded = detail::load_pzam(file);
+         std::shared_ptr<void> owner(loaded.exec_code, [](void* p) { jit_allocator::instance().free(p); });
+         wasm_allocator wa;
+         detail::jit_execution_context<> context(loaded.mod, 8192);
+         context.set_wasm_allocator(&wa); context.reset();
+         context.set_gas_budget(gas_units{1});
+         auto call = [&] { return context.execute(nullptr, detail::jit_visitor{nullptr},
+            loaded.mod.get_exported_function("add"), uint32_t{19}, uint32_t{23}); };
+         if (meter) CHECK_THROWS_AS(call(), wasm_gas_exhausted_exception);
+         else { CHECK(call()->to_ui32() == 42); CHECK(context.gas().consumed == 0); }
+      }
+   }
 }

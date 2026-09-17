@@ -43,6 +43,15 @@ namespace psizam {
    using detail::relocation_recorder;
    using detail::code_relocation;
 
+   inline constexpr const char* pzam_page_layout_error =
+      "JIT PZAM page size does not match runtime";
+
+   inline bool pzam_page_layout_compatible(const pzam_code_section& section) {
+      const auto tier = static_cast<pzam_opt_tier>(section.opt_tier);
+      return (tier != pzam_opt_tier::jit1 && tier != pzam_opt_tier::jit2) ||
+             section.page_size == wasm_allocator::table_size();
+   }
+
    /// Build the reloc_symbol -> function address mapping table.
    /// This is the "linker" that resolves symbols at load time.
    /// The table must be kept in sync with the reloc_symbol enum.
@@ -99,8 +108,15 @@ namespace psizam {
       table[static_cast<uint32_t>(reloc_symbol::trunc_sat_f64_i64s)] = reinterpret_cast<void*>(&trunc_sat_f64_i64s);
       table[static_cast<uint32_t>(reloc_symbol::trunc_sat_f64_i64u)] = reinterpret_cast<void*>(&trunc_sat_f64_i64u);
 
-      // SIMD data
-      // popcnt4 table is static data in the code generator — address resolved at template instantiation
+      #define PSIZAM_JIT_HELPER(symbol, function) \
+         table[static_cast<uint32_t>(reloc_symbol::symbol)] = reinterpret_cast<void*>(&function);
+      #include <psizam/detail/jit_helper_symbols.def>
+      #undef PSIZAM_JIT_HELPER
+
+      // The nibble table is data, so give the loader its own stable storage.
+      static const uint8_t popcnt4[] = {0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4};
+      table[static_cast<uint32_t>(reloc_symbol::simd_popcnt4_table)] =
+         const_cast<uint8_t*>(popcnt4);
    }
 
    /// Build the reloc_symbol -> function address mapping table for LLVM runtime helpers.
@@ -238,6 +254,7 @@ namespace psizam {
          pzam_code_section cs;
          cs.arch = static_cast<uint8_t>(target_arch);
          cs.instrumentation.softfloat = softfloat_enabled ? 1 : 0;
+         cs.instrumentation.gas_metering = mod.gas_metering;
          cs.instrumentation.async_backtrace = backtrace_enabled ? 1 : 0;
          cs.stack_limit_mode = mod.stack_limit_is_bytes ? 1 : 0;
          cs.max_stack = static_cast<uint32_t>(mod.maximum_stack);
@@ -318,7 +335,8 @@ namespace psizam {
                break;
             }
          }
-         if (!cs) return false;
+         if (!cs || !pzam_page_layout_compatible(*cs)) return false;
+         if (bool(cs->instrumentation.gas_metering) != mod.gas_metering) return false;
 
          // Validate compiler hash
          auto expected_compiler = compiler_identity(expected_arch);

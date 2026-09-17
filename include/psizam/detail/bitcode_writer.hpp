@@ -42,6 +42,10 @@ namespace psizam::detail {
          // patch_gas_imm_add_extra to 1 + sum(heavy-op extras inside
          // this loop) when END is reached.
          uint32_t label = op_index;
+         if (!_mod->gas_metering) {
+            _last_loop_gas_ptr = nullptr;
+            return label;
+         }
          auto& instr = append_instr(gas_charge_t{1});
          _last_loop_gas_ptr = &instr.cost;
          return label;

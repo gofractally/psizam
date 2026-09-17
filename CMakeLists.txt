@@ -52,6 +52,12 @@ option(PSIZAM_ENABLE_TOOLS
    "Build psizam CLI tools" ${PSIZAM_IS_TOPLEVEL})
 option(PSIZAM_ENABLE_TESTS
    "Build psizam unit tests and spec tests" OFF)
+option(PSIZAM_ENABLE_COMPILER_TESTS
+   "Require pinned Clang workloads in the execution validation matrix" OFF)
+set(PSIZAM_COMPILER_TEST_DATA "" CACHE PATH "Directory with pinned clang.wasm and frozen LLVM translation units")
+if(PSIZAM_ENABLE_COMPILER_TESTS AND NOT PSIZAM_ENABLE_TESTS)
+   message(FATAL_ERROR "PSIZAM_ENABLE_COMPILER_TESTS requires PSIZAM_ENABLE_TESTS")
+endif()
 option(PSIZAM_ENABLE_BENCHMARKS
    "Build comparative benchmark suite" OFF)
 option(PSIZAM_ENABLE_EXAMPLES
@@ -254,7 +260,7 @@ if(PSIZAM_ENABLE_LLVM)
 endif()
 
 # ── Tools (after LLVM so pzam-compile can link psizam-llvm) ───────────────────
-if(PSIZAM_ENABLE_TOOLS)
+if(PSIZAM_ENABLE_TOOLS OR (PSIZAM_ENABLE_TESTS AND NOT CMAKE_SYSTEM_NAME STREQUAL "WASI"))
    add_subdirectory(tools)
 endif()
 

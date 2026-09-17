@@ -57,6 +57,13 @@ namespace psizam::detail {
 
    __attribute__((visibility("default")))
    inline thread_local std::span<std::byte> code_memory_range;
+   __attribute__((visibility("default")))
+   inline thread_local const growable_allocator* active_code_allocator = nullptr;
+   inline bool in_active_code(uintptr_t addr) {
+      if (active_code_allocator) return active_code_allocator->contains_code_address(addr);
+      auto begin = reinterpret_cast<uintptr_t>(code_memory_range.data());
+      return addr >= begin && addr - begin < code_memory_range.size();
+   }
 
    __attribute__((visibility("default")))
    inline thread_local std::span<std::byte> memory_range;
@@ -113,7 +120,7 @@ namespace psizam::detail {
             uint32_t faulting_instr = 0;
             // Only read the faulting instruction if the PC is in a readable range.
             // If PC is 0 or unmapped, memcpy would cause a nested SIGSEGV.
-            bool pc_readable = pc_val != 0 &&
+            bool pc_readable = !timed_run_has_timed_out.load(std::memory_order_acquire) && pc_val != 0 &&
                ((!code_memory_range.empty() &&
                  pc_val >= (uint64_t)code_memory_range.data() &&
                  pc_val < (uint64_t)code_memory_range.data() + code_memory_range.size()) ||
@@ -166,7 +173,7 @@ namespace psizam::detail {
             // Dump the 16 instructions preceding the faulting PC so we can see
             // how the operand registers were computed. Also dump the full
             // register file.
-            if (in_code) {
+            if (in_code && pc_readable) {
                fprintf(stderr, "  All regs:\n");
                for (int i = 0; i < 29; i += 4) {
                   fprintf(stderr, "    X%-2d=%016llx  X%-2d=%016llx  X%-2d=%016llx  X%-2d=%016llx\n",
@@ -185,7 +192,7 @@ namespace psizam::detail {
 #endif
 
          //neither range set means legacy catch-all behavior; useful for some of the old tests
-         if (code_memory_range.empty() && memory_range.empty())
+         if ((!active_code_allocator || !active_code_allocator->has_code()) && code_memory_range.empty() && memory_range.empty())
             longjmp(*trap_jmp_ptr, sig);
 
          //a failure on the stack guard page means stack overflow
@@ -198,7 +205,7 @@ namespace psizam::detail {
             longjmp(*trap_jmp_ptr, sig);
 
          //a failure in the code range...
-         if (addr >= code_memory_range.data() && addr < code_memory_range.data() + code_memory_range.size()) {
+         if (in_active_code(reinterpret_cast<uintptr_t>(addr))) {
             //a SEGV/BUS in the code range when timed_run_has_timed_out=false is due to a _different_ thread's execution activating a deadline
             // timer. Return and retry executing the same code again. Eventually timed_run() on the other thread will reset the page
             // permissions and progress on this thread can continue
@@ -227,9 +234,7 @@ namespace psizam::detail {
 #elif defined(__aarch64__)
          pc_val = ((ucontext_t*)uap)->uc_mcontext.pc;
 #endif
-         if (pc_val != 0 && !code_memory_range.empty() &&
-             pc_val >= (uint64_t)code_memory_range.data() &&
-             pc_val < (uint64_t)code_memory_range.data() + code_memory_range.size())
+         if (pc_val != 0 && in_active_code(pc_val))
             longjmp(*trap_jmp_ptr, sig);
 
          // PC is outside the JIT code range (or we could not read it).  This
@@ -364,6 +369,8 @@ namespace psizam::detail {
       setup_signal_handler();
       jmp_buf dest;
       const auto old_code_memory_range = code_memory_range;
+      const auto* old_code_allocator = active_code_allocator;
+      active_code_allocator = &code_allocator;
       const auto old_memory_range = memory_range;
       const auto old_stack_guard_range = stack_guard_range;
       jmp_buf* old_trap_ptr = trap_jmp_ptr;
@@ -377,11 +384,13 @@ namespace psizam::detail {
             trap_jmp_ptr = old_trap_ptr;
             memory_range = old_memory_range;
             code_memory_range = old_code_memory_range;
+            active_code_allocator = old_code_allocator;
             stack_guard_range = old_stack_guard_range;
          } catch(...) {
             trap_jmp_ptr = old_trap_ptr;
             memory_range = old_memory_range;
             code_memory_range = old_code_memory_range;
+            active_code_allocator = old_code_allocator;
             stack_guard_range = old_stack_guard_range;
             throw;
          }
@@ -389,6 +398,7 @@ namespace psizam::detail {
          trap_jmp_ptr = old_trap_ptr;
          memory_range = old_memory_range;
          code_memory_range = old_code_memory_range;
+         active_code_allocator = old_code_allocator;
          stack_guard_range = old_stack_guard_range;
          if (sig == -1) {
             std::exception_ptr exception = std::move(saved_exception);

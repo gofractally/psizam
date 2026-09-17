@@ -7,6 +7,7 @@
 // No .wasm file is needed — all metadata is embedded in the .pzam.
 
 #include <psizam/backend.hpp>
+#include "resource_limit_options.hpp"
 #include <psizam/detail/llvm_runtime_helpers.hpp>
 #include <psizam/pzam_cache.hpp>
 #include <psizam/pzam_format.hpp>
@@ -97,7 +98,7 @@ int pzam_run_main(int argc, char** argv) {
    phase_profile profile;
 
    if (argc < 2) {
-      std::cerr << "Usage: pzam-run [--dir=guest:host ...] [--trust=none|full] <module.pzam> [-- args...]\n";
+      std::cerr << "Usage: pzam-run [--dir=guest:host ...] [--trust=none|full] [--cpu-limit=none|gas|timeout|timeout-poll] [--gas-budget=N] [--timeout-ms=N] <module.pzam> [-- args...]\n";
       return 1;
    }
 
@@ -105,11 +106,18 @@ int pzam_run_main(int argc, char** argv) {
    std::vector<std::pair<std::string, std::string>> dirs;
    std::vector<std::string> wasm_args;
    trust_level trust = trust_level::none;
+   execution_limits limits;
+   bool explicit_limits = false;
 
    // Parse options
    int i = 1;
    for (; i < argc; i++) {
       std::string arg = argv[i];
+      try {
+         if (parse_limit_option(arg, limits)) { explicit_limits = true; continue; }
+      } catch (const std::exception& e) {
+         std::cerr << e.what() << "\n"; return 2;
+      }
       if (arg.starts_with("--dir=")) {
          auto val = arg.substr(6);
          auto colon = val.find(':');
@@ -237,8 +245,18 @@ int pzam_run_main(int argc, char** argv) {
       return 1;
    }
 
+   if (!pzam_page_layout_compatible(*cs)) {
+      std::cerr << "Error: " << pzam_page_layout_error << "\n";
+      return 1;
+   }
+
    // Restore module from embedded metadata — no .wasm needed
    module mod = restore_module(pzam.metadata);
+   mod.gas_metering = cs->instrumentation.gas_metering != 0;
+   if (explicit_limits && ((limits.policy == cpu_limit::gas || limits.policy == cpu_limit::timeout_poll) != mod.gas_metering)) {
+      std::cerr << "Error: artifact gas instrumentation does not match requested CPU policy\n";
+      return 2;
+   }
    mod.allocator.use_default_memory();
 
    profile.mark("restore_module from metadata");
@@ -269,7 +287,7 @@ int pzam_run_main(int argc, char** argv) {
    // Build symbol table for relocation
    void* symbol_table[static_cast<size_t>(reloc_symbol::NUM_SYMBOLS)];
 #if defined(__aarch64__)
-   std::memset(symbol_table, 0, sizeof(symbol_table));
+   build_symbol_table<>(symbol_table);
    using jit_cg = jit_codegen_a64;
    symbol_table[static_cast<uint32_t>(reloc_symbol::call_host_function)]     = reinterpret_cast<void*>(&jit_cg::call_host_function);
    symbol_table[static_cast<uint32_t>(reloc_symbol::current_memory)]         = reinterpret_cast<void*>(&jit_cg::current_memory);
@@ -658,12 +676,18 @@ int pzam_run_main(int argc, char** argv) {
    if (profile.enabled()) profile.dump(stderr);
 
    try {
+      with_execution_limits(mod, ctx, limits, [&] {
       if (mod.start != std::numeric_limits<uint32_t>::max()) {
          ctx.execute(&wasi, jit_visitor{nullptr}, mod.start);
       }
       ctx.execute(&wasi, jit_visitor{nullptr}, start_idx);
+      });
    } catch (const wasi_host::wasi_exit_exception& e) {
       return e.code;
+   } catch (const wasm_gas_exhausted_exception&) {
+      std::cerr << "RESOURCE_LIMIT=gas\n"; return 75;
+   } catch (const timeout_exception&) {
+      std::cerr << "RESOURCE_LIMIT=timeout\n"; return 76;
    } catch (const psizam::exception& e) {
       std::cerr << "psizam error: " << e.what() << " : " << e.detail() << "\n";
       return 1;

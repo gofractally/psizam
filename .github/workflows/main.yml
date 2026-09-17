@@ -1,238 +1,105 @@
-name: Pull Request
-on: [pull_request]
+name: Execution validation
+on:
+  pull_request:
+  push:
+    branches: [main, 'codex/**']
+  workflow_dispatch:
+    inputs:
+      compiler_fixtures_url:
+        description: Optional override for PSIZAM_COMPILER_FIXTURES_URL
+        required: false
+        type: string
 
-env:
-  PR_NUMBER: ${{ toJson(github.event.number) }}
+permissions:
+  contents: read
 
 jobs:
-  amazon_linux-2-build:
-    if: github.event.pull_request.base.repo.id != github.event.pull_request.head.repo.id
-    name: Amazon_Linux 2 | Build
-    runs-on: ubuntu-latest
+  execution:
+    name: ${{ matrix.os }} / execution and compiler gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            sdk: wasi-sdk-32.0-x86_64-linux
+            sdk_sha256: 55fc523ebfbc98f69d1034fcfcb83d1ff5610cd9ab7eceef6cd097a30ba4ef93
+          - os: macos-15
+            sdk: wasi-sdk-32.0-arm64-macos
+            sdk_sha256: 383be7fe00ae04691e1859164fd99970a528c55d624b886ed59f7933898b933d
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     steps:
-      - name: Checkout
+      - uses: actions/checkout@v4
+      - name: Checkout pinned psio
+        uses: actions/checkout@v4
+        with:
+          repository: gofractally/psio
+          ref: ff114b6a8c9265e6b5da5ffb85df1617b2b43514
+          path: validation-deps/psio
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        shell: bash
         run: |
-          git clone https://github.com/${GITHUB_REPOSITORY} .
-          git fetch -v --prune origin +refs/pull/${PR_NUMBER}/merge:refs/remotes/pull/${PR_NUMBER}/merge
-          git checkout --force --progress refs/remotes/pull/${PR_NUMBER}/merge
-          git submodule sync --recursive
-          git submodule update --init --force --recursive
-      - name: Build
-        run: | 
-          ./.cicd/build.sh
-          tar -pczf build.tar.gz build
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libboost-dev libsimdjson-dev wabt python3 zlib1g-dev libzstd-dev libedit-dev libxml2-dev
+          curl --fail --location --output "$RUNNER_TEMP/llvm.sh" https://apt.llvm.org/llvm.sh
+          sudo bash "$RUNNER_TEMP/llvm.sh" 22
+          sudo apt-get install -y llvm-22-dev libpolly-22-dev
+          echo "CC=/usr/lib/llvm-22/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=/usr/lib/llvm-22/bin/clang++" >> "$GITHUB_ENV"
+          echo "LLVM_DIR=/usr/lib/llvm-22/lib/cmake/llvm" >> "$GITHUB_ENV"
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install cmake ninja boost simdjson llvm wabt python
+          echo "CC=$(brew --prefix llvm)/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=$(brew --prefix llvm)/bin/clang++" >> "$GITHUB_ENV"
+          echo "LLVM_DIR=$(brew --prefix llvm)/lib/cmake/llvm" >> "$GITHUB_ENV"
+      - name: Install pinned WASI SDK
+        shell: bash
         env:
-          IMAGE_TAG: amazonlinux-2
-      - name: Upload Build Artifact
-        uses: actions/upload-artifact@v1
-        with:
-          name: amazon_linux-2-build
-          path: build.tar.gz
-  amazon_linux-2-unit-test:
-    name: Amazon_Linux 2 | Unit Test
-    runs-on: ubuntu-latest
-    needs: amazon_linux-2-build
-    steps:
-      - name: Checkout
+          SDK_NAME: ${{ matrix.sdk }}
+          SDK_SHA256: ${{ matrix.sdk_sha256 }}
         run: |
-          git clone https://github.com/${GITHUB_REPOSITORY} .
-          git fetch -v --prune origin +refs/pull/${PR_NUMBER}/merge:refs/remotes/pull/${PR_NUMBER}/merge
-          git checkout --force --progress refs/remotes/pull/${PR_NUMBER}/merge
-          git submodule sync --recursive
-          git submodule update --init --force --recursive
-      - name: Download Build Artifact
-        uses: actions/download-artifact@v1
-        with:
-          name: amazon_linux-2-build
-      - name: Unit Test
-        run: | 
-          tar -xzf amazon_linux-2-build/build.tar.gz
-          ./.cicd/test.sh
+          curl --fail --location --output "$RUNNER_TEMP/wasi-sdk.tar.gz" "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-32/$SDK_NAME.tar.gz"
+          python3 - <<'PYTHON'
+          import hashlib, os, pathlib
+          p = pathlib.Path(os.environ['RUNNER_TEMP']) / 'wasi-sdk.tar.gz'
+          with p.open('rb') as f:
+              assert hashlib.file_digest(f, 'sha256').hexdigest() == os.environ['SDK_SHA256']
+          PYTHON
+          tar -xzf "$RUNNER_TEMP/wasi-sdk.tar.gz" -C "$RUNNER_TEMP"
+          echo "PSIZAM_WASI_SDK=$RUNNER_TEMP/$SDK_NAME" >> "$GITHUB_ENV"
+      - name: Stage required compiler fixtures
         env:
-          IMAGE_TAG: amazonlinux-2
-
-
-  centos-77-build:
-    if: github.event.pull_request.base.repo.id != github.event.pull_request.head.repo.id
-    name: CentOS 7.7 | Build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
+          FIXTURE_URL: ${{ inputs.compiler_fixtures_url || vars.PSIZAM_COMPILER_FIXTURES_URL }}
+        shell: bash
         run: |
-          git clone https://github.com/${GITHUB_REPOSITORY} .
-          git fetch -v --prune origin +refs/pull/${PR_NUMBER}/merge:refs/remotes/pull/${PR_NUMBER}/merge
-          git checkout --force --progress refs/remotes/pull/${PR_NUMBER}/merge
-          git submodule sync --recursive
-          git submodule update --init --force --recursive
-      - name: Build
-        run: | 
-          ./.cicd/build.sh
-          tar -pczf build.tar.gz build
-        env:
-          IMAGE_TAG: centos-7.7
-      - name: Upload Build Artifact
-        uses: actions/upload-artifact@v1
-        with:
-          name: centos-77-build
-          path: build.tar.gz
-  centos-77-unit-test:
-    name: CentOS 7.7 | Unit Test
-    runs-on: ubuntu-latest
-    needs: centos-77-build
-    steps:
-      - name: Checkout
+          case "$FIXTURE_URL" in https://*) ;; *) echo 'Set repository variable PSIZAM_COMPILER_FIXTURES_URL to the pinned HTTPS archive; required compiler tests cannot be skipped.' >&2; exit 1 ;; esac
+          curl --fail --location --output "$RUNNER_TEMP/compiler-fixtures.tar.gz" "$FIXTURE_URL"
+          python3 scripts/stage-compiler-fixtures.py --archive "$RUNNER_TEMP/compiler-fixtures.tar.gz" --dest "$RUNNER_TEMP/compiler-fixtures"
+      - name: Configure
+        shell: bash
         run: |
-          git clone https://github.com/${GITHUB_REPOSITORY} .
-          git fetch -v --prune origin +refs/pull/${PR_NUMBER}/merge:refs/remotes/pull/${PR_NUMBER}/merge
-          git checkout --force --progress refs/remotes/pull/${PR_NUMBER}/merge
-          git submodule sync --recursive
-          git submodule update --init --force --recursive
-      - name: Download Build Artifact
-        uses: actions/download-artifact@v1
+          cmake -S . -B build/validation -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DFETCHCONTENT_SOURCE_DIR_PSIO="$GITHUB_WORKSPACE/validation-deps/psio" \
+            -DPSIZAM_ENABLE_TESTS=ON -DPSIZAM_ENABLE_SPEC_TESTS=OFF \
+            -DPSIZAM_ENABLE_LLVM=ON -DLLVM_DIR="$LLVM_DIR" \
+            -DPSIZAM_WASI_SDK="$PSIZAM_WASI_SDK" \
+            -DPSIZAM_ENABLE_COMPILER_TESTS=ON \
+            -DPSIZAM_COMPILER_TEST_DATA="$RUNNER_TEMP/compiler-fixtures"
+      - name: Build validation executables
+        run: cmake --build build/validation --target psizam_execution_driver psizam_regalloc_tests pzam-compile pzam-run --parallel 2
+      - name: Require correct execution
+        run: ctest --test-dir build/validation -L execution --output-on-failure --no-tests=error --output-junit execution-results.xml
+      - name: Preserve failures and commands
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: centos-77-build
-      - name: Unit Test
-        run: | 
-          tar -xzf centos-77-build/build.tar.gz
-          ./.cicd/test.sh
-        env:
-          IMAGE_TAG: centos-7.7
-
-
-  ubuntu-1604-build:
-    if: github.event.pull_request.base.repo.id != github.event.pull_request.head.repo.id  
-    name: Ubuntu 16.04 | Build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        run: |
-          git clone https://github.com/${GITHUB_REPOSITORY} .
-          git fetch -v --prune origin +refs/pull/${PR_NUMBER}/merge:refs/remotes/pull/${PR_NUMBER}/merge
-          git checkout --force --progress refs/remotes/pull/${PR_NUMBER}/merge
-          git submodule sync --recursive
-          git submodule update --init --force --recursive
-      - name: Build
-        run: | 
-          ./.cicd/build.sh
-          tar -pczf build.tar.gz build
-        env:
-          IMAGE_TAG: ubuntu-16.04
-      - name: Upload Build Artifact
-        uses: actions/upload-artifact@v1
-        with:
-          name: ubuntu-1604-build
-          path: build.tar.gz
-  ubuntu-1604-unit-test:
-    name: Ubuntu 16.04 | Unit Test
-    runs-on: ubuntu-latest
-    needs: ubuntu-1604-build
-    steps:
-      - name: Checkout
-        run: |
-          git clone https://github.com/${GITHUB_REPOSITORY} .
-          git fetch -v --prune origin +refs/pull/${PR_NUMBER}/merge:refs/remotes/pull/${PR_NUMBER}/merge
-          git checkout --force --progress refs/remotes/pull/${PR_NUMBER}/merge
-          git submodule sync --recursive
-          git submodule update --init --force --recursive
-      - name: Download Build Artifact
-        uses: actions/download-artifact@v1
-        with:
-          name: ubuntu-1604-build
-      - name: Unit Test
-        run: | 
-          tar -xzf ubuntu-1604-build/build.tar.gz
-          ./.cicd/test.sh
-        env:
-          IMAGE_TAG: ubuntu-16.04
-
-
-  ubuntu-1804-build:
-    if: github.event.pull_request.base.repo.id != github.event.pull_request.head.repo.id
-    name: Ubuntu 18.04 | Build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        run: |
-          git clone https://github.com/${GITHUB_REPOSITORY} .
-          git fetch -v --prune origin +refs/pull/${PR_NUMBER}/merge:refs/remotes/pull/${PR_NUMBER}/merge
-          git checkout --force --progress refs/remotes/pull/${PR_NUMBER}/merge
-          git submodule sync --recursive
-          git submodule update --init --force --recursive
-      - name: Build
-        run: | 
-          ./.cicd/build.sh
-          tar -pczf build.tar.gz build
-        env:
-          IMAGE_TAG: ubuntu-18.04
-      - name: Upload Build Artifact
-        uses: actions/upload-artifact@v1
-        with:
-          name: ubuntu-1804-build
-          path: build.tar.gz
-  ubuntu-1804-unit-test:
-    name: Ubuntu 18.04 | Unit Test
-    runs-on: ubuntu-latest
-    needs: ubuntu-1804-build
-    steps:
-      - name: Checkout
-        run: |
-          git clone https://github.com/${GITHUB_REPOSITORY} .
-          git fetch -v --prune origin +refs/pull/${PR_NUMBER}/merge:refs/remotes/pull/${PR_NUMBER}/merge
-          git checkout --force --progress refs/remotes/pull/${PR_NUMBER}/merge
-          git submodule sync --recursive
-          git submodule update --init --force --recursive
-      - name: Download Build Artifact
-        uses: actions/download-artifact@v1
-        with:
-          name: ubuntu-1804-build
-      - name: Unit Test
-        run: | 
-          tar -xzf ubuntu-1804-build/build.tar.gz
-          ./.cicd/test.sh
-        env:
-          IMAGE_TAG: ubuntu-18.04
-
-
-  macos-1015-build:
-    if: github.event.pull_request.base.repo.id != github.event.pull_request.head.repo.id
-    name: MacOS 10.15 | Build
-    runs-on: macos-latest
-    steps:
-      - name: Checkout
-        run: |
-          git clone https://github.com/${GITHUB_REPOSITORY} .
-          git fetch -v --prune origin +refs/pull/${PR_NUMBER}/merge:refs/remotes/pull/${PR_NUMBER}/merge
-          git checkout --force --progress refs/remotes/pull/${PR_NUMBER}/merge
-          git submodule sync --recursive
-          git submodule update --init --force --recursive
-      - name: Build
-        run: | 
-          brew install git cmake
-          ./.cicd/build.sh
-          tar -pczf build.tar.gz build
-      - name: Upload Build Artifact
-        uses: actions/upload-artifact@v1
-        with:
-          name: macos-1015-build
-          path: build.tar.gz
-  macos-1015-unit-test:
-    name: MacOS 10.15 | Unit Test
-    runs-on: macos-latest
-    needs: macos-1015-build
-    steps:
-      - name: Checkout
-        run: |
-          git clone https://github.com/${GITHUB_REPOSITORY} .
-          git fetch -v --prune origin +refs/pull/${PR_NUMBER}/merge:refs/remotes/pull/${PR_NUMBER}/merge
-          git checkout --force --progress refs/remotes/pull/${PR_NUMBER}/merge
-          git submodule sync --recursive
-          git submodule update --init --force --recursive
-      - name: Download Build Artifact
-        uses: actions/download-artifact@v1
-        with:
-          name: macos-1015-build
-      - name: Unit Test
-        run: | 
-          brew install git cmake
-          tar -xzf macos-1015-build/build.tar.gz
-          ./.cicd/test.sh
+          name: execution-${{ matrix.os }}
+          path: |
+            build/validation/**/execution-results.xml
+            build/validation/Testing/Temporary/
+            build/validation/tests/validation/results/
+          if-no-files-found: warn

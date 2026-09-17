@@ -59,6 +59,7 @@ struct options {
 };
 
 struct default_options {
+   bool gas_metering = true;
 };
 
 

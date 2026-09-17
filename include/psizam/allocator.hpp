@@ -486,17 +486,38 @@ namespace psizam {
 #endif
       }
 
+      // Non-owning executable ranges supplied by LLVM ORC after eager linking.
+      // Frozen before execution; ORC retains ownership through module::jit_engine.
+      std::vector<std::pair<std::byte*, size_t>> external_code_ranges;
+
+      bool has_code() const { return !get_code_span().empty() || !external_code_ranges.empty(); }
+      bool contains_code_address(uintptr_t addr) const {
+         auto code = get_code_span();
+         auto begin = reinterpret_cast<uintptr_t>(code.data());
+         if (addr >= begin && addr - begin < code.size()) return true;
+         for (auto [ptr, size] : external_code_ranges) {
+            begin = reinterpret_cast<uintptr_t>(ptr);
+            if (addr >= begin && addr - begin < size) return true;
+         }
+         return false;
+      }
+
       // Sets protection on code pages to allow them to be executed.
       void enable_code([[maybe_unused]] bool is_jit) {
 #ifndef PSIZAM_COMPILE_ONLY
-         mprotect(_code_base, _code_size, is_jit?PROT_EXEC:(PROT_READ|PROT_WRITE));
+         auto code = get_code_span();
+         if (!code.empty())
+            mprotect(code.data(), code.size(), is_jit ? (PROT_READ|PROT_EXEC) : (PROT_READ|PROT_WRITE));
+         for (auto [ptr, size] : external_code_ranges) mprotect(ptr, size, PROT_READ|PROT_EXEC);
 #endif
       }
       // Make code pages unexecutable so deadline timer can kill an
       // execution (in both JIT and Interpreter)
       void disable_code() {
 #ifndef PSIZAM_COMPILE_ONLY
-         mprotect(_code_base, _code_size, PROT_NONE);
+         auto code = get_code_span();
+         if (!code.empty()) mprotect(code.data(), code.size(), PROT_NONE);
+         for (auto [ptr, size] : external_code_ranges) mprotect(ptr, size, PROT_NONE);
 #endif
       }
 

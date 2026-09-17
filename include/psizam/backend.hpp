@@ -502,7 +502,9 @@ namespace psizam {
             if constexpr (!std::is_same_v<Impl, null_backend>) {
                if (memory_alloc) {
                   ctx->reset();
-                  ctx->execute_start(host, detail::interpret_visitor(*ctx));
+                  bool run_start = true;
+                  if constexpr (requires { options.defer_start; }) run_start = !options.defer_start;
+                  if (run_start) ctx->execute_start(host, detail::interpret_visitor(*ctx));
                }
             }
          }

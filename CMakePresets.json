@@ -1,0 +1,36 @@
+{
+  "version": 2,
+  "configurePresets": [
+    {
+      "name": "execution-validation",
+      "displayName": "Required quick and compiler execution checks",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/execution-validation",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "PSIZAM_ENABLE_TESTS": "ON",
+        "PSIZAM_ENABLE_SPEC_TESTS": "OFF",
+        "PSIZAM_ENABLE_LLVM": "ON",
+        "PSIZAM_ENABLE_COMPILER_TESTS": "ON",
+        "PSIZAM_COMPILER_TEST_DATA": "$env{PSIZAM_COMPILER_TEST_DATA}"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "execution-validation",
+      "configurePreset": "execution-validation",
+      "targets": ["psizam_execution_driver", "pzam-compile", "pzam-run"],
+      "jobs": 2
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "execution-validation",
+      "configurePreset": "execution-validation",
+      "filter": {"include": {"label": "execution"}},
+      "output": {"outputOnFailure": true},
+      "execution": {"jobs": 1, "noTestsAction": "error"}
+    }
+  ]
+}

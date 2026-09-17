@@ -6,6 +6,7 @@
 #include <psizam/options.hpp>
 #include <psizam/detail/execution_context.hpp>
 #include <psizam/detail/llvm_runtime_helpers.hpp>
+#include <psizam/detail/jit_runtime_helpers.hpp>
 #include <psizam/detail/signals.hpp>
 #include <psizam/detail/softfloat.hpp>
 #include <psizam/types.hpp>
@@ -258,6 +259,7 @@ namespace psizam::detail {
       // body or loop body) has finished accumulating heavy-opcode extras.
       void* emit_gas_charge(int64_t cost) {
          emit_validate_watermark();
+         if (!_mod.gas_metering) return nullptr;
          using ctx_t = jit_execution_context<false>;
          const uint32_t consumed_off = static_cast<uint32_t>(ctx_t::gas_consumed_offset());
          const uint32_t deadline_off = static_cast<uint32_t>(ctx_t::gas_deadline_offset());
@@ -7549,12 +7551,15 @@ namespace psizam::detail {
          emit_mov(r10, rdx);                  // rdx = memory (SysV arg 3)
          emit_mov(r9, rdi);                   // rdi = host_ptr (SysV arg 1)
 
-         // Align stack and call trampoline
+         // Align stack and enter the C++ exception boundary
          emit_bytes(0x48, 0x89, 0xe0);        // mov %rsp, %rax (save rsp)
          emit_bytes(0x48, 0x83, 0xe4, 0xf0);  // andq $-16, %rsp
          emit_bytes(0x50);                     // push %rax (save restore point)
          emit_bytes(0x50);                     // push %rax
-         emit_bytes(0x41, 0xff, 0xd0);         // callq *%r8
+         emit_mov(r8, rcx); // fourth argument: trampoline
+         emit_bytes(0x48, 0xb8);
+         emit_operand_ptr(&invoke_host_trampoline);
+         emit_bytes(0xff, 0xd0);         // call exception-safe host bridge
          // Restore stack
          emit_restore_stack();                 // mov (%rsp), %rsp
          emit_bytes(0x5e);                     // popq %rsi
@@ -7602,8 +7607,8 @@ namespace psizam::detail {
 
       bool is_host_function(uint32_t funcnum) { return funcnum < _mod.get_imported_functions_size(); }
 
-      // Host call with fast trampoline dispatch. .eh_frame is registered for JIT
-      // code, so C++ exceptions propagate naturally through JIT frames.
+      // Catch host exceptions before they cross generated frames: their unwind
+      // descriptions do not preserve every callee-saved register.
       // Args are already in forward order (packed by the JIT stub).
       // remaining_stack is synced to context for recursive host→WASM calls.
       static native_value call_host_function(void* ctx, native_value* args, uint32_t idx, uint32_t remaining_stack) {
@@ -7612,16 +7617,17 @@ namespace psizam::detail {
          context->_remaining_call_depth = remaining_stack;
 
          native_value result;
-         if (context->_host_trampoline_ptrs) {
-            auto trampoline = context->_host_trampoline_ptrs[idx];
-            if (trampoline) {
-               result = trampoline(context->get_host_ptr(), args, context->linear_memory());
-               context->_remaining_call_depth = saved;
-               return result;
+         longjmp_on_exception([&]() {
+            if (context->_host_trampoline_ptrs) {
+               auto trampoline = context->_host_trampoline_ptrs[idx];
+               if (trampoline) {
+                  result = trampoline(context->get_host_ptr(), args, context->linear_memory());
+                  return;
+               }
             }
-         }
-         uint32_t mapped_index = context->_mod->import_functions[idx];
-         result = context->_table->call(context->get_host_ptr(), mapped_index, args, context->linear_memory());
+            uint32_t mapped_index = context->_mod->import_functions[idx];
+            result = context->_table->call(context->get_host_ptr(), mapped_index, args, context->linear_memory());
+         });
          context->_remaining_call_depth = saved;
          return result;
       }

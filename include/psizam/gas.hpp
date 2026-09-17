@@ -2,12 +2,11 @@
 
 // Gas metering — public types and the compile-time cost table.
 //
-// Gas metering is always compiled in. It is inactive by default:
-// the counter starts at INT64_MAX, the handler is null, and the
-// load-time injection pass only runs when a caller sets an
-// insertion_strategy other than `off` in their options. So the
-// runtime cost of the feature is effectively zero for anyone who
-// doesn't opt in.
+// Code generation is controlled by options.gas_metering. The default emits
+// function-entry and loop-header checks, with an unlimited runtime budget.
+// Set gas_metering=false before parsing to omit counter updates and deadline
+// checks entirely. An unlimited budget on instrumented code still incurs the
+// per-site accounting cost. Memory and stack safety checks are independent.
 //
 // Runtime state (counter, handler) lives on execution_context_base.
 // The load-time injection pass and the per-backend peepholes are

@@ -8,6 +8,7 @@ if(PSIZAM_ENABLE_FUZZ_TESTS)
 endif()
 
 enable_testing()
+add_subdirectory(validation)
 
 add_executable(psizam_compile_reactor_test compile_reactor_test.cpp)
 target_link_libraries(psizam_compile_reactor_test PRIVATE psizam psizam-exec)
@@ -443,7 +444,7 @@ if(PSIZAM_ENABLE_LLVM)
 endif()
 target_compile_definitions(psizam_pzam_compile_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS)
 add_test(NAME pzam_compile_api COMMAND psizam_pzam_compile_tests)
-set_tests_properties(pzam_compile_api PROPERTIES TIMEOUT 60)
+set_tests_properties(pzam_compile_api PROPERTIES TIMEOUT 60 LABELS "execution;quick;resource")
 
 add_executable(psizam_pzam_format_tests pzam_format_tests.cpp)
 target_link_libraries(psizam_pzam_format_tests PRIVATE psizam Catch2::Catch2)

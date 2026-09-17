@@ -24,6 +24,7 @@
 #include <psizam/detail/jit_ir.hpp>
 #include <psizam/detail/jit_regalloc.hpp>
 #include <psizam/detail/jit_reloc.hpp>
+#include <psizam/detail/jit_runtime_helpers.hpp>
 #include <psizam/detail/llvm_runtime_helpers.hpp>
 #include <psizam/detail/softfloat.hpp>
 #include <psizam/types.hpp>
@@ -669,35 +670,29 @@ namespace psizam::detail {
             // Invert condition, skip trampoline
             void* skip = code;
             emit32(0x54000000 | invert_condition(cond)); // B.inv skip
-            emit_reloc_mov_imm64(X8, reloc_symbol::code_blob_self,
-               reinterpret_cast<uint64_t>(handler));
-            // Addend = handler offset within code blob
-            auto& entries = _reloc_recorder.entries();
-            uint32_t handler_off = offset_of(handler);
-            for (int k = static_cast<int>(entries.size()) - 4; k < static_cast<int>(entries.size()); ++k)
-               entries[k].addend = static_cast<int32_t>(handler_off);
-            emit32(0xD61F0100); // BR X8
+            // Inline PC-relative trampoline. Code buffers are page-aligned
+            // before and after relocation; no scratch-buffer address escapes.
+            write_veneer(code, handler);
+            code += VENEER_SLOT_SIZE;
             fix_branch(skip, code);
          }
       }
 
       // CBZ Xn, handler — branch to handler if Xn == 0
-      void emit_branch_to_handler_cbz(uint32_t reg, void* handler) {
+      void emit_branch_to_handler_cbz(uint32_t reg, void* handler, bool is64 = true) {
+         const uint32_t cbz_op = is64 ? 0xB4000000 : 0x34000000;
          int64_t offset = (static_cast<uint8_t*>(handler) - code) / 4;
          if (offset >= -0x40000 && offset < 0x40000) {
             // CBZ Xn, offset
-            emit32(0xB4000000 | ((static_cast<uint32_t>(offset) & 0x7FFFF) << 5) | reg);
+            emit32(cbz_op | ((static_cast<uint32_t>(offset) & 0x7FFFF) << 5) | reg);
          } else {
             // CBNZ Xn, skip; B handler
             void* skip = code;
-            emit32(0xB5000000 | reg); // CBNZ Xn, skip (placeholder)
-            emit_reloc_mov_imm64(X8, reloc_symbol::code_blob_self,
-               reinterpret_cast<uint64_t>(handler));
-            auto& entries = _reloc_recorder.entries();
-            uint32_t handler_off = offset_of(handler);
-            for (int k = static_cast<int>(entries.size()) - 4; k < static_cast<int>(entries.size()); ++k)
-               entries[k].addend = static_cast<int32_t>(handler_off);
-            emit32(0xD61F0100); // BR X8
+            emit32((cbz_op ^ 0x01000000) | reg); // CBNZ Xn, skip (placeholder)
+            // Inline PC-relative trampoline. Code buffers are page-aligned
+            // before and after relocation; no scratch-buffer address escapes.
+            write_veneer(code, handler);
+            code += VENEER_SLOT_SIZE;
             fix_branch(skip, code);
          }
       }
@@ -814,6 +809,7 @@ namespace psizam::detail {
       //   done:
       void emit_gas_charge(int64_t cost) {
          emit_validate_watermark();
+         if (!_mod.gas_metering) return;
          using ctx_t = jit_execution_context<false>;
          const uint32_t consumed_off = static_cast<uint32_t>(ctx_t::gas_consumed_offset());
          const uint32_t deadline_off = static_cast<uint32_t>(ctx_t::gas_deadline_offset());
@@ -847,7 +843,8 @@ namespace psizam::detail {
          // Slow path: call __psizam_gas_exhausted_check(ctx)
          emit32(0xAA1303E0u); // MOV X0, X19
          emit_push(X19); emit_push(X20);
-         emit_mov_imm64(X8, reinterpret_cast<uint64_t>(&__psizam_gas_exhausted_check));
+         emit_reloc_mov_imm64(X8, reloc_symbol::llvm_gas_exhausted_check,
+            reinterpret_cast<uint64_t>(&__psizam_gas_exhausted_check));
          emit32(0xD63F0100u); // BLR X8
          emit_pop(X20); emit_pop(X19);
 
@@ -1512,12 +1509,12 @@ namespace psizam::detail {
       }
 
       // Softfloat unary: v128_t fn(v128_t)
-      void simd_v128_unop_softfloat(v128_t (*fn)(v128_t)) {
+      void simd_v128_unop_softfloat(v128_t (*fn)(v128_t), reloc_symbol sym) {
          // Load v128 from TOS into X0(low), X1(high) — AAPCS64
          emit_ldr_offset(X0, SP, 0);
          emit_ldr_offset(X1, SP, 16);
          // X19-X28 are callee-saved, no need to save context/membase
-         emit_mov_imm64(X8, reinterpret_cast<uint64_t>(fn));
+         emit_reloc_mov_imm64(X8, sym, reinterpret_cast<uint64_t>(fn));
          emit32(0xD63F0100);  // BLR X8
          // Result in X0(low), X1(high) — store back to TOS
          emit_str_offset(X0, SP, 0);
@@ -1525,13 +1522,13 @@ namespace psizam::detail {
       }
 
       // Softfloat binary: v128_t fn(v128_t, v128_t)
-      void simd_v128_binop_softfloat(v128_t (*fn)(v128_t, v128_t)) {
+      void simd_v128_binop_softfloat(v128_t (*fn)(v128_t, v128_t), reloc_symbol sym) {
          // TOS=arg2(32b), NOS=arg1(32b). AAPCS64: arg1 in X0:X1, arg2 in X2:X3
          emit_ldr_offset(X2, SP, 0);    // arg2.low
          emit_ldr_offset(X3, SP, 16);   // arg2.high
          emit_ldr_offset(X0, SP, 32);   // arg1.low
          emit_ldr_offset(X1, SP, 48);   // arg1.high
-         emit_mov_imm64(X8, reinterpret_cast<uint64_t>(fn));
+         emit_reloc_mov_imm64(X8, sym, reinterpret_cast<uint64_t>(fn));
          emit32(0xD63F0100);  // BLR X8
          // Pop arg2 (32 bytes)
          emit_add_imm(SP, SP, 32);
@@ -1542,7 +1539,7 @@ namespace psizam::detail {
       }
 
       // Softfloat ternary: v128_t fn(v128_t, v128_t, v128_t)
-      void simd_v128_ternop_softfloat(v128_t (*fn)(v128_t, v128_t, v128_t)) {
+      void simd_v128_ternop_softfloat(v128_t (*fn)(v128_t, v128_t, v128_t), reloc_symbol sym) {
          // Stack: arg1 (bottom, 32b), arg2 (middle, 32b), arg3 (top, 32b)
          // AAPCS64: arg1 in X0:X1, arg2 in X2:X3, arg3 in X4:X5
          emit_ldr_offset(X4, SP, 0);    // arg3.low
@@ -1551,7 +1548,7 @@ namespace psizam::detail {
          emit_ldr_offset(X3, SP, 48);   // arg2.high
          emit_ldr_offset(X0, SP, 64);   // arg1.low
          emit_ldr_offset(X1, SP, 80);   // arg1.high
-         emit_mov_imm64(X8, reinterpret_cast<uint64_t>(fn));
+         emit_reloc_mov_imm64(X8, sym, reinterpret_cast<uint64_t>(fn));
          emit32(0xD63F0100);  // BLR X8
          // Pop arg2 + arg3 (64 bytes)
          emit_add_imm(SP, SP, 64);
@@ -1717,9 +1714,39 @@ namespace psizam::detail {
             }
             break;
 
-         // arg: push a vreg value to the stack (for upcoming call)
-         // For v128 vregs (no phys reg or spill), data is already on native stack — no-op
+         // Scalars live in registers/spills, vectors on the operand stack.
+         // Assemble mixed argument groups in signature order before the call.
          case ir_op::arg: {
+            uint32_t first = idx, end = idx;
+            while (first && func.insts[first - 1].opcode == ir_op::arg) --first;
+            uint32_t scalar_bytes = 0, vector_bytes = 0;
+            while (end < func.inst_count && func.insts[end].opcode == ir_op::arg) ++end;
+            for (uint32_t i = first; i < end; ++i) {
+               if (func.insts[i].type == types::v128) vector_bytes += 32;
+               else scalar_bytes += 16;
+            }
+            if (vector_bytes) {
+               if (idx != first) break; // already packed by the first arg
+               if (scalar_bytes) emit_sub_imm(SP, SP, scalar_bytes);
+               uint32_t src_offset = scalar_bytes, dest_offset = 0;
+               // Move toward lower addresses, so overlapping copies are safe.
+               for (uint32_t i = end; i-- > first;) {
+                  const auto& arg = func.insts[i];
+                  if (arg.type == types::v128) {
+                     emit_ldr_offset(X0, SP, src_offset);
+                     emit_ldr_offset(X1, SP, src_offset + 16);
+                     emit_str_offset(X0, SP, dest_offset);
+                     emit_str_offset(X1, SP, dest_offset + 16);
+                     src_offset += 32;
+                     dest_offset += 32;
+                  } else {
+                     load_vreg_x0(arg.rr.src1);
+                     emit_str_offset(X0, SP, dest_offset);
+                     dest_offset += 16;
+                  }
+               }
+               break;
+            }
             uint32_t src = inst.rr.src1;
             int8_t pr = get_phys(src);
             if (pr >= 0 || (_spill_map && src < _num_vregs && _spill_map[src] >= 0)) {
@@ -3369,20 +3396,20 @@ namespace psizam::detail {
          case simd_sub::i64x2_ge_s: simd_neon_cmp(0x4EE03400, true, true); break;
 
          // ── f32x4 comparisons (softfloat) ──
-         case simd_sub::f32x4_eq: simd_v128_binop_softfloat(&_psizam_f32x4_eq); break;
-         case simd_sub::f32x4_ne: simd_v128_binop_softfloat(&_psizam_f32x4_ne); break;
-         case simd_sub::f32x4_lt: simd_v128_binop_softfloat(&_psizam_f32x4_lt); break;
-         case simd_sub::f32x4_gt: simd_v128_binop_softfloat(&_psizam_f32x4_gt); break;
-         case simd_sub::f32x4_le: simd_v128_binop_softfloat(&_psizam_f32x4_le); break;
-         case simd_sub::f32x4_ge: simd_v128_binop_softfloat(&_psizam_f32x4_ge); break;
+         case simd_sub::f32x4_eq: simd_v128_binop_softfloat(&_psizam_f32x4_eq, reloc_symbol::simd_f32x4_eq); break;
+         case simd_sub::f32x4_ne: simd_v128_binop_softfloat(&_psizam_f32x4_ne, reloc_symbol::simd_f32x4_ne); break;
+         case simd_sub::f32x4_lt: simd_v128_binop_softfloat(&_psizam_f32x4_lt, reloc_symbol::simd_f32x4_lt); break;
+         case simd_sub::f32x4_gt: simd_v128_binop_softfloat(&_psizam_f32x4_gt, reloc_symbol::simd_f32x4_gt); break;
+         case simd_sub::f32x4_le: simd_v128_binop_softfloat(&_psizam_f32x4_le, reloc_symbol::simd_f32x4_le); break;
+         case simd_sub::f32x4_ge: simd_v128_binop_softfloat(&_psizam_f32x4_ge, reloc_symbol::simd_f32x4_ge); break;
 
          // ── f64x2 comparisons (softfloat) ──
-         case simd_sub::f64x2_eq: simd_v128_binop_softfloat(&_psizam_f64x2_eq); break;
-         case simd_sub::f64x2_ne: simd_v128_binop_softfloat(&_psizam_f64x2_ne); break;
-         case simd_sub::f64x2_lt: simd_v128_binop_softfloat(&_psizam_f64x2_lt); break;
-         case simd_sub::f64x2_gt: simd_v128_binop_softfloat(&_psizam_f64x2_gt); break;
-         case simd_sub::f64x2_le: simd_v128_binop_softfloat(&_psizam_f64x2_le); break;
-         case simd_sub::f64x2_ge: simd_v128_binop_softfloat(&_psizam_f64x2_ge); break;
+         case simd_sub::f64x2_eq: simd_v128_binop_softfloat(&_psizam_f64x2_eq, reloc_symbol::simd_f64x2_eq); break;
+         case simd_sub::f64x2_ne: simd_v128_binop_softfloat(&_psizam_f64x2_ne, reloc_symbol::simd_f64x2_ne); break;
+         case simd_sub::f64x2_lt: simd_v128_binop_softfloat(&_psizam_f64x2_lt, reloc_symbol::simd_f64x2_lt); break;
+         case simd_sub::f64x2_gt: simd_v128_binop_softfloat(&_psizam_f64x2_gt, reloc_symbol::simd_f64x2_gt); break;
+         case simd_sub::f64x2_le: simd_v128_binop_softfloat(&_psizam_f64x2_le, reloc_symbol::simd_f64x2_le); break;
+         case simd_sub::f64x2_ge: simd_v128_binop_softfloat(&_psizam_f64x2_ge, reloc_symbol::simd_f64x2_ge); break;
 
          // ── Logical ──
          case simd_sub::v128_not: {
@@ -3825,58 +3852,58 @@ namespace psizam::detail {
          }
 
          // ── f32x4 arithmetic (softfloat) ──
-         case simd_sub::f32x4_ceil:    simd_v128_unop_softfloat(&_psizam_f32x4_ceil); break;
-         case simd_sub::f32x4_floor:   simd_v128_unop_softfloat(&_psizam_f32x4_floor); break;
-         case simd_sub::f32x4_trunc:   simd_v128_unop_softfloat(&_psizam_f32x4_trunc); break;
-         case simd_sub::f32x4_nearest: simd_v128_unop_softfloat(&_psizam_f32x4_nearest); break;
-         case simd_sub::f32x4_abs:     simd_v128_unop_softfloat(&_psizam_f32x4_abs); break;
-         case simd_sub::f32x4_neg:     simd_v128_unop_softfloat(&_psizam_f32x4_neg); break;
-         case simd_sub::f32x4_sqrt:    simd_v128_unop_softfloat(&_psizam_f32x4_sqrt); break;
-         case simd_sub::f32x4_add:     simd_v128_binop_softfloat(&_psizam_f32x4_add); break;
-         case simd_sub::f32x4_sub:     simd_v128_binop_softfloat(&_psizam_f32x4_sub); break;
-         case simd_sub::f32x4_mul:     simd_v128_binop_softfloat(&_psizam_f32x4_mul); break;
-         case simd_sub::f32x4_div:     simd_v128_binop_softfloat(&_psizam_f32x4_div); break;
-         case simd_sub::f32x4_min:     simd_v128_binop_softfloat(&_psizam_f32x4_min); break;
-         case simd_sub::f32x4_max:     simd_v128_binop_softfloat(&_psizam_f32x4_max); break;
-         case simd_sub::f32x4_pmin:    simd_v128_binop_softfloat(&_psizam_f32x4_pmin); break;
-         case simd_sub::f32x4_pmax:    simd_v128_binop_softfloat(&_psizam_f32x4_pmax); break;
+         case simd_sub::f32x4_ceil:    simd_v128_unop_softfloat(&_psizam_f32x4_ceil, reloc_symbol::simd_f32x4_ceil); break;
+         case simd_sub::f32x4_floor:   simd_v128_unop_softfloat(&_psizam_f32x4_floor, reloc_symbol::simd_f32x4_floor); break;
+         case simd_sub::f32x4_trunc:   simd_v128_unop_softfloat(&_psizam_f32x4_trunc, reloc_symbol::simd_f32x4_trunc); break;
+         case simd_sub::f32x4_nearest: simd_v128_unop_softfloat(&_psizam_f32x4_nearest, reloc_symbol::simd_f32x4_nearest); break;
+         case simd_sub::f32x4_abs:     simd_v128_unop_softfloat(&_psizam_f32x4_abs, reloc_symbol::simd_f32x4_abs); break;
+         case simd_sub::f32x4_neg:     simd_v128_unop_softfloat(&_psizam_f32x4_neg, reloc_symbol::simd_f32x4_neg); break;
+         case simd_sub::f32x4_sqrt:    simd_v128_unop_softfloat(&_psizam_f32x4_sqrt, reloc_symbol::simd_f32x4_sqrt); break;
+         case simd_sub::f32x4_add:     simd_v128_binop_softfloat(&_psizam_f32x4_add, reloc_symbol::simd_f32x4_add); break;
+         case simd_sub::f32x4_sub:     simd_v128_binop_softfloat(&_psizam_f32x4_sub, reloc_symbol::simd_f32x4_sub); break;
+         case simd_sub::f32x4_mul:     simd_v128_binop_softfloat(&_psizam_f32x4_mul, reloc_symbol::simd_f32x4_mul); break;
+         case simd_sub::f32x4_div:     simd_v128_binop_softfloat(&_psizam_f32x4_div, reloc_symbol::simd_f32x4_div); break;
+         case simd_sub::f32x4_min:     simd_v128_binop_softfloat(&_psizam_f32x4_min, reloc_symbol::simd_f32x4_min); break;
+         case simd_sub::f32x4_max:     simd_v128_binop_softfloat(&_psizam_f32x4_max, reloc_symbol::simd_f32x4_max); break;
+         case simd_sub::f32x4_pmin:    simd_v128_binop_softfloat(&_psizam_f32x4_pmin, reloc_symbol::simd_f32x4_pmin); break;
+         case simd_sub::f32x4_pmax:    simd_v128_binop_softfloat(&_psizam_f32x4_pmax, reloc_symbol::simd_f32x4_pmax); break;
 
          // ── f64x2 arithmetic (softfloat) ──
-         case simd_sub::f64x2_ceil:    simd_v128_unop_softfloat(&_psizam_f64x2_ceil); break;
-         case simd_sub::f64x2_floor:   simd_v128_unop_softfloat(&_psizam_f64x2_floor); break;
-         case simd_sub::f64x2_trunc:   simd_v128_unop_softfloat(&_psizam_f64x2_trunc); break;
-         case simd_sub::f64x2_nearest: simd_v128_unop_softfloat(&_psizam_f64x2_nearest); break;
-         case simd_sub::f64x2_abs:     simd_v128_unop_softfloat(&_psizam_f64x2_abs); break;
-         case simd_sub::f64x2_neg:     simd_v128_unop_softfloat(&_psizam_f64x2_neg); break;
-         case simd_sub::f64x2_sqrt:    simd_v128_unop_softfloat(&_psizam_f64x2_sqrt); break;
-         case simd_sub::f64x2_add:     simd_v128_binop_softfloat(&_psizam_f64x2_add); break;
-         case simd_sub::f64x2_sub:     simd_v128_binop_softfloat(&_psizam_f64x2_sub); break;
-         case simd_sub::f64x2_mul:     simd_v128_binop_softfloat(&_psizam_f64x2_mul); break;
-         case simd_sub::f64x2_div:     simd_v128_binop_softfloat(&_psizam_f64x2_div); break;
-         case simd_sub::f64x2_min:     simd_v128_binop_softfloat(&_psizam_f64x2_min); break;
-         case simd_sub::f64x2_max:     simd_v128_binop_softfloat(&_psizam_f64x2_max); break;
-         case simd_sub::f64x2_pmin:    simd_v128_binop_softfloat(&_psizam_f64x2_pmin); break;
-         case simd_sub::f64x2_pmax:    simd_v128_binop_softfloat(&_psizam_f64x2_pmax); break;
+         case simd_sub::f64x2_ceil:    simd_v128_unop_softfloat(&_psizam_f64x2_ceil, reloc_symbol::simd_f64x2_ceil); break;
+         case simd_sub::f64x2_floor:   simd_v128_unop_softfloat(&_psizam_f64x2_floor, reloc_symbol::simd_f64x2_floor); break;
+         case simd_sub::f64x2_trunc:   simd_v128_unop_softfloat(&_psizam_f64x2_trunc, reloc_symbol::simd_f64x2_trunc); break;
+         case simd_sub::f64x2_nearest: simd_v128_unop_softfloat(&_psizam_f64x2_nearest, reloc_symbol::simd_f64x2_nearest); break;
+         case simd_sub::f64x2_abs:     simd_v128_unop_softfloat(&_psizam_f64x2_abs, reloc_symbol::simd_f64x2_abs); break;
+         case simd_sub::f64x2_neg:     simd_v128_unop_softfloat(&_psizam_f64x2_neg, reloc_symbol::simd_f64x2_neg); break;
+         case simd_sub::f64x2_sqrt:    simd_v128_unop_softfloat(&_psizam_f64x2_sqrt, reloc_symbol::simd_f64x2_sqrt); break;
+         case simd_sub::f64x2_add:     simd_v128_binop_softfloat(&_psizam_f64x2_add, reloc_symbol::simd_f64x2_add); break;
+         case simd_sub::f64x2_sub:     simd_v128_binop_softfloat(&_psizam_f64x2_sub, reloc_symbol::simd_f64x2_sub); break;
+         case simd_sub::f64x2_mul:     simd_v128_binop_softfloat(&_psizam_f64x2_mul, reloc_symbol::simd_f64x2_mul); break;
+         case simd_sub::f64x2_div:     simd_v128_binop_softfloat(&_psizam_f64x2_div, reloc_symbol::simd_f64x2_div); break;
+         case simd_sub::f64x2_min:     simd_v128_binop_softfloat(&_psizam_f64x2_min, reloc_symbol::simd_f64x2_min); break;
+         case simd_sub::f64x2_max:     simd_v128_binop_softfloat(&_psizam_f64x2_max, reloc_symbol::simd_f64x2_max); break;
+         case simd_sub::f64x2_pmin:    simd_v128_binop_softfloat(&_psizam_f64x2_pmin, reloc_symbol::simd_f64x2_pmin); break;
+         case simd_sub::f64x2_pmax:    simd_v128_binop_softfloat(&_psizam_f64x2_pmax, reloc_symbol::simd_f64x2_pmax); break;
 
          // ── Conversions (softfloat) ──
-         case simd_sub::i32x4_trunc_sat_f32x4_s:     simd_v128_unop_softfloat(&_psizam_i32x4_trunc_sat_f32x4_s); break;
-         case simd_sub::i32x4_trunc_sat_f32x4_u:     simd_v128_unop_softfloat(&_psizam_i32x4_trunc_sat_f32x4_u); break;
-         case simd_sub::f32x4_convert_i32x4_s:       simd_v128_unop_softfloat(&_psizam_f32x4_convert_i32x4_s); break;
-         case simd_sub::f32x4_convert_i32x4_u:       simd_v128_unop_softfloat(&_psizam_f32x4_convert_i32x4_u); break;
-         case simd_sub::i32x4_trunc_sat_f64x2_s_zero: simd_v128_unop_softfloat(&_psizam_i32x4_trunc_sat_f64x2_s_zero); break;
-         case simd_sub::i32x4_trunc_sat_f64x2_u_zero: simd_v128_unop_softfloat(&_psizam_i32x4_trunc_sat_f64x2_u_zero); break;
-         case simd_sub::f64x2_convert_low_i32x4_s:   simd_v128_unop_softfloat(&_psizam_f64x2_convert_low_i32x4_s); break;
-         case simd_sub::f64x2_convert_low_i32x4_u:   simd_v128_unop_softfloat(&_psizam_f64x2_convert_low_i32x4_u); break;
-         case simd_sub::f32x4_demote_f64x2_zero:     simd_v128_unop_softfloat(&_psizam_f32x4_demote_f64x2_zero); break;
-         case simd_sub::f64x2_promote_low_f32x4:     simd_v128_unop_softfloat(&_psizam_f64x2_promote_low_f32x4); break;
+         case simd_sub::i32x4_trunc_sat_f32x4_s:     simd_v128_unop_softfloat(&_psizam_i32x4_trunc_sat_f32x4_s, reloc_symbol::simd_i32x4_trunc_sat_f32x4_s); break;
+         case simd_sub::i32x4_trunc_sat_f32x4_u:     simd_v128_unop_softfloat(&_psizam_i32x4_trunc_sat_f32x4_u, reloc_symbol::simd_i32x4_trunc_sat_f32x4_u); break;
+         case simd_sub::f32x4_convert_i32x4_s:       simd_v128_unop_softfloat(&_psizam_f32x4_convert_i32x4_s, reloc_symbol::simd_f32x4_convert_i32x4_s); break;
+         case simd_sub::f32x4_convert_i32x4_u:       simd_v128_unop_softfloat(&_psizam_f32x4_convert_i32x4_u, reloc_symbol::simd_f32x4_convert_i32x4_u); break;
+         case simd_sub::i32x4_trunc_sat_f64x2_s_zero: simd_v128_unop_softfloat(&_psizam_i32x4_trunc_sat_f64x2_s_zero, reloc_symbol::simd_i32x4_trunc_sat_f64x2_s_zero); break;
+         case simd_sub::i32x4_trunc_sat_f64x2_u_zero: simd_v128_unop_softfloat(&_psizam_i32x4_trunc_sat_f64x2_u_zero, reloc_symbol::simd_i32x4_trunc_sat_f64x2_u_zero); break;
+         case simd_sub::f64x2_convert_low_i32x4_s:   simd_v128_unop_softfloat(&_psizam_f64x2_convert_low_i32x4_s, reloc_symbol::simd_f64x2_convert_low_i32x4_s); break;
+         case simd_sub::f64x2_convert_low_i32x4_u:   simd_v128_unop_softfloat(&_psizam_f64x2_convert_low_i32x4_u, reloc_symbol::simd_f64x2_convert_low_i32x4_u); break;
+         case simd_sub::f32x4_demote_f64x2_zero:     simd_v128_unop_softfloat(&_psizam_f32x4_demote_f64x2_zero, reloc_symbol::simd_f32x4_demote_f64x2_zero); break;
+         case simd_sub::f64x2_promote_low_f32x4:     simd_v128_unop_softfloat(&_psizam_f64x2_promote_low_f32x4, reloc_symbol::simd_f64x2_promote_low_f32x4); break;
 
          // ── Relaxed SIMD ──
-         case simd_sub::f32x4_relaxed_madd:  simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_madd); break;
-         case simd_sub::f32x4_relaxed_nmadd: simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_nmadd); break;
-         case simd_sub::f64x2_relaxed_madd:  simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_madd); break;
-         case simd_sub::f64x2_relaxed_nmadd: simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_nmadd); break;
-         case simd_sub::i16x8_relaxed_dot_i8x16_i7x16_s: simd_v128_binop_softfloat(&_psizam_i16x8_relaxed_dot_i8x16_i7x16_s); break;
-         case simd_sub::i32x4_relaxed_dot_i8x16_i7x16_add_s: simd_v128_ternop_softfloat(&_psizam_i32x4_relaxed_dot_i8x16_i7x16_add_s); break;
+         case simd_sub::f32x4_relaxed_madd:  simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_madd, reloc_symbol::simd_f32x4_relaxed_madd); break;
+         case simd_sub::f32x4_relaxed_nmadd: simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_nmadd, reloc_symbol::simd_f32x4_relaxed_nmadd); break;
+         case simd_sub::f64x2_relaxed_madd:  simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_madd, reloc_symbol::simd_f64x2_relaxed_madd); break;
+         case simd_sub::f64x2_relaxed_nmadd: simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_nmadd, reloc_symbol::simd_f64x2_relaxed_nmadd); break;
+         case simd_sub::i16x8_relaxed_dot_i8x16_i7x16_s: simd_v128_binop_softfloat(&_psizam_i16x8_relaxed_dot_i8x16_i7x16_s, reloc_symbol::simd_i16x8_relaxed_dot_i8x16_i7x16_s); break;
+         case simd_sub::i32x4_relaxed_dot_i8x16_i7x16_add_s: simd_v128_ternop_softfloat(&_psizam_i32x4_relaxed_dot_i8x16_i7x16_add_s, reloc_symbol::simd_i32x4_relaxed_dot_i8x16_i7x16_add_s); break;
 
          default:
             break;
@@ -3950,8 +3977,7 @@ namespace psizam::detail {
          load_vreg_x0(inst.rr.src1);
          load_vreg_x1(inst.rr.src2);
          // CBZ W1, fpe_handler (div by zero)
-         emit32(0x34000000 | X1); // CBZ W1, +0 (patched)
-         void* cbz = code - 4;
+         emit_branch_to_handler_cbz(X1, fpe_handler, false);
          // Check signed overflow: INT_MIN / -1
          // CMN W1, #1 (is divisor -1?)
          emit32(0x3100043F); // ADDS WZR, W1, #1
@@ -3964,32 +3990,23 @@ namespace psizam::detail {
          // SDIV W0, W0, W1
          emit32(0x1AC00C00 | (X1 << 16) | (X0 << 5) | X0);
          store_x0_vreg(inst.dest);
-         // Patch CBZ to branch to fpe_handler
-         { int64_t off = (static_cast<uint8_t*>(fpe_handler) - static_cast<uint8_t*>(cbz)) / 4;
-           uint32_t patched = 0x34000000 | X1 | ((static_cast<uint32_t>(off) & 0x7FFFF) << 5);
-           std::memcpy(cbz, &patched, 4); }
       }
 
       void emit_i32_div_u(const ir_inst& inst) {
          load_vreg_x0(inst.rr.src1);
          load_vreg_x1(inst.rr.src2);
          // CBZ W1, fpe_handler (div by zero)
-         emit32(0x34000000 | X1);
-         void* cbz = code - 4;
+         emit_branch_to_handler_cbz(X1, fpe_handler, false);
          // UDIV W0, W0, W1
          emit32(0x1AC00800 | (X1 << 16) | (X0 << 5) | X0);
          store_x0_vreg(inst.dest);
-         { int64_t off = (static_cast<uint8_t*>(fpe_handler) - static_cast<uint8_t*>(cbz)) / 4;
-           uint32_t patched = 0x34000000 | X1 | ((static_cast<uint32_t>(off) & 0x7FFFF) << 5);
-           std::memcpy(cbz, &patched, 4); }
       }
 
       void emit_i64_div_s(const ir_inst& inst) {
          load_vreg_x0(inst.rr.src1);
          load_vreg_x1(inst.rr.src2);
          // CBZ X1, fpe_handler (div by zero)
-         emit32(0xB4000000 | X1);
-         void* cbz = code - 4;
+         emit_branch_to_handler_cbz(X1, fpe_handler, true);
          // Check signed overflow: INT64_MIN / -1
          // CMN X1, #1
          emit32(0xB100043F);
@@ -4002,31 +4019,23 @@ namespace psizam::detail {
          // SDIV X0, X0, X1
          emit32(0x9AC00C00 | (X1 << 16) | (X0 << 5) | X0);
          store_x0_vreg(inst.dest);
-         { int64_t off = (static_cast<uint8_t*>(fpe_handler) - static_cast<uint8_t*>(cbz)) / 4;
-           uint32_t patched = 0xB4000000 | X1 | ((static_cast<uint32_t>(off) & 0x7FFFF) << 5);
-           std::memcpy(cbz, &patched, 4); }
       }
 
       void emit_i64_div_u(const ir_inst& inst) {
          load_vreg_x0(inst.rr.src1);
          load_vreg_x1(inst.rr.src2);
          // CBZ X1, fpe_handler (div by zero)
-         emit32(0xB4000000 | X1);
-         void* cbz = code - 4;
+         emit_branch_to_handler_cbz(X1, fpe_handler, true);
          // UDIV X0, X0, X1
          emit32(0x9AC00800 | (X1 << 16) | (X0 << 5) | X0);
          store_x0_vreg(inst.dest);
-         { int64_t off = (static_cast<uint8_t*>(fpe_handler) - static_cast<uint8_t*>(cbz)) / 4;
-           uint32_t patched = 0xB4000000 | X1 | ((static_cast<uint32_t>(off) & 0x7FFFF) << 5);
-           std::memcpy(cbz, &patched, 4); }
       }
 
       void emit_i32_rem_s(const ir_inst& inst) {
          load_vreg_x0(inst.rr.src1);
          load_vreg_x1(inst.rr.src2);
          // CBZ W1, fpe_handler
-         emit32(0x34000000 | X1);
-         void* cbz = code - 4;
+         emit_branch_to_handler_cbz(X1, fpe_handler, false);
          // Check -1 case (result is 0)
          // CMN W1, #1
          emit32(0x3100043F);
@@ -4043,33 +4052,25 @@ namespace psizam::detail {
          emit32(0x1B008000 | X0 | (X16 << 5) | (X1 << 16) | (X0 << 10) | (1 << 15));
          fix_branch(done, code);
          store_x0_vreg(inst.dest);
-         { int64_t off = (static_cast<uint8_t*>(fpe_handler) - static_cast<uint8_t*>(cbz)) / 4;
-           uint32_t patched = 0x34000000 | X1 | ((static_cast<uint32_t>(off) & 0x7FFFF) << 5);
-           std::memcpy(cbz, &patched, 4); }
       }
 
       void emit_i32_rem_u(const ir_inst& inst) {
          load_vreg_x0(inst.rr.src1);
          load_vreg_x1(inst.rr.src2);
          // CBZ W1, fpe_handler
-         emit32(0x34000000 | X1);
-         void* cbz = code - 4;
+         emit_branch_to_handler_cbz(X1, fpe_handler, false);
          // UDIV W16, W0, W1 (use X16 as scratch to avoid clobbering live vregs)
          emit32(0x1AC00800 | X16 | (X1 << 16) | (X0 << 5));
          // MSUB W0, W16, W1, W0
          emit32(0x1B008000 | X0 | (X16 << 5) | (X1 << 16) | (X0 << 10) | (1 << 15));
          store_x0_vreg(inst.dest);
-         { int64_t off = (static_cast<uint8_t*>(fpe_handler) - static_cast<uint8_t*>(cbz)) / 4;
-           uint32_t patched = 0x34000000 | X1 | ((static_cast<uint32_t>(off) & 0x7FFFF) << 5);
-           std::memcpy(cbz, &patched, 4); }
       }
 
       void emit_i64_rem_s(const ir_inst& inst) {
          load_vreg_x0(inst.rr.src1);
          load_vreg_x1(inst.rr.src2);
          // CBZ X1, fpe_handler
-         emit32(0xB4000000 | X1);
-         void* cbz = code - 4;
+         emit_branch_to_handler_cbz(X1, fpe_handler, true);
          // Check -1 case (result is 0)
          emit32(0xB100043F); // CMN X1, #1
          void* not_minus1 = code;
@@ -4084,25 +4085,18 @@ namespace psizam::detail {
          emit32(0x9B008000 | X0 | (X16 << 5) | (X1 << 16) | (X0 << 10) | (1 << 15));
          fix_branch(done, code);
          store_x0_vreg(inst.dest);
-         { int64_t off = (static_cast<uint8_t*>(fpe_handler) - static_cast<uint8_t*>(cbz)) / 4;
-           uint32_t patched = 0xB4000000 | X1 | ((static_cast<uint32_t>(off) & 0x7FFFF) << 5);
-           std::memcpy(cbz, &patched, 4); }
       }
 
       void emit_i64_rem_u(const ir_inst& inst) {
          load_vreg_x0(inst.rr.src1);
          load_vreg_x1(inst.rr.src2);
          // CBZ X1, fpe_handler
-         emit32(0xB4000000 | X1);
-         void* cbz = code - 4;
+         emit_branch_to_handler_cbz(X1, fpe_handler, true);
          // UDIV X16, X0, X1 (use X16 as scratch to avoid clobbering live vregs)
          emit32(0x9AC00800 | X16 | (X1 << 16) | (X0 << 5));
          // MSUB X0, X16, X1, X0
          emit32(0x9B008000 | X0 | (X16 << 5) | (X1 << 16) | (X0 << 10) | (1 << 15));
          store_x0_vreg(inst.dest);
-         { int64_t off = (static_cast<uint8_t*>(fpe_handler) - static_cast<uint8_t*>(cbz)) / 4;
-           uint32_t patched = 0xB4000000 | X1 | ((static_cast<uint32_t>(off) & 0x7FFFF) << 5);
-           std::memcpy(cbz, &patched, 4); }
       }
 
       // Rotate left = rotate right by (32/64 - amount)
@@ -4386,18 +4380,19 @@ namespace psizam::detail {
          load_vreg_x0(inst.rr.src1);
          // Select the appropriate checked conversion helper
          void* helper = nullptr;
+         reloc_symbol sym = reloc_symbol::unknown;
          switch (cvt_op) {
-            case 0x1E380000: helper = reinterpret_cast<void*>(&checked_trunc_i32_s_f32); break;
-            case 0x1E390000: helper = reinterpret_cast<void*>(&checked_trunc_i32_u_f32); break;
-            case 0x1E780000: helper = reinterpret_cast<void*>(&checked_trunc_i32_s_f64); break;
-            case 0x1E790000: helper = reinterpret_cast<void*>(&checked_trunc_i32_u_f64); break;
-            case 0x9E380000: helper = reinterpret_cast<void*>(&checked_trunc_i64_s_f32); break;
-            case 0x9E390000: helper = reinterpret_cast<void*>(&checked_trunc_i64_u_f32); break;
-            case 0x9E780000: helper = reinterpret_cast<void*>(&checked_trunc_i64_s_f64); break;
-            case 0x9E790000: helper = reinterpret_cast<void*>(&checked_trunc_i64_u_f64); break;
+            case 0x1E380000: helper = reinterpret_cast<void*>(&checked_trunc_i32_s_f32); sym = reloc_symbol::checked_trunc_i32_s_f32; break;
+            case 0x1E390000: helper = reinterpret_cast<void*>(&checked_trunc_i32_u_f32); sym = reloc_symbol::checked_trunc_i32_u_f32; break;
+            case 0x1E780000: helper = reinterpret_cast<void*>(&checked_trunc_i32_s_f64); sym = reloc_symbol::checked_trunc_i32_s_f64; break;
+            case 0x1E790000: helper = reinterpret_cast<void*>(&checked_trunc_i32_u_f64); sym = reloc_symbol::checked_trunc_i32_u_f64; break;
+            case 0x9E380000: helper = reinterpret_cast<void*>(&checked_trunc_i64_s_f32); sym = reloc_symbol::checked_trunc_i64_s_f32; break;
+            case 0x9E390000: helper = reinterpret_cast<void*>(&checked_trunc_i64_u_f32); sym = reloc_symbol::checked_trunc_i64_u_f32; break;
+            case 0x9E780000: helper = reinterpret_cast<void*>(&checked_trunc_i64_s_f64); sym = reloc_symbol::checked_trunc_i64_s_f64; break;
+            case 0x9E790000: helper = reinterpret_cast<void*>(&checked_trunc_i64_u_f64); sym = reloc_symbol::checked_trunc_i64_u_f64; break;
          }
          // X0 = input bits, call helper → X0 = result (or signal_throw on overflow/NaN)
-         emit_mov_imm64(X8, reinterpret_cast<uint64_t>(helper));
+         emit_reloc_mov_imm64(X8, sym, reinterpret_cast<uint64_t>(helper));
          emit32(0xD63F0100); // BLR X8
          store_x0_vreg(inst.dest);
       }
@@ -4536,9 +4531,8 @@ namespace psizam::detail {
       // ──────── Static callbacks (public for relocation resolution) ────────
 
       // Host call with fast trampoline dispatch.
-      // On platforms with .eh_frame support (x86_64, Linux aarch64), exceptions
-      // propagate naturally. On macOS aarch64 (compact unwind, no .eh_frame),
-      // longjmp_on_exception is needed to safely unwind through JIT frames.
+      // Catch in the host frame; restore registers via the trap boundary instead
+      // of unwinding through generated frames.
       static native_value call_host_function(void* ctx, native_value* args, uint32_t idx, uint32_t remaining_stack) {
          auto* context = static_cast<jit_execution_context<false>*>(ctx);
          auto saved = context->_remaining_call_depth;
@@ -4563,11 +4557,7 @@ namespace psizam::detail {
                fwd[i] = args[np - 1 - i];
             result = context->_table->call(context->get_host_ptr(), mapped_index, fwd, context->linear_memory());
          };
-#if defined(__APPLE__) && defined(__aarch64__)
          longjmp_on_exception(do_call);
-#else
-         do_call();
-#endif
          context->_remaining_call_depth = saved;
          return result;
       }
@@ -4711,54 +4701,7 @@ namespace psizam::detail {
       // Checked trapping float-to-int conversion helpers (non-softfloat path).
       // Called from JIT code via BLR. Takes float bits in X0, returns converted int in X0.
       // On overflow/NaN, calls signal_throw (which longjmps out, never returns).
-      static uint64_t checked_trunc_i32_s_f32(uint64_t bits) {
-         float f = bits_to_f32(bits);
-         if (std::isnan(f) || f >= 2147483648.0f || f < -2147483648.0f)
-            signal_throw<wasm_interpreter_exception>("floating point error");
-         return static_cast<uint64_t>(static_cast<uint32_t>(static_cast<int32_t>(f)));
-      }
-      static uint64_t checked_trunc_i32_u_f32(uint64_t bits) {
-         float f = bits_to_f32(bits);
-         if (std::isnan(f) || f >= 4294967296.0f || f <= -1.0f)
-            signal_throw<wasm_interpreter_exception>("floating point error");
-         return static_cast<uint64_t>(static_cast<uint32_t>(f));
-      }
-      static uint64_t checked_trunc_i32_s_f64(uint64_t bits) {
-         double f = bits_to_f64(bits);
-         if (std::isnan(f) || f >= 2147483648.0 || f < -2147483648.0)
-            signal_throw<wasm_interpreter_exception>("floating point error");
-         return static_cast<uint64_t>(static_cast<uint32_t>(static_cast<int32_t>(f)));
-      }
-      static uint64_t checked_trunc_i32_u_f64(uint64_t bits) {
-         double f = bits_to_f64(bits);
-         if (std::isnan(f) || f >= 4294967296.0 || f <= -1.0)
-            signal_throw<wasm_interpreter_exception>("floating point error");
-         return static_cast<uint64_t>(static_cast<uint32_t>(f));
-      }
-      static uint64_t checked_trunc_i64_s_f32(uint64_t bits) {
-         float f = bits_to_f32(bits);
-         if (std::isnan(f) || f >= 9223372036854775808.0f || f < -9223372036854775808.0f)
-            signal_throw<wasm_interpreter_exception>("floating point error");
-         return static_cast<uint64_t>(static_cast<int64_t>(f));
-      }
-      static uint64_t checked_trunc_i64_u_f32(uint64_t bits) {
-         float f = bits_to_f32(bits);
-         if (std::isnan(f) || f >= 18446744073709551616.0f || f <= -1.0f)
-            signal_throw<wasm_interpreter_exception>("floating point error");
-         return static_cast<uint64_t>(f);
-      }
-      static uint64_t checked_trunc_i64_s_f64(uint64_t bits) {
-         double f = bits_to_f64(bits);
-         if (std::isnan(f) || f >= 9223372036854775808.0 || f < -9223372036854775808.0)
-            signal_throw<wasm_interpreter_exception>("floating point error");
-         return static_cast<uint64_t>(static_cast<int64_t>(f));
-      }
-      static uint64_t checked_trunc_i64_u_f64(uint64_t bits) {
-         double f = bits_to_f64(bits);
-         if (std::isnan(f) || f >= 18446744073709551616.0 || f <= -1.0)
-            signal_throw<wasm_interpreter_exception>("floating point error");
-         return static_cast<uint64_t>(f);
-      }
+
 
       static void on_call_indirect_error() { signal_throw<wasm_interpreter_exception>("call_indirect out of range"); }
       static void on_type_error() { signal_throw<wasm_interpreter_exception>("call_indirect incorrect function type"); }

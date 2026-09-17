@@ -124,6 +124,7 @@ namespace psizam {
          cs.arch = static_cast<uint8_t>(arch);
          cs.opt_tier = static_cast<uint8_t>(tier);
          cs.instrumentation.softfloat = softfloat;
+         cs.instrumentation.gas_metering = mod.gas_metering;
          cs.instrumentation.async_backtrace = backtrace;
          cs.stack_limit_mode = mod.stack_limit_is_bytes;
          cs.page_size = static_cast<uint32_t>(wasm_allocator::table_size());
@@ -157,7 +158,7 @@ namespace psizam {
       template<class Writer>
       inline void compile_pzam_section(std::vector<uint8_t>& wasm, pzam_file& file,
             pzam_arch arch, pzam_opt_tier tier, bool softfloat, bool backtrace,
-            int opt_level = 2) {
+            int opt_level = 2, bool gas_metering = false) {
          module mod;
          mod.allocator.use_default_memory();
          pzam_compile_result result;
@@ -167,8 +168,10 @@ namespace psizam {
          result.backtrace = backtrace;
          result.opt_level = opt_level;
          null_debug_info debug;
+         default_options parser_options;
+         parser_options.gas_metering = gas_metering;
          binary_parser<Writer, default_options, null_debug_info> parser(
-            mod.allocator, default_options{}, backtrace, false);
+            mod.allocator, parser_options, backtrace, false);
          parser.set_compile_result(&result);
          parser.parse_module(wasm, mod, debug);
          mod.finalize();
@@ -179,8 +182,8 @@ namespace psizam {
       }
    }
 
-   /// Compile each requested architecture/tier independently. JIT1 PZAM output,
-   /// gas metering and debug-info emission are not implemented and are rejected.
+   /// Compile each requested architecture/tier independently. JIT1 PZAM output
+   /// and debug-info emission are not implemented and are rejected.
    /// Link psizam-llvm for LLVM tiers; both JIT2 targets are always available.
    inline std::vector<char> pzam_compile(std::span<const uint8_t> wasm_bytes,
                                          const pzam_compile_options& opts = {}) {
@@ -191,10 +194,11 @@ namespace psizam {
          throw std::invalid_argument("pzam_compile: invalid or empty tier flags");
       if (!!(opts.tier & pzam_tier_flags::jit1))
          throw std::invalid_argument("pzam_compile: JIT1 PZAM output is not supported");
-      constexpr auto supported = pzam_compile_flags::softfloat | pzam_compile_flags::backtrace;
+      constexpr auto supported = pzam_compile_flags::softfloat | pzam_compile_flags::backtrace | pzam_compile_flags::gas_meter;
       if (!!(opts.flags & ~supported))
          throw std::invalid_argument("pzam_compile: unsupported instrumentation flags");
       const bool softfloat = !!(opts.flags & pzam_compile_flags::softfloat);
+      const bool gas_metering = !!(opts.flags & pzam_compile_flags::gas_meter);
       const bool backtrace = !!(opts.flags & pzam_compile_flags::backtrace);
       if (softfloat && !!(opts.tier & pzam_tier_flags::jit2))
          throw std::invalid_argument("pzam_compile: softfloat requires LLVM for every requested tier");
@@ -211,15 +215,15 @@ namespace psizam {
             if (!(opts.tier & tier_flag)) continue;
             if (tier == pzam_opt_tier::jit2) {
                if (arch == pzam_arch::x86_64)
-                  compile_pzam_section<ir_writer_x64>(wasm, file, arch, tier, false, backtrace);
+                  compile_pzam_section<ir_writer_x64>(wasm, file, arch, tier, false, backtrace, 2, gas_metering);
                else
-                  compile_pzam_section<ir_writer_a64>(wasm, file, arch, tier, false, backtrace);
+                  compile_pzam_section<ir_writer_a64>(wasm, file, arch, tier, false, backtrace, 2, gas_metering);
             } else {
 #ifdef PSIZAM_ENABLE_LLVM_BACKEND
                const int level = tier == pzam_opt_tier::llvm_O1 ? 1
                                : tier == pzam_opt_tier::llvm_O2 ? 2 : 3;
                compile_pzam_section<ir_writer_llvm_aot>(wasm, file, arch, tier,
-                                                       softfloat, backtrace, level);
+                                                       softfloat, backtrace, level, gas_metering);
 #endif
             }
          }

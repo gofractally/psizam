@@ -246,6 +246,7 @@ namespace psizam::detail {
       //   done:
       void emit_gas_prologue_check(llvm::IRBuilder<>& builder,
                                    llvm::Value* ctx_ptr, int64_t cost) {
+         if (!wasm_mod.gas_metering) return;
          auto* fn = builder.GetInsertBlock()->getParent();
          const std::size_t consumed_off = detail::jit_execution_context<false>::gas_consumed_offset();
          const std::size_t deadline_off = detail::jit_execution_context<false>::gas_deadline_offset();
@@ -255,12 +256,18 @@ namespace psizam::detail {
 
          auto* consumed_gep = builder.CreateConstGEP1_64(i8_ty, ctx_ptr, consumed_off, "consumed_ptr");
          auto* cur = builder.CreateLoad(i64_ty, consumed_gep, "consumed_cur");
+         cur->setAlignment(llvm::Align(8));
          auto* next = builder.CreateAdd(cur,
             llvm::ConstantInt::get(i64_ty, cost, /*signed*/true), "consumed_next");
-         builder.CreateStore(next, consumed_gep);
+         builder.CreateStore(next, consumed_gep)->setAlignment(llvm::Align(8));
 
          auto* deadline_gep = builder.CreateConstGEP1_64(i8_ty, ctx_ptr, deadline_off, "deadline_ptr");
          auto* deadline_val = builder.CreateLoad(i64_ty, deadline_gep, "deadline");
+         // gas_state::deadline may be changed by another thread. Monotonic is
+         // LLVM's relaxed atomic ordering: no fence is needed, but the read
+         // must remain atomic and cannot be combined with the consumed load.
+         deadline_val->setAtomic(llvm::AtomicOrdering::Monotonic);
+         deadline_val->setAlignment(llvm::Align(8));
          // Unsigned compare: consumed < deadline → skip (both are u64).
          auto* ok = builder.CreateICmpULT(next, deadline_val, "gas_ok");
          builder.CreateCondBr(ok, gas_done_bb, gas_trap_bb);
@@ -933,11 +940,16 @@ namespace psizam::detail {
                                     + func.prologue_gas_extra);
          }
 
+         // The gas check leaves builder in gas_done. Keep fixed local storage
+         // in entry, before that branch, so mem2reg/SROA can promote it to SSA.
+         // Initialization and executable operations still follow the gas check.
+         llvm::IRBuilder<> alloca_builder(entry_bb, entry_bb->begin());
+
          // Store mem_ptr in an alloca so memory_grow can update it and LLVM's
          // mem2reg pass inserts PHI nodes at control flow merges. Without this,
          // reassigning the C++ variable after memory_grow creates a Load in one
          // basic block that doesn't dominate uses in other blocks.
-         auto* mem_ptr_alloca = builder.CreateAlloca(ptr_ty, nullptr, "mem_ptr");
+         auto* mem_ptr_alloca = alloca_builder.CreateAlloca(ptr_ty, nullptr, "mem_ptr");
          builder.CreateStore(mem_arg, mem_ptr_alloca);
          auto load_mem_ptr = [&]() -> llvm::Value* {
             return builder.CreateLoad(ptr_ty, mem_ptr_alloca, "mem");
@@ -1006,7 +1018,7 @@ namespace psizam::detail {
          // Create allocas for all virtual registers (scalar)
          std::vector<llvm::AllocaInst*> vregs(func.next_vreg, nullptr);
          for (uint32_t i = 0; i < func.next_vreg; i++) {
-            vregs[i] = builder.CreateAlloca(ir_type_to_llvm(vreg_types[i]), nullptr,
+            vregs[i] = alloca_builder.CreateAlloca(ir_type_to_llvm(vreg_types[i]), nullptr,
                                              "v" + std::to_string(i));
          }
 
@@ -1085,7 +1097,7 @@ namespace psizam::detail {
          std::vector<llvm::AllocaInst*> v128_slots(func.next_vreg, nullptr);
          for (uint32_t i = 0; i < func.next_vreg; i++) {
             if (is_v128[i])
-               v128_slots[i] = builder.CreateAlloca(v128_ty, nullptr,
+               v128_slots[i] = alloca_builder.CreateAlloca(v128_ty, nullptr,
                   "s" + std::to_string(i));
          }
 
@@ -1107,7 +1119,7 @@ namespace psizam::detail {
          // Create allocas for local variables
          std::vector<llvm::AllocaInst*> locals(num_locals, nullptr);
          for (uint32_t i = 0; i < num_locals; i++) {
-            locals[i] = builder.CreateAlloca(wasm_type_to_llvm(local_wasm_types[i]), nullptr,
+            locals[i] = alloca_builder.CreateAlloca(wasm_type_to_llvm(local_wasm_types[i]), nullptr,
                                               "local" + std::to_string(i));
          }
 
@@ -1154,7 +1166,7 @@ namespace psizam::detail {
             for (uint32_t i = 0; i < func.inst_count; i++) {
                const auto& inst = func.insts[i];
                if (inst.opcode == ir_op::arg) {
-                  pending_call_args++;
+                  pending_call_args += inst.type == types::v128 ? 2 : 1;
                } else if (inst.opcode == ir_op::call) {
                   update_for_call(inst.call.index < num_imports, inst.call.index, false);
                   pending_call_args = 0;
@@ -1178,12 +1190,12 @@ namespace psizam::detail {
          // until the native stack overflows.
          {
             uint32_t alloca_size = max_host_args > 0 ? max_host_args : 1;
-            host_args_alloca = builder.CreateAlloca(i64_ty,
+            host_args_alloca = alloca_builder.CreateAlloca(i64_ty,
                builder.getInt32(alloca_size), "host_args");
          }
          // Allocate mem_out in the entry block for any function that might call host
          if (rt_call_host_full && wasm_mod.get_imported_functions_size() > 0) {
-            mem_out_alloca = builder.CreateAlloca(ptr_ty, nullptr, "mem_out");
+            mem_out_alloca = alloca_builder.CreateAlloca(ptr_ty, nullptr, "mem_out");
          }
 
          // Checked memory mode: reads use deferred watermark (umax accumulation,
@@ -1191,7 +1203,7 @@ namespace psizam::detail {
          // Writes use immediate per-access bounds checks.
          llvm::AllocaInst* watermark_alloca = nullptr;
          if (is_checked()) {
-            watermark_alloca = builder.CreateAlloca(i64_ty, nullptr, "watermark");
+            watermark_alloca = alloca_builder.CreateAlloca(i64_ty, nullptr, "watermark");
             builder.CreateStore(builder.getInt64(0), watermark_alloca);
          }
 
@@ -1200,7 +1212,7 @@ namespace psizam::detail {
          // page on every bounds check. Reloaded after memory.grow / host calls.
          llvm::AllocaInst* mem_size_cache = nullptr;
          if (is_checked()) {
-            mem_size_cache = builder.CreateAlloca(i64_ty, nullptr, "mem_size_cache");
+            mem_size_cache = alloca_builder.CreateAlloca(i64_ty, nullptr, "mem_size_cache");
             const int32_t ms_off = wasm_allocator::mem_size_offset();
             llvm::Value* ms_ptr = builder.CreateConstGEP1_64(i8_ty, load_mem_ptr(),
                static_cast<int64_t>(ms_off), "init_ms_ptr");
@@ -1390,6 +1402,30 @@ namespace psizam::detail {
 
          // Collect call arguments from 'arg' pseudo-instructions
          std::vector<llvm::Value*> call_args;
+         // Entry wrappers read packed native_value slots, with vectors occupying
+         // [high, low]. Keep following scalar arguments clear of both halves.
+         auto pack_indirect_args = [&]() {
+            uint32_t slot_index = 0;
+            for (auto* v : call_args) {
+               auto store_slot = [&](llvm::Value* value) {
+                  auto* slot = builder.CreateGEP(i64_ty, host_args_alloca,
+                                                builder.getInt32(slot_index++));
+                  builder.CreateStore(value, slot);
+               };
+               if (v->getType() == v128_ty) {
+                  store_slot(builder.CreateExtractElement(v, builder.getInt32(1)));
+                  store_slot(builder.CreateExtractElement(v, builder.getInt32(0)));
+               } else {
+                  if (v->getType() == i32_ty) v = builder.CreateZExt(v, i64_ty);
+                  else if (v->getType() == f32_ty)
+                     v = builder.CreateZExt(builder.CreateBitCast(v, i32_ty), i64_ty);
+                  else if (v->getType() == f64_ty) v = builder.CreateBitCast(v, i64_ty);
+                  store_slot(v);
+               }
+            }
+            call_args.clear();
+         };
+
 
          // Pending v128 result from shuffle (whose immv128 overlay prevents using simd.v_dest)
          llvm::Value* pending_v128_result = nullptr;
@@ -2161,19 +2197,7 @@ namespace psizam::detail {
 
                   uint32_t nargs = static_cast<uint32_t>(call_args.size());
                   // Use entry-block alloca (avoids stack growth in loops)
-                  for (uint32_t a = 0; a < nargs; a++) {
-                     llvm::Value* slot = builder.CreateGEP(i64_ty, host_args_alloca,
-                        builder.getInt32(a));
-                     llvm::Value* v = call_args[a];
-                     if (v->getType() == i32_ty)
-                        v = builder.CreateZExt(v, i64_ty);
-                     else if (v->getType() == f32_ty)
-                        v = builder.CreateZExt(builder.CreateBitCast(v, i32_ty), i64_ty);
-                     else if (v->getType() == f64_ty)
-                        v = builder.CreateBitCast(v, i64_ty);
-                     builder.CreateStore(v, slot);
-                  }
-                  call_args.clear();
+                  pack_indirect_args();
 
                   // Ensure table_elem is i32. Live paths always feed an i32
                   // here (WASM validation), but dead paths can produce a
@@ -2210,7 +2234,12 @@ namespace psizam::detail {
                      }
                   }
 
-                  if (inst.dest != ir_vreg_none) {
+                  if (inst.dest != ir_vreg_none && inst.type == types::v128) {
+                     // The entry wrapper returns the low word in the register
+                     // and writes the complete vector back to the argument buffer.
+                     auto* vec = builder.CreateAlignedLoad(v128_ty, host_args_alloca, llvm::Align(8));
+                     store_v128(static_cast<uint16_t>(inst.dest), vec);
+                  } else if (inst.dest != ir_vreg_none) {
                      llvm::Type* target_ty = ir_type_to_llvm(inst.type);
                      llvm::Value* result;
                      if (target_ty == i32_ty)
@@ -2317,15 +2346,7 @@ namespace psizam::detail {
                   }
                   if (!table_elem) { call_args.clear(); break; }
                   uint32_t nargs = static_cast<uint32_t>(call_args.size());
-                  for (uint32_t a = 0; a < nargs; a++) {
-                     llvm::Value* slot = builder.CreateGEP(i64_ty, host_args_alloca, builder.getInt32(a));
-                     llvm::Value* v = call_args[a];
-                     if (v->getType() == i32_ty) v = builder.CreateZExt(v, i64_ty);
-                     else if (v->getType() == f32_ty) v = builder.CreateZExt(builder.CreateBitCast(v, i32_ty), i64_ty);
-                     else if (v->getType() == f64_ty) v = builder.CreateBitCast(v, i64_ty);
-                     builder.CreateStore(v, slot);
-                  }
-                  call_args.clear();
+                  pack_indirect_args();
                   // See ir_op::call_indirect above for why convert_type.
                   if (table_elem->getType() != i32_ty)
                      table_elem = convert_type(table_elem, i32_ty);

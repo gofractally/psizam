@@ -428,7 +428,7 @@ namespace psizam::detail {
       void emit_sysv_abi_interface() {
          this->emit_push_raw(rbp);
          this->emit_mov(rsp, rbp);
-         this->emit_sub(16, rsp);
+         this->emit_sub(32, rsp);
 
          this->emit(base::TEST, r8, r8);
          this->emit(base::IA32_REX_W(0x0f, 0x45), r8, rsp);
@@ -441,11 +441,13 @@ namespace psizam::detail {
          // R15 is the read watermark register in checked mode. The host's
          // incoming R15 is arbitrary; checked mode's first gas charge runs
          // emit_validate_watermark, which traps on R15 > mem_size. Preserve
-         // the caller's R15 on the stack and zero R15 before the call so
+         // the caller's R15 in the host frame and zero R15 before the call so
          // the first wasm function's validate_watermark sees a clean 0.
          // This is restored in the epilogue below. Mirrors the save/restore
          // in machine_code_writer's emit_sysv_abi_interface (jit1).
-         this->emit_push_raw(r15);
+         // RSP may now point to the guest stack. Save through RBP, matching
+         // the restore below, rather than pushing onto that different stack.
+         this->emit_mov(r15, *(rbp - 24));
          this->emit_xor(general_register32(15), general_register32(15));
 
          // copy args loop
@@ -499,6 +501,7 @@ namespace psizam::detail {
          this->emit_mov(rsp, rax);
          this->emit_bytes(0x48, 0x83, 0xe4, 0xf0); // andq $-16, %rsp
          this->emit_push_raw(rax); // save old rsp
+         this->emit_push_raw(rax); // preserve 16-byte call alignment
          // Call function
          this->emit_bytes(0x48, 0xb8);              // movabs rax, imm64
          this->emit_operand_ptr(fn_ptr);
@@ -564,12 +567,16 @@ namespace psizam::detail {
          this->emit_mov(r10, rdx);           // rdx = memory (SysV arg 3)
          this->emit_mov(r9, rdi);            // rdi = host_ptr (SysV arg 1)
 
-         // Align stack and call trampoline
+         // Align stack and enter the C++ exception boundary
          this->emit_bytes(0x48, 0x89, 0xe0); // mov %rsp, %rax (save rsp)
          this->emit_bytes(0x48, 0x83, 0xe4, 0xf0); // andq $-16, %rsp
          this->emit_bytes(0x50);             // push %rax (save restore point)
          this->emit_bytes(0x50);             // push %rax
-         this->emit_bytes(0x41, 0xff, 0xd0); // callq *%r8
+         this->emit_mov(r8, rcx); // fourth argument: trampoline
+         this->emit_bytes(0x48, 0xb8);
+         emit_reloc(reloc_symbol::jit_invoke_host_trampoline);
+         this->emit_operand_ptr(&invoke_host_trampoline);
+         this->emit_bytes(0xff, 0xd0); // call exception-safe host bridge
          // Restore stack
          this->emit_bytes(0x48, 0x8b, 0x24, 0x24); // mov (%rsp), %rsp
          this->emit_bytes(0x5e);             // popq %rsi
@@ -602,6 +609,7 @@ namespace psizam::detail {
       //   done:
       void emit_gas_charge(int64_t cost) {
          emit_validate_watermark();
+         if (!_mod.gas_metering) return;
          using ctx_t = jit_execution_context<false>;
          const uint32_t consumed_off = static_cast<uint32_t>(ctx_t::gas_consumed_offset());
          const uint32_t deadline_off = static_cast<uint32_t>(ctx_t::gas_deadline_offset());
@@ -629,7 +637,9 @@ namespace psizam::detail {
          // Slow: call __psizam_gas_exhausted_check(ctx)
          this->emit_bytes(0x57);
          this->emit_bytes(0x56);
-         this->emit_mov(&__psizam_gas_exhausted_check, rax);
+         this->emit_bytes(0x48, 0xb8);
+         emit_reloc(reloc_symbol::llvm_gas_exhausted_check);
+         this->emit_operand_ptr(&__psizam_gas_exhausted_check);
          this->emit(CALL, rax);
          this->emit_bytes(0x5e);
          this->emit_bytes(0x5f);
@@ -1047,6 +1057,7 @@ namespace psizam::detail {
                this->emit_mov(rsp, rax);
                this->emit_bytes(0x48, 0x83, 0xe4, 0xf0); // align rsp
                this->emit_push_raw(rax);
+               this->emit_push_raw(rax); // preserve 16-byte call alignment
                this->emit_bytes(0x48, 0xb8);
                this->emit_operand_ptr(reinterpret_cast<const void*>(&__psizam_resolve_indirect));
                this->emit_bytes(0xff, 0xd0); // call rax
@@ -1663,6 +1674,7 @@ namespace psizam::detail {
             this->emit_mov(rsp, r8);
             this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
             this->emit_push_raw(r8);
+            this->emit_push_raw(r8); // preserve 16-byte call alignment
             this->emit_bytes(0x48, 0xb8);
             emit_reloc(reloc_symbol::memory_fill);
             this->emit_operand_ptr(&memory_fill_impl);
@@ -1704,6 +1716,7 @@ namespace psizam::detail {
             this->emit_mov(rsp, r8);
             this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
             this->emit_push_raw(r8);
+            this->emit_push_raw(r8); // preserve 16-byte call alignment
             this->emit_bytes(0x48, 0xb8);
             emit_reloc(reloc_symbol::memory_copy);
             this->emit_operand_ptr(&memory_copy_impl);
@@ -1770,6 +1783,7 @@ namespace psizam::detail {
             this->emit_mov(rsp, rax);
             this->emit_bytes(0x48, 0x83, 0xe4, 0xf0); // andq $-16, %rsp
             this->emit_push_raw(rax);
+            this->emit_push_raw(rax); // preserve 16-byte call alignment
             this->emit_bytes(0x48, 0xb8);
             emit_reloc(reloc_symbol::memory_init);
             this->emit_operand_ptr(&memory_init_impl);
@@ -1787,6 +1801,7 @@ namespace psizam::detail {
             this->emit_mov(rsp, rax);
             this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
             this->emit_push_raw(rax);
+            this->emit_push_raw(rax); // preserve 16-byte call alignment
             this->emit_bytes(0x48, 0xb8);
             emit_reloc(reloc_symbol::data_drop);
             this->emit_operand_ptr(&data_drop_impl);
@@ -1807,6 +1822,7 @@ namespace psizam::detail {
             this->emit_mov(rsp, rax);
             this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
             this->emit_push_raw(rax);
+            this->emit_push_raw(rax); // preserve 16-byte call alignment
             this->emit_bytes(0x48, 0xb8);
             emit_reloc(reloc_symbol::table_init);
             this->emit_operand_ptr(&table_init_impl);
@@ -1824,6 +1840,7 @@ namespace psizam::detail {
             this->emit_mov(rsp, rax);
             this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
             this->emit_push_raw(rax);
+            this->emit_push_raw(rax); // preserve 16-byte call alignment
             this->emit_bytes(0x48, 0xb8);
             emit_reloc(reloc_symbol::elem_drop);
             this->emit_operand_ptr(&elem_drop_impl);
@@ -1845,6 +1862,7 @@ namespace psizam::detail {
             this->emit_mov(rsp, rax);
             this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
             this->emit_push_raw(rax);
+            this->emit_push_raw(rax); // preserve 16-byte call alignment
             this->emit_bytes(0x48, 0xb8);
             emit_reloc(reloc_symbol::table_copy);
             this->emit_operand_ptr(&table_copy_impl);
@@ -1863,6 +1881,7 @@ namespace psizam::detail {
             this->emit_mov(rsp, rax);
             this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
             this->emit_push_raw(rax);
+            this->emit_push_raw(rax); // preserve 16-byte call alignment
             this->emit_bytes(0x48, 0xb8);
             this->emit_operand_ptr(reinterpret_cast<const void*>(&__psizam_table_get));
             this->emit_bytes(0xff, 0xd0);
@@ -1882,6 +1901,7 @@ namespace psizam::detail {
             this->emit_mov(rsp, rax);
             this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
             this->emit_push_raw(rax);
+            this->emit_push_raw(rax); // preserve 16-byte call alignment
             this->emit_bytes(0x48, 0xb8);
             this->emit_operand_ptr(reinterpret_cast<const void*>(&__psizam_table_set));
             this->emit_bytes(0xff, 0xd0);
@@ -1903,6 +1923,7 @@ namespace psizam::detail {
             this->emit_mov(rsp, rax);
             this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
             this->emit_push_raw(rax);
+            this->emit_push_raw(rax); // preserve 16-byte call alignment
             this->emit_bytes(0x48, 0xb8);
             this->emit_operand_ptr(reinterpret_cast<const void*>(&__psizam_table_grow));
             this->emit_bytes(0xff, 0xd0);
@@ -1919,6 +1940,7 @@ namespace psizam::detail {
             this->emit_mov(rsp, rax);
             this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
             this->emit_push_raw(rax);
+            this->emit_push_raw(rax); // preserve 16-byte call alignment
             this->emit_bytes(0x48, 0xb8);
             this->emit_operand_ptr(reinterpret_cast<const void*>(&__psizam_table_size));
             this->emit_bytes(0xff, 0xd0);
@@ -1939,6 +1961,7 @@ namespace psizam::detail {
             this->emit_mov(rsp, rax);
             this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
             this->emit_push_raw(rax);
+            this->emit_push_raw(rax); // preserve 16-byte call alignment
             this->emit_bytes(0x48, 0xb8);
             this->emit_operand_ptr(reinterpret_cast<const void*>(&__psizam_table_fill));
             this->emit_bytes(0xff, 0xd0);
@@ -2020,6 +2043,7 @@ namespace psizam::detail {
                this->emit_mov(rsp, rax);
                this->emit_bytes(0x48, 0x83, 0xe4, 0xf0); // align stack
                this->emit_push_raw(rax);
+               this->emit_push_raw(rax); // preserve 16-byte call alignment
                this->emit_bytes(0x48, 0xb8);
                this->emit_operand_ptr(reinterpret_cast<const void*>(&__psizam_atomic_rmw));
                this->emit_bytes(0xff, 0xd0); // call rax
@@ -2617,6 +2641,7 @@ namespace psizam::detail {
                this->emit_mov(rsp, rax);
                this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
                this->emit_push_raw(rax);
+               this->emit_push_raw(rax); // preserve 16-byte call alignment
                this->emit_bytes(0x48, 0xb8);
                this->emit_operand_ptr(reinterpret_cast<const void*>(&__psizam_resolve_indirect));
                this->emit_bytes(0xff, 0xd0);
@@ -3322,6 +3347,7 @@ namespace psizam::detail {
             this->emit_mov(rsp, rax);
             this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
             this->emit_push_raw(rax);
+            this->emit_push_raw(rax); // preserve 16-byte call alignment
             this->emit_bytes(0x48, 0xb8);
             this->emit_operand_ptr(reinterpret_cast<const void*>(&__psizam_table_size));
             this->emit_bytes(0xff, 0xd0);
@@ -3344,6 +3370,7 @@ namespace psizam::detail {
             this->emit_mov(rsp, rax);
             this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
             this->emit_push_raw(rax);
+            this->emit_push_raw(rax); // preserve 16-byte call alignment
             this->emit_bytes(0x48, 0xb8);
             this->emit_operand_ptr(reinterpret_cast<const void*>(&__psizam_table_grow));
             this->emit_bytes(0xff, 0xd0);
@@ -4078,39 +4105,13 @@ namespace psizam::detail {
          return true;
       }
 
-      // Try to fold addr = add(base, const) into the load/store displacement.
-      // Returns the base vreg and updated offset, or the original if no folding.
-      // Recurses to chain add(add(base, c1), c2) → base + c1 + c2.
-      uint32_t try_fold_addr(uint32_t addr_vreg, uint32_t& uoffset) {
-         if (!_cur_func || !_cur_func->is_const || addr_vreg >= _num_vregs) return addr_vreg;
-         if (!_func_def_inst) return addr_vreg;
-         uint32_t def = _func_def_inst[addr_vreg];
-         if (def >= _func_inst_count) return addr_vreg;
-         auto& di = _func_insts[def];
-         if (di.opcode != ir_op::i32_add) return addr_vreg;
-         // Only fold if the add result is single-use (this load/store is the only consumer)
-         if (!_func_use_count || _func_use_count[addr_vreg] != 1) return addr_vreg;
-         // Check both sides for a non-negative constant (using persisted is_const)
-         for (int side = 0; side < 2; ++side) {
-            uint32_t cv = (side == 0) ? di.rr.src2 : di.rr.src1;
-            uint32_t bv = (side == 0) ? di.rr.src1 : di.rr.src2;
-            if (cv >= _num_vregs || !_cur_func->is_const[cv]) continue;
-            int32_t cval = static_cast<int32_t>(_cur_func->const_val[cv]);
-            if (cval < 0) continue;
-            uint64_t combined = static_cast<uint64_t>(uoffset) + static_cast<uint64_t>(static_cast<uint32_t>(cval));
-            if (combined > INT32_MAX) continue;
-            uoffset = static_cast<uint32_t>(combined);
-            // Recurse: try to fold further (chain add(add(base, c1), c2))
-            return try_fold_addr(bv, uoffset);
-         }
-         return addr_vreg;
-      }
-
       // Register-based memory load
       template<class I, class R>
       bool emit_load_reg(const ir_inst& inst, I instr, R reg, uint32_t access_size = 0) {
          uint32_t uoffset = static_cast<uint32_t>(inst.ri.imm);
-         uint32_t addr_vreg = try_fold_addr(inst.ri.src1, uoffset);
+         // i32.add wraps before the memory instruction adds its non-wrapping
+         // offset. Folding that add into a 64-bit displacement changes semantics.
+         uint32_t addr_vreg = inst.ri.src1;
          int8_t pr_addr = get_phys(addr_vreg);
          int8_t pr_dest = get_phys(inst.dest);
 
@@ -6071,6 +6072,7 @@ namespace psizam::detail {
          this->emit_mov(rsp, rsi);        // rsi = saved rsp (rsi is about to be saved)
          this->emit_bytes(0x48, 0x83, 0xe4, 0xf0); // andq $-16, %rsp
          this->emit_push_raw(rsi);        // push saved rsp (using aligned stack)
+         this->emit_push_raw(rsi); // preserve 16-byte call alignment
          this->emit_bytes(0x48, 0xb8);
          emit_reloc(sym);
          this->emit_operand_ptr(fn);
@@ -6081,7 +6083,7 @@ namespace psizam::detail {
       }
 
       // Softfloat unary: call a v128_t -> v128_t function
-      void simd_v128_unop_softfloat(v128_t (*fn)(v128_t), reloc_symbol sym = reloc_symbol::unknown) {
+      void simd_v128_unop_softfloat(v128_t (*fn)(v128_t), reloc_symbol sym) {
          // The v128 argument is on the x86 stack as 16 bytes.
          // SysV ABI: v128_t is returned in rax:rdx (two uint64_t fields).
          // v128_t argument: passed as two uint64_t in rdi, rsi.
@@ -6095,6 +6097,7 @@ namespace psizam::detail {
          this->emit_mov(rsp, rcx);
          this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);  // and $-16, %rsp
          this->emit_push_raw(rcx);
+         this->emit_push_raw(rcx); // preserve 16-byte call alignment
          // Call
          this->emit_bytes(0x48, 0xb8);
          emit_reloc(sym);
@@ -6110,7 +6113,7 @@ namespace psizam::detail {
       }
 
       // Softfloat binary: call a (v128_t, v128_t) -> v128_t function
-      void simd_v128_ternop_softfloat(v128_t (*fn)(v128_t, v128_t, v128_t)) {
+      void simd_v128_ternop_softfloat(v128_t (*fn)(v128_t, v128_t, v128_t), reloc_symbol sym) {
          // Three v128 args on stack: TOS = arg3 (16 bytes), NOS = arg2, NOS+16 = arg1
          // SysV ABI: arg1 in rdi:rsi, arg2 in rdx:rcx, arg3 in r8:r9
          this->emit_push_raw(rdi);
@@ -6126,8 +6129,10 @@ namespace psizam::detail {
          this->emit_mov(rsp, rax);
          this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
          this->emit_push_raw(rax);
+         this->emit_push_raw(rax); // preserve 16-byte call alignment
          // Call
          this->emit_bytes(0x48, 0xb8);
+         emit_reloc(sym);
          this->emit_operand_ptr(fn);
          this->emit_bytes(0xff, 0xd0);
          // Restore stack
@@ -6140,7 +6145,7 @@ namespace psizam::detail {
          this->emit_mov(rdx, *(rsp + 8));
       }
 
-      void simd_v128_binop_softfloat(v128_t (*fn)(v128_t, v128_t), reloc_symbol sym = reloc_symbol::unknown) {
+      void simd_v128_binop_softfloat(v128_t (*fn)(v128_t, v128_t), reloc_symbol sym) {
          // Two v128 args on stack: TOS = arg2 (16 bytes), NOS = arg1 (16 bytes)
          // SysV ABI: first arg in rdi:rsi, second in rdx:rcx
          // But rsi is linear memory base, so save/restore.
@@ -6155,6 +6160,7 @@ namespace psizam::detail {
          this->emit_mov(rsp, r8);
          this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);  // and $-16, %rsp
          this->emit_push_raw(r8);
+         this->emit_push_raw(r8); // preserve 16-byte call alignment
          // Call
          this->emit_bytes(0x48, 0xb8);
          emit_reloc(sym);
@@ -6323,20 +6329,20 @@ namespace psizam::detail {
          case simd_sub::i64x2_ge_s: simd_v128_irelop_cmp(base::VPCMPGTQ, true, true); break;
 
          // ── f32x4 comparisons (softfloat) ──
-         case simd_sub::f32x4_eq: simd_v128_binop_softfloat(&_psizam_f32x4_eq); break;
-         case simd_sub::f32x4_ne: simd_v128_binop_softfloat(&_psizam_f32x4_ne); break;
-         case simd_sub::f32x4_lt: simd_v128_binop_softfloat(&_psizam_f32x4_lt); break;
-         case simd_sub::f32x4_gt: simd_v128_binop_softfloat(&_psizam_f32x4_gt); break;
-         case simd_sub::f32x4_le: simd_v128_binop_softfloat(&_psizam_f32x4_le); break;
-         case simd_sub::f32x4_ge: simd_v128_binop_softfloat(&_psizam_f32x4_ge); break;
+         case simd_sub::f32x4_eq: simd_v128_binop_softfloat(&_psizam_f32x4_eq, reloc_symbol::simd_f32x4_eq); break;
+         case simd_sub::f32x4_ne: simd_v128_binop_softfloat(&_psizam_f32x4_ne, reloc_symbol::simd_f32x4_ne); break;
+         case simd_sub::f32x4_lt: simd_v128_binop_softfloat(&_psizam_f32x4_lt, reloc_symbol::simd_f32x4_lt); break;
+         case simd_sub::f32x4_gt: simd_v128_binop_softfloat(&_psizam_f32x4_gt, reloc_symbol::simd_f32x4_gt); break;
+         case simd_sub::f32x4_le: simd_v128_binop_softfloat(&_psizam_f32x4_le, reloc_symbol::simd_f32x4_le); break;
+         case simd_sub::f32x4_ge: simd_v128_binop_softfloat(&_psizam_f32x4_ge, reloc_symbol::simd_f32x4_ge); break;
 
          // ── f64x2 comparisons (softfloat) ──
-         case simd_sub::f64x2_eq: simd_v128_binop_softfloat(&_psizam_f64x2_eq); break;
-         case simd_sub::f64x2_ne: simd_v128_binop_softfloat(&_psizam_f64x2_ne); break;
-         case simd_sub::f64x2_lt: simd_v128_binop_softfloat(&_psizam_f64x2_lt); break;
-         case simd_sub::f64x2_gt: simd_v128_binop_softfloat(&_psizam_f64x2_gt); break;
-         case simd_sub::f64x2_le: simd_v128_binop_softfloat(&_psizam_f64x2_le); break;
-         case simd_sub::f64x2_ge: simd_v128_binop_softfloat(&_psizam_f64x2_ge); break;
+         case simd_sub::f64x2_eq: simd_v128_binop_softfloat(&_psizam_f64x2_eq, reloc_symbol::simd_f64x2_eq); break;
+         case simd_sub::f64x2_ne: simd_v128_binop_softfloat(&_psizam_f64x2_ne, reloc_symbol::simd_f64x2_ne); break;
+         case simd_sub::f64x2_lt: simd_v128_binop_softfloat(&_psizam_f64x2_lt, reloc_symbol::simd_f64x2_lt); break;
+         case simd_sub::f64x2_gt: simd_v128_binop_softfloat(&_psizam_f64x2_gt, reloc_symbol::simd_f64x2_gt); break;
+         case simd_sub::f64x2_le: simd_v128_binop_softfloat(&_psizam_f64x2_le, reloc_symbol::simd_f64x2_le); break;
+         case simd_sub::f64x2_ge: simd_v128_binop_softfloat(&_psizam_f64x2_ge, reloc_symbol::simd_f64x2_ge); break;
 
          // ── Logical ──
          case simd_sub::v128_not: {
@@ -6838,58 +6844,58 @@ namespace psizam::detail {
          }
 
          // ── f32x4 arithmetic (softfloat) ──
-         case simd_sub::f32x4_ceil: simd_v128_unop_softfloat(&_psizam_f32x4_ceil); break;
-         case simd_sub::f32x4_floor: simd_v128_unop_softfloat(&_psizam_f32x4_floor); break;
-         case simd_sub::f32x4_trunc: simd_v128_unop_softfloat(&_psizam_f32x4_trunc); break;
-         case simd_sub::f32x4_nearest: simd_v128_unop_softfloat(&_psizam_f32x4_nearest); break;
-         case simd_sub::f32x4_abs: simd_v128_unop_softfloat(&_psizam_f32x4_abs); break;
-         case simd_sub::f32x4_neg: simd_v128_unop_softfloat(&_psizam_f32x4_neg); break;
-         case simd_sub::f32x4_sqrt: simd_v128_unop_softfloat(&_psizam_f32x4_sqrt); break;
-         case simd_sub::f32x4_add: simd_v128_binop_softfloat(&_psizam_f32x4_add); break;
-         case simd_sub::f32x4_sub: simd_v128_binop_softfloat(&_psizam_f32x4_sub); break;
-         case simd_sub::f32x4_mul: simd_v128_binop_softfloat(&_psizam_f32x4_mul); break;
-         case simd_sub::f32x4_div: simd_v128_binop_softfloat(&_psizam_f32x4_div); break;
-         case simd_sub::f32x4_min: simd_v128_binop_softfloat(&_psizam_f32x4_min); break;
-         case simd_sub::f32x4_max: simd_v128_binop_softfloat(&_psizam_f32x4_max); break;
-         case simd_sub::f32x4_pmin: simd_v128_binop_softfloat(&_psizam_f32x4_pmin); break;
-         case simd_sub::f32x4_pmax: simd_v128_binop_softfloat(&_psizam_f32x4_pmax); break;
+         case simd_sub::f32x4_ceil: simd_v128_unop_softfloat(&_psizam_f32x4_ceil, reloc_symbol::simd_f32x4_ceil); break;
+         case simd_sub::f32x4_floor: simd_v128_unop_softfloat(&_psizam_f32x4_floor, reloc_symbol::simd_f32x4_floor); break;
+         case simd_sub::f32x4_trunc: simd_v128_unop_softfloat(&_psizam_f32x4_trunc, reloc_symbol::simd_f32x4_trunc); break;
+         case simd_sub::f32x4_nearest: simd_v128_unop_softfloat(&_psizam_f32x4_nearest, reloc_symbol::simd_f32x4_nearest); break;
+         case simd_sub::f32x4_abs: simd_v128_unop_softfloat(&_psizam_f32x4_abs, reloc_symbol::simd_f32x4_abs); break;
+         case simd_sub::f32x4_neg: simd_v128_unop_softfloat(&_psizam_f32x4_neg, reloc_symbol::simd_f32x4_neg); break;
+         case simd_sub::f32x4_sqrt: simd_v128_unop_softfloat(&_psizam_f32x4_sqrt, reloc_symbol::simd_f32x4_sqrt); break;
+         case simd_sub::f32x4_add: simd_v128_binop_softfloat(&_psizam_f32x4_add, reloc_symbol::simd_f32x4_add); break;
+         case simd_sub::f32x4_sub: simd_v128_binop_softfloat(&_psizam_f32x4_sub, reloc_symbol::simd_f32x4_sub); break;
+         case simd_sub::f32x4_mul: simd_v128_binop_softfloat(&_psizam_f32x4_mul, reloc_symbol::simd_f32x4_mul); break;
+         case simd_sub::f32x4_div: simd_v128_binop_softfloat(&_psizam_f32x4_div, reloc_symbol::simd_f32x4_div); break;
+         case simd_sub::f32x4_min: simd_v128_binop_softfloat(&_psizam_f32x4_min, reloc_symbol::simd_f32x4_min); break;
+         case simd_sub::f32x4_max: simd_v128_binop_softfloat(&_psizam_f32x4_max, reloc_symbol::simd_f32x4_max); break;
+         case simd_sub::f32x4_pmin: simd_v128_binop_softfloat(&_psizam_f32x4_pmin, reloc_symbol::simd_f32x4_pmin); break;
+         case simd_sub::f32x4_pmax: simd_v128_binop_softfloat(&_psizam_f32x4_pmax, reloc_symbol::simd_f32x4_pmax); break;
 
          // ── f64x2 arithmetic (softfloat) ──
-         case simd_sub::f64x2_ceil: simd_v128_unop_softfloat(&_psizam_f64x2_ceil); break;
-         case simd_sub::f64x2_floor: simd_v128_unop_softfloat(&_psizam_f64x2_floor); break;
-         case simd_sub::f64x2_trunc: simd_v128_unop_softfloat(&_psizam_f64x2_trunc); break;
-         case simd_sub::f64x2_nearest: simd_v128_unop_softfloat(&_psizam_f64x2_nearest); break;
-         case simd_sub::f64x2_abs: simd_v128_unop_softfloat(&_psizam_f64x2_abs); break;
-         case simd_sub::f64x2_neg: simd_v128_unop_softfloat(&_psizam_f64x2_neg); break;
-         case simd_sub::f64x2_sqrt: simd_v128_unop_softfloat(&_psizam_f64x2_sqrt); break;
-         case simd_sub::f64x2_add: simd_v128_binop_softfloat(&_psizam_f64x2_add); break;
-         case simd_sub::f64x2_sub: simd_v128_binop_softfloat(&_psizam_f64x2_sub); break;
-         case simd_sub::f64x2_mul: simd_v128_binop_softfloat(&_psizam_f64x2_mul); break;
-         case simd_sub::f64x2_div: simd_v128_binop_softfloat(&_psizam_f64x2_div); break;
-         case simd_sub::f64x2_min: simd_v128_binop_softfloat(&_psizam_f64x2_min); break;
-         case simd_sub::f64x2_max: simd_v128_binop_softfloat(&_psizam_f64x2_max); break;
-         case simd_sub::f64x2_pmin: simd_v128_binop_softfloat(&_psizam_f64x2_pmin); break;
-         case simd_sub::f64x2_pmax: simd_v128_binop_softfloat(&_psizam_f64x2_pmax); break;
+         case simd_sub::f64x2_ceil: simd_v128_unop_softfloat(&_psizam_f64x2_ceil, reloc_symbol::simd_f64x2_ceil); break;
+         case simd_sub::f64x2_floor: simd_v128_unop_softfloat(&_psizam_f64x2_floor, reloc_symbol::simd_f64x2_floor); break;
+         case simd_sub::f64x2_trunc: simd_v128_unop_softfloat(&_psizam_f64x2_trunc, reloc_symbol::simd_f64x2_trunc); break;
+         case simd_sub::f64x2_nearest: simd_v128_unop_softfloat(&_psizam_f64x2_nearest, reloc_symbol::simd_f64x2_nearest); break;
+         case simd_sub::f64x2_abs: simd_v128_unop_softfloat(&_psizam_f64x2_abs, reloc_symbol::simd_f64x2_abs); break;
+         case simd_sub::f64x2_neg: simd_v128_unop_softfloat(&_psizam_f64x2_neg, reloc_symbol::simd_f64x2_neg); break;
+         case simd_sub::f64x2_sqrt: simd_v128_unop_softfloat(&_psizam_f64x2_sqrt, reloc_symbol::simd_f64x2_sqrt); break;
+         case simd_sub::f64x2_add: simd_v128_binop_softfloat(&_psizam_f64x2_add, reloc_symbol::simd_f64x2_add); break;
+         case simd_sub::f64x2_sub: simd_v128_binop_softfloat(&_psizam_f64x2_sub, reloc_symbol::simd_f64x2_sub); break;
+         case simd_sub::f64x2_mul: simd_v128_binop_softfloat(&_psizam_f64x2_mul, reloc_symbol::simd_f64x2_mul); break;
+         case simd_sub::f64x2_div: simd_v128_binop_softfloat(&_psizam_f64x2_div, reloc_symbol::simd_f64x2_div); break;
+         case simd_sub::f64x2_min: simd_v128_binop_softfloat(&_psizam_f64x2_min, reloc_symbol::simd_f64x2_min); break;
+         case simd_sub::f64x2_max: simd_v128_binop_softfloat(&_psizam_f64x2_max, reloc_symbol::simd_f64x2_max); break;
+         case simd_sub::f64x2_pmin: simd_v128_binop_softfloat(&_psizam_f64x2_pmin, reloc_symbol::simd_f64x2_pmin); break;
+         case simd_sub::f64x2_pmax: simd_v128_binop_softfloat(&_psizam_f64x2_pmax, reloc_symbol::simd_f64x2_pmax); break;
 
          // ── Conversions (softfloat) ──
-         case simd_sub::i32x4_trunc_sat_f32x4_s: simd_v128_unop_softfloat(&_psizam_i32x4_trunc_sat_f32x4_s); break;
-         case simd_sub::i32x4_trunc_sat_f32x4_u: simd_v128_unop_softfloat(&_psizam_i32x4_trunc_sat_f32x4_u); break;
-         case simd_sub::f32x4_convert_i32x4_s: simd_v128_unop_softfloat(&_psizam_f32x4_convert_i32x4_s); break;
-         case simd_sub::f32x4_convert_i32x4_u: simd_v128_unop_softfloat(&_psizam_f32x4_convert_i32x4_u); break;
-         case simd_sub::i32x4_trunc_sat_f64x2_s_zero: simd_v128_unop_softfloat(&_psizam_i32x4_trunc_sat_f64x2_s_zero); break;
-         case simd_sub::i32x4_trunc_sat_f64x2_u_zero: simd_v128_unop_softfloat(&_psizam_i32x4_trunc_sat_f64x2_u_zero); break;
-         case simd_sub::f64x2_convert_low_i32x4_s: simd_v128_unop_softfloat(&_psizam_f64x2_convert_low_i32x4_s); break;
-         case simd_sub::f64x2_convert_low_i32x4_u: simd_v128_unop_softfloat(&_psizam_f64x2_convert_low_i32x4_u); break;
-         case simd_sub::f32x4_demote_f64x2_zero: simd_v128_unop_softfloat(&_psizam_f32x4_demote_f64x2_zero); break;
-         case simd_sub::f64x2_promote_low_f32x4: simd_v128_unop_softfloat(&_psizam_f64x2_promote_low_f32x4); break;
+         case simd_sub::i32x4_trunc_sat_f32x4_s: simd_v128_unop_softfloat(&_psizam_i32x4_trunc_sat_f32x4_s, reloc_symbol::simd_i32x4_trunc_sat_f32x4_s); break;
+         case simd_sub::i32x4_trunc_sat_f32x4_u: simd_v128_unop_softfloat(&_psizam_i32x4_trunc_sat_f32x4_u, reloc_symbol::simd_i32x4_trunc_sat_f32x4_u); break;
+         case simd_sub::f32x4_convert_i32x4_s: simd_v128_unop_softfloat(&_psizam_f32x4_convert_i32x4_s, reloc_symbol::simd_f32x4_convert_i32x4_s); break;
+         case simd_sub::f32x4_convert_i32x4_u: simd_v128_unop_softfloat(&_psizam_f32x4_convert_i32x4_u, reloc_symbol::simd_f32x4_convert_i32x4_u); break;
+         case simd_sub::i32x4_trunc_sat_f64x2_s_zero: simd_v128_unop_softfloat(&_psizam_i32x4_trunc_sat_f64x2_s_zero, reloc_symbol::simd_i32x4_trunc_sat_f64x2_s_zero); break;
+         case simd_sub::i32x4_trunc_sat_f64x2_u_zero: simd_v128_unop_softfloat(&_psizam_i32x4_trunc_sat_f64x2_u_zero, reloc_symbol::simd_i32x4_trunc_sat_f64x2_u_zero); break;
+         case simd_sub::f64x2_convert_low_i32x4_s: simd_v128_unop_softfloat(&_psizam_f64x2_convert_low_i32x4_s, reloc_symbol::simd_f64x2_convert_low_i32x4_s); break;
+         case simd_sub::f64x2_convert_low_i32x4_u: simd_v128_unop_softfloat(&_psizam_f64x2_convert_low_i32x4_u, reloc_symbol::simd_f64x2_convert_low_i32x4_u); break;
+         case simd_sub::f32x4_demote_f64x2_zero: simd_v128_unop_softfloat(&_psizam_f32x4_demote_f64x2_zero, reloc_symbol::simd_f32x4_demote_f64x2_zero); break;
+         case simd_sub::f64x2_promote_low_f32x4: simd_v128_unop_softfloat(&_psizam_f64x2_promote_low_f32x4, reloc_symbol::simd_f64x2_promote_low_f32x4); break;
 
          // Relaxed SIMD
-         case simd_sub::f32x4_relaxed_madd: simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_madd); break;
-         case simd_sub::f32x4_relaxed_nmadd: simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_nmadd); break;
-         case simd_sub::f64x2_relaxed_madd: simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_madd); break;
-         case simd_sub::f64x2_relaxed_nmadd: simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_nmadd); break;
-         case simd_sub::i16x8_relaxed_dot_i8x16_i7x16_s: simd_v128_binop_softfloat(&_psizam_i16x8_relaxed_dot_i8x16_i7x16_s); break;
-         case simd_sub::i32x4_relaxed_dot_i8x16_i7x16_add_s: simd_v128_ternop_softfloat(&_psizam_i32x4_relaxed_dot_i8x16_i7x16_add_s); break;
+         case simd_sub::f32x4_relaxed_madd: simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_madd, reloc_symbol::simd_f32x4_relaxed_madd); break;
+         case simd_sub::f32x4_relaxed_nmadd: simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_nmadd, reloc_symbol::simd_f32x4_relaxed_nmadd); break;
+         case simd_sub::f64x2_relaxed_madd: simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_madd, reloc_symbol::simd_f64x2_relaxed_madd); break;
+         case simd_sub::f64x2_relaxed_nmadd: simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_nmadd, reloc_symbol::simd_f64x2_relaxed_nmadd); break;
+         case simd_sub::i16x8_relaxed_dot_i8x16_i7x16_s: simd_v128_binop_softfloat(&_psizam_i16x8_relaxed_dot_i8x16_i7x16_s, reloc_symbol::simd_i16x8_relaxed_dot_i8x16_i7x16_s); break;
+         case simd_sub::i32x4_relaxed_dot_i8x16_i7x16_add_s: simd_v128_ternop_softfloat(&_psizam_i32x4_relaxed_dot_i8x16_i7x16_add_s, reloc_symbol::simd_i32x4_relaxed_dot_i8x16_i7x16_add_s); break;
 
          default:
             break;
@@ -7076,6 +7082,7 @@ namespace psizam::detail {
             this->emit_mov(rsp, rax);
             this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
             this->emit_push_raw(rax);
+            this->emit_push_raw(rax); // preserve 16-byte call alignment
             this->emit_bytes(0x48, 0xb8);
             this->emit_operand_ptr(reinterpret_cast<const void*>(&__psizam_resolve_indirect));
             this->emit_bytes(0xff, 0xd0);

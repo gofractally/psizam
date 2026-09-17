@@ -28,10 +28,69 @@
 
 namespace psizam::detail {
 
+// Native float-to-integer conversion helpers, shared with the PZAM loader.
+inline uint64_t checked_trunc_i32_s_f32(uint64_t bits) {
+   float f; std::memcpy(&f, &bits, sizeof(f));
+   if (std::isnan(f) || f >= 2147483648.0f || f < -2147483648.0f)
+      signal_throw<wasm_interpreter_exception>("floating point error");
+   return static_cast<uint64_t>(static_cast<uint32_t>(static_cast<int32_t>(f)));
+}
+inline uint64_t checked_trunc_i32_u_f32(uint64_t bits) {
+   float f; std::memcpy(&f, &bits, sizeof(f));
+   if (std::isnan(f) || f >= 4294967296.0f || f <= -1.0f)
+      signal_throw<wasm_interpreter_exception>("floating point error");
+   return static_cast<uint64_t>(static_cast<uint32_t>(f));
+}
+inline uint64_t checked_trunc_i32_s_f64(uint64_t bits) {
+   double f; std::memcpy(&f, &bits, sizeof(f));
+   if (std::isnan(f) || f >= 2147483648.0 || f <= -2147483649.0)
+      signal_throw<wasm_interpreter_exception>("floating point error");
+   return static_cast<uint64_t>(static_cast<uint32_t>(static_cast<int32_t>(f)));
+}
+inline uint64_t checked_trunc_i32_u_f64(uint64_t bits) {
+   double f; std::memcpy(&f, &bits, sizeof(f));
+   if (std::isnan(f) || f >= 4294967296.0 || f <= -1.0)
+      signal_throw<wasm_interpreter_exception>("floating point error");
+   return static_cast<uint64_t>(static_cast<uint32_t>(f));
+}
+inline uint64_t checked_trunc_i64_s_f32(uint64_t bits) {
+   float f; std::memcpy(&f, &bits, sizeof(f));
+   if (std::isnan(f) || f >= 9223372036854775808.0f || f < -9223372036854775808.0f)
+      signal_throw<wasm_interpreter_exception>("floating point error");
+   return static_cast<uint64_t>(static_cast<int64_t>(f));
+}
+inline uint64_t checked_trunc_i64_u_f32(uint64_t bits) {
+   float f; std::memcpy(&f, &bits, sizeof(f));
+   if (std::isnan(f) || f >= 18446744073709551616.0f || f <= -1.0f)
+      signal_throw<wasm_interpreter_exception>("floating point error");
+   return static_cast<uint64_t>(f);
+}
+inline uint64_t checked_trunc_i64_s_f64(uint64_t bits) {
+   double f; std::memcpy(&f, &bits, sizeof(f));
+   if (std::isnan(f) || f >= 9223372036854775808.0 || f < -9223372036854775808.0)
+      signal_throw<wasm_interpreter_exception>("floating point error");
+   return static_cast<uint64_t>(static_cast<int64_t>(f));
+}
+inline uint64_t checked_trunc_i64_u_f64(uint64_t bits) {
+   double f; std::memcpy(&f, &bits, sizeof(f));
+   if (std::isnan(f) || f >= 18446744073709551616.0 || f <= -1.0)
+      signal_throw<wasm_interpreter_exception>("floating point error");
+   return static_cast<uint64_t>(f);
+}
+
 // ── Host call + memory size ──────────────────────────────────────────
 
-// Host call with fast-trampoline dispatch. .eh_frame is registered for
-// JIT code, so C++ exceptions propagate naturally through JIT frames.
+// Zero-copy host dispatch with a native C++ exception boundary. The generated
+// caller passes its existing argument buffer and the selected trampoline.
+inline native_value invoke_host_trampoline(void* host, native_value* args,
+                                           char* memory, host_trampoline_t trampoline) {
+   native_value result;
+   longjmp_on_exception([&]() { result = trampoline(host, args, memory); });
+   return result;
+}
+
+// Catch host exceptions before crossing generated frames. Their unwind
+// descriptions do not preserve every callee-saved register.
 // Args are already in forward order (packed by the JIT stub).
 // remaining_stack is synced to context for recursive host→WASM calls.
 inline native_value call_host_function(void* ctx, native_value* args,
@@ -41,17 +100,18 @@ inline native_value call_host_function(void* ctx, native_value* args,
    context->_remaining_call_depth = remaining_stack;
 
    native_value result;
-   if (context->_host_trampoline_ptrs) {
-      auto trampoline = context->_host_trampoline_ptrs[idx];
-      if (trampoline) {
-         result = trampoline(context->get_host_ptr(), args, context->linear_memory());
-         context->_remaining_call_depth = saved;
-         return result;
+   longjmp_on_exception([&]() {
+      if (context->_host_trampoline_ptrs) {
+         auto trampoline = context->_host_trampoline_ptrs[idx];
+         if (trampoline) {
+            result = trampoline(context->get_host_ptr(), args, context->linear_memory());
+            return;
+         }
       }
-   }
-   uint32_t mapped_index = context->_mod->import_functions[idx];
-   result = context->_table->call(context->get_host_ptr(), mapped_index, args,
-                                  context->linear_memory());
+      uint32_t mapped_index = context->_mod->import_functions[idx];
+      result = context->_table->call(context->get_host_ptr(), mapped_index, args,
+                                     context->linear_memory());
+   });
    context->_remaining_call_depth = saved;
    return result;
 }

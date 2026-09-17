@@ -203,9 +203,12 @@ namespace psizam {
          }
          if (!cs)
             throw std::runtime_error("pzam_instance: no code section for this architecture");
+         if (!pzam_page_layout_compatible(*cs))
+            throw std::runtime_error(pzam_page_layout_error);
 
          // Restore module from metadata
          _mod = restore_module(pzam.metadata);
+         _mod.gas_metering = cs->instrumentation.gas_metering != 0;
          _mod.allocator.use_default_memory();
 
          if (cs->functions.size() != _mod.code.size())
@@ -218,7 +221,7 @@ namespace psizam {
          // Build symbol table for relocation
          void* symbol_table[static_cast<size_t>(reloc_symbol::NUM_SYMBOLS)];
 #if defined(__aarch64__)
-         std::memset(symbol_table, 0, sizeof(symbol_table));
+         build_symbol_table<>(symbol_table);
          using jit_cg = detail::jit_codegen_a64;
          symbol_table[static_cast<uint32_t>(reloc_symbol::call_host_function)]     = reinterpret_cast<void*>(&jit_cg::call_host_function);
          symbol_table[static_cast<uint32_t>(reloc_symbol::current_memory)]         = reinterpret_cast<void*>(&jit_cg::current_memory);

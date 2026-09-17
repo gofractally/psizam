@@ -74,6 +74,8 @@ namespace psizam::detail {
 #define MAX_ELEMENTS(name, default_)\
    PARSER_OPTION(name, default_, std::uint32_t)
 
+   PARSER_OPTION(gas_metering, true, bool)
+
    MAX_ELEMENTS(max_table_elements, 0xFFFFFFFFu)
    MAX_ELEMENTS(max_section_elements, 0xFFFFFFFFu)
 
@@ -390,6 +392,7 @@ namespace psizam::detail {
 
       void parse_module(wasm_code_ptr& code_ptr, size_t sz, module& mod, DebugInfo& debug) {
          _mod = &mod;
+         mod.gas_metering = get_gas_metering(_options);
          PSIZAM_ASSERT(parse_magic(code_ptr) == constants::magic, wasm_parse_exception, "magic number did not match");
          PSIZAM_ASSERT(parse_version(code_ptr) == constants::version, wasm_parse_exception,
                        "version number did not match");

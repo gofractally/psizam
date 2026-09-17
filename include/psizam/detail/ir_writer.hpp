@@ -246,8 +246,8 @@ namespace psizam::detail {
 
       // Parser hook (called by write_code_out before any body is emitted).
       // Stashed and applied inside ensure_codegen() once _codegen is
-      // constructed — overrides the codegen's default and any AOT
-      // compile_result setting.
+      // constructed for fresh JIT code. AOT uses the explicit compile_result
+      // policy so emitted code agrees with the serialized section metadata.
       void set_fp_mode(fp_mode m) noexcept { _requested_fp = m; }
       // Branch/label types — dummy values since IR tracks control flow directly.
       // The parser stores and passes these between emit_if/emit_else/emit_end/emit_br
@@ -454,22 +454,15 @@ namespace psizam::detail {
             _opt_scratch_alloc.use_default_memory();
 #endif
             _codegen.emplace(_allocator, _mod, _codegen_scratch, _enable_backtrace, _stack_limit_is_bytes);
-            // Apply caller-requested fp_mode BEFORE emitting entry/handlers.
-            // Default in the codegen is fp_mode::softfloat, which bakes raw
-            // (unrelocated) pointers to _psizam_f32_* / _psizam_f64_* helpers
-            // into every FP op — fine for in-process JIT, fatal for AOT where
-            // those addresses are stale at load time. AOT callers (pzam-compile)
-            // pass softfloat=false via pzam_compile_result so we emit native FP
-            // instructions instead.
+            // AOT code must match the FP policy recorded in its section.
+            // The parser also forwards a build-dependent default; it must not
+            // override an explicit compilation result's policy.
             if (_compile_result) {
                _codegen->set_fp_mode(_compile_result->softfloat
                                      ? fp_mode::softfloat
                                      : fp_mode::fast);
             }
-            // Explicit caller override (from parser's set_fp_mode path)
-            // wins over the compile-result default so the fuzzer can
-            // pin a specific mode regardless of the build-time setting.
-            if (_requested_fp) {
+            else if (_requested_fp) {
                _codegen->set_fp_mode(*_requested_fp);
             }
             _codegen->set_mem_mode(_mem_mode);
@@ -493,7 +486,7 @@ namespace psizam::detail {
                jit_scratch_allocator opt_scratch(_opt_scratch_alloc);
                jit_optimizer::optimize(*_func, opt_scratch);
                jit_regalloc::compute_live_intervals(*_func, opt_scratch);
-               jit_regalloc::allocate_registers(*_func);
+               jit_regalloc::allocate_registers<std::is_same_v<CodeGen, jit_codegen_a64>>(*_func);
                _codegen->compile_function(*_func, body);
             }
             _ir_alloc._offset = _post_array_offset;
@@ -3603,7 +3596,7 @@ namespace psizam::detail {
                   jit_scratch_allocator scratch(ws.opt_scratch_alloc);
                   jit_optimizer::optimize(func, scratch);
                   jit_regalloc::compute_live_intervals(func, scratch);
-                  jit_regalloc::allocate_registers(func);
+                  jit_regalloc::allocate_registers<std::is_same_v<CodeGen, jit_codegen_a64>>(func);
                }
                ws.codegen->compile_function(func, _mod.code[func_idx]);
 

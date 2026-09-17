@@ -34,7 +34,7 @@ struct compile_options : default_options {
 };
 
 static void usage(const char* prog) {
-   std::cerr << "Usage: " << prog << " --target=x86_64|aarch64 [--backend=jit2|llvm] [--opt-level=0|1|2|3] [--softfloat] [--backtrace] [-jN] [--dump-layout=FILE] [-o output.pzam] input.wasm\n";
+   std::cerr << "Usage: " << prog << " --target=x86_64|aarch64 [--backend=jit2|llvm] [--opt-level=0|1|2|3] [--softfloat] [--backtrace] [--gas-metering=on|off] [-jN] [--dump-layout=FILE] [-o output.pzam] input.wasm\n";
 }
 
 static std::vector<char> write_pzam(
@@ -68,7 +68,7 @@ static bool compile_wasm(
       const std::string& target_triple = {},
       int opt_level = 2,
       std::uint32_t compile_threads = 0,
-      const std::string& dump_layout = {}) {
+      const std::string& dump_layout = {}, bool gas_metering = true) {
 
    module mod;
    mod.allocator.use_default_memory();
@@ -82,6 +82,7 @@ static bool compile_wasm(
 
    compile_options opts;
    opts.compile_threads = compile_threads;
+   opts.gas_metering = gas_metering;
 
    using parser_t = binary_parser<IrWriter, compile_options, null_debug_info>;
    parser_t parser(mod.allocator, opts, use_backtrace, false);
@@ -173,6 +174,7 @@ int pzam_compile_main(int argc, char** argv) {
    std::string input_file;
    bool use_softfloat = false;
    bool use_backtrace = false;
+   bool gas_metering = true;
    int opt_level = 2;
    std::uint32_t compile_threads = std::thread::hardware_concurrency();
    if (compile_threads == 0) compile_threads = 1;
@@ -197,6 +199,10 @@ int pzam_compile_main(int argc, char** argv) {
          }
       } else if (arg.starts_with("-j")) {
          compile_threads = static_cast<std::uint32_t>(std::stoul(arg.substr(2)));
+      } else if (arg == "--gas-metering=off") {
+         gas_metering = false;
+      } else if (arg == "--gas-metering=on") {
+         gas_metering = true;
       } else if (arg == "--softfloat") {
          use_softfloat = true;
       } else if (arg == "--backtrace") {
@@ -257,10 +263,10 @@ int pzam_compile_main(int argc, char** argv) {
       // jit2 backend ignores compile_threads; pass 0 to keep it serial.
       if (target_arch == pzam_arch::x86_64) {
          ok = compile_wasm<ir_writer_x64>(wasm_bytes, target_arch, output_file,
-                                           false, use_backtrace, {}, 2, 0, dump_layout);
+                                           false, use_backtrace, {}, 2, 0, dump_layout, gas_metering);
       } else {
          ok = compile_wasm<ir_writer_a64>(wasm_bytes, target_arch, output_file,
-                                           false, use_backtrace, {}, 2, 0, dump_layout);
+                                           false, use_backtrace, {}, 2, 0, dump_layout, gas_metering);
       }
    } else if (backend_str == "llvm") {
 #ifdef PSIZAM_ENABLE_LLVM_BACKEND
@@ -268,7 +274,7 @@ int pzam_compile_main(int argc, char** argv) {
                                              use_softfloat, use_backtrace,
                                              target_triple, opt_level,
                                              compile_threads,
-                                             dump_layout);
+                                             dump_layout, gas_metering);
 #else
       std::cerr << "Error: LLVM backend not available (build with -DPSIZAM_ENABLE_LLVM=ON)\n";
       return 1;

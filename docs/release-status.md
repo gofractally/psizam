@@ -76,6 +76,15 @@ See [aot-spec-tests.md](aot-spec-tests.md) for commands, limits and evidence.
 
 ## Release gates still open
 
+The benchmark-triggered JIT1/JIT2 failures are repaired. The process-isolated
+matrix now passes the floating-point, SIMD and real Clang compilation checks
+on native ARM64 and x86-64 under Rosetta. Investigation also repaired x86-64
+register allocation, wrapping address arithmetic, host exceptions and normal
+return, plus an LLVM mixed-vector indirect-call defect exposed by the new tests.
+See [jit-correctness.md](jit-correctness.md) for the repairs and measured results,
+and [validation.md](validation.md) for reproduction. Native Linux verification,
+the shared multi-memory parser failure and the release gates below remain open.
+
 1. Extend the successful functional bootstrap with broader compiler acceptance
    tests and a normalized, repeated build to establish a byte-identical fixed
    point. Pin and distribute
@@ -83,13 +92,16 @@ See [aot-spec-tests.md](aot-spec-tests.md) for commands, limits and evidence.
    real, verified artifacts.
 2. Finish the spec harness cleanup, generate into the build tree, and define
    supported proposals/backends. Unsupported modules must be rejected
-   consistently. Add SIMD coverage to the platform matrix; recheck JIT2
-   compiler-sized PZAM execution and the
-   LLVM high-instance-count stress test under explicit budgets.
+   consistently. Keep scalar and SIMD coverage in the platform matrix, extend
+   the successful JIT2 compiler acceptance jobs, and recheck the LLVM
+   high-instance-count stress test under explicit budgets.
 3. Strengthen compiler identity beyond the format version and architecture so
    cache acceptance reflects source/options/ABI compatibility. The public
    `pzam_compile()` dispatch and CLI tier labels are now corrected; see
    `pzam-compile-api.md`. Historical artifacts were not rewritten.
+   JIT2 loaders now reject mismatched OS page layouts. Relocatable prefix offsets
+   or explicit target page-layout selection are still needed for portability
+   between 4 KiB and 16 KiB-page environments.
    Separately, `runtime::load_cached()` creates a loaded PZAM module, but
    `runtime::instantiate()` still calls the ordinary Wasm factory with an empty
    `wasm_copy`. A direct regression attempt raises `guarded ptr out of bounds`.

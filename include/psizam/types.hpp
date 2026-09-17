@@ -341,6 +341,8 @@ namespace psizam {
    };
 
    struct module {
+      // Compile-time choice: false omits CPU gas checks, preserving memory/stack checks.
+      bool gas_metering = true;
       growable_allocator              allocator;
       uint32_t                        start     = std::numeric_limits<uint32_t>::max();
       std::vector<func_type>          types;

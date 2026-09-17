@@ -1419,7 +1419,8 @@ namespace psizam::detail {
          const uint32_t imported = _mod->get_imported_functions_size();
          if (index >= imported) {
             const auto& fb = _mod->code[index - imported];
-            gas_charge(static_cast<int64_t>(fb.wasm_body_bytes) + fb.prologue_gas_extra);
+            if (_mod->gas_metering)
+               gas_charge(static_cast<int64_t>(fb.wasm_body_bytes) + fb.prologue_gas_extra);
          }
          // TODO validate index is valid
          if (index < _mod->get_imported_functions_size()) {
@@ -1520,7 +1521,8 @@ namespace psizam::detail {
          {
             const uint32_t imported = _mod->get_imported_functions_size();
             const auto& fb = _mod->code[new_index - imported];
-            gas_charge(static_cast<int64_t>(fb.wasm_body_bytes) + fb.prologue_gas_extra);
+            if (_mod->gas_metering)
+               gas_charge(static_cast<int64_t>(fb.wasm_body_bytes) + fb.prologue_gas_extra);
          }
          const func_type& new_ft = _mod->get_function_type(new_index);
          uint32_t new_param_count = new_ft.param_types.size();
@@ -1821,6 +1823,7 @@ namespace psizam::detail {
             const uint32_t imported = _mod->get_imported_functions_size();
             if (func_index >= imported) {
                const auto& fb = _mod->code[func_index - imported];
+               if (_mod->gas_metering)
                gas_charge(static_cast<int64_t>(fb.wasm_body_bytes) + fb.prologue_gas_extra);
             }
          }

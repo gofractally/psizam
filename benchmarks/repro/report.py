@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Report one complete, current-source CPU-resource matrix; never merge batches."""
+import argparse
+import csv
+import json
+import math
+import statistics as stats
+from collections import defaultdict
+from pathlib import Path
+
+LABELS={'jit1':'JIT1','jit2':'JIT2','llvm-jit':'LLVM JIT O2','jit2-pzam':'JIT2 PZAM',
+        'llvm-o2-pzam':'LLVM O2 PZAM','cranelift-jit':'Cranelift fresh','cranelift-aot':'Cranelift AOT'}
+def gm(values): return math.exp(stats.mean(math.log(v) for v in values))
+
+
+def summarize(data):
+    if data.get('schema') != 1 or not data.get('complete'):
+        raise ValueError('Report requires a completed CPU-resource matrix from one source state')
+    if not data['enforcement'] or any(not r['valid'] for r in data['enforcement']+data['validation']+data['measurements']):
+        raise ValueError('Failed or missing correctness/enforcement gate')
+    grouped=defaultdict(list)
+    for row in data['measurements']:
+        if not row['warmup'] and row['phase']=='performance':
+            grouped[(row['workload'],row['mode'],row['threads'],row['profile'])].append(row)
+    cells={}
+    for name in data['workloads']:
+        cells[name]={}
+        for variant in data['matrix']:
+            mode,t,profile=variant.split('/');threads=int(t[1:])
+            rows=grouped[(name,mode,threads,profile)]
+            if len(rows)!=data['samples']: raise ValueError('Missing samples: '+name+'/'+variant)
+            values=[r['execution_s'] for r in rows]
+            if min(values)<=0: raise ValueError('Nonpositive timing')
+            cells[name][variant]={'median_s':stats.median(values),'min_s':min(values),'max_s':max(values),
+                                  'wall_s':stats.median(r['wall_s'] for r in rows),'samples':len(rows)}
+        for variant,cell in cells[name].items():
+            base=variant.rsplit('/',1)[0]+'/none'
+            cell['relative_time']=cell['median_s']/cells[name][base]['median_s']
+    profiles=list(dict.fromkeys(v.rsplit('/',1)[0] for v in data['matrix']))
+    # Show one runtime result per engine, chosen consistently across workloads
+    # and limit settings. Keep every compiler variant in the raw summary.
+    runtime_by_engine={}
+    for variant in profiles:
+        mode,workers=variant.split('/j')
+        selected=runtime_by_engine.get(mode)
+        if selected is None or int(workers)<int(selected.split('/j')[1]):
+            runtime_by_engine[mode]=variant
+    overhead={v:{p:gm([cells[n][v+'/'+p]['relative_time'] for n in data['workloads']])
+                 for p in data['profiles']} for v in profiles}
+    return {'config':data['config'],'source_manifest_sha256':data['source_manifest_sha256'],
+            'workloads':data['workloads'],'samples':data['samples'],'profiles':profiles,
+            'runtime_profiles':list(runtime_by_engine.values()),
+            'cells':cells,'relative_time':overhead,'gas_budget':data['gas_budget'],'timeout_ms':data['timeout_ms'],
+            'enforcement_checks':len(data['enforcement']),'validation_checks':len(data['validation']),
+            'compilation':data['compilation'],'outer_watchdog_s':data['outer_watchdog_s']}
+
+
+def main():
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--work',type=Path,required=True);p.add_argument('--out',type=Path,required=True)
+    a=p.parse_args();data=json.loads((a.work/'resources.json').read_text());s=summarize(data)
+    a.out.mkdir(parents=True,exist_ok=True)
+    (a.out/'summary.json').write_text(json.dumps(s,indent=2)+'\n')
+    rows=data['measurements'];fields=sorted(set().union(*(r.keys() for r in rows)))
+    with (a.out/'samples.csv').open('w') as f:
+        writer=csv.DictWriter(f,fieldnames=fields);writer.writeheader();writer.writerows(rows)
+    from visual_report import generate
+    generate(s,a.out)
+
+if __name__=='__main__':main()
