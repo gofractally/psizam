@@ -462,3 +462,26 @@ target_link_libraries(psizam_signal_tests PRIVATE psizam psizam-exec Catch2::Cat
 target_compile_definitions(psizam_signal_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS)
 add_test(NAME psizam_signal_tests COMMAND psizam_signal_tests)
 set_tests_properties(psizam_signal_tests PROPERTIES TIMEOUT 30)
+
+# Focused service-entry / import regressions, also usable as a standalone benchmark.
+find_program(PSIZAM_CALL_WAT2WASM wat2wasm REQUIRED)
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/call-boundary.wasm"
+   COMMAND "${PSIZAM_CALL_WAT2WASM}" "${CMAKE_CURRENT_SOURCE_DIR}/../benchmarks/call-boundary/calls.wat"
+      -o "${CMAKE_CURRENT_BINARY_DIR}/call-boundary.wasm"
+   DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../benchmarks/call-boundary/calls.wat" VERBATIM)
+add_custom_target(psizam_call_fixture DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/call-boundary.wasm")
+add_executable(psizam_call_boundary_tests ../benchmarks/call-boundary/calls.cpp)
+add_dependencies(psizam_call_boundary_tests psizam_call_fixture)
+target_link_libraries(psizam_call_boundary_tests PRIVATE psizam psizam-exec)
+set(_call_modes jit1 jit2)
+if(PSIZAM_ENABLE_LLVM)
+   target_link_libraries(psizam_call_boundary_tests PRIVATE psizam-llvm)
+   list(APPEND _call_modes llvm)
+endif()
+foreach(_mode IN LISTS _call_modes)
+   foreach(_policy none gas)
+      add_test(NAME calls.${_mode}.${_policy} COMMAND psizam_call_boundary_tests
+         ${_mode} "${CMAKE_CURRENT_BINARY_DIR}/call-boundary.wasm" ${_policy} check)
+      set_tests_properties(calls.${_mode}.${_policy} PROPERTIES LABELS "execution;quick;calls" TIMEOUT 60)
+   endforeach()
+endforeach()
