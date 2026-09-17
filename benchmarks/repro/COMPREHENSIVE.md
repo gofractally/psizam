@@ -11,6 +11,11 @@ The opening abstract interprets the results for reusable psibase services and
 distinguishes measured engine costs from hypothetical transaction-level impact.
 Its call-cost examples assume unchanged surrounding work; they do not measure
 database execution, serialization, full IPC or production tail latency.
+Deployment can use JIT2 for initial runs while LLVM AOT is prepared or loaded
+into cache, then use cached AOT for subsequent runs. The full LLVM preparation
+time need not block initial service availability. The benchmarks measure each
+tier separately; concurrent background compilation, resource contention and
+the transition to cached AOT are not timed.
 
 ## Inspect or regenerate the report
 

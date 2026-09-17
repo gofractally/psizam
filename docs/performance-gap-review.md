@@ -18,7 +18,7 @@ not x86 performance or a complete psibase transaction.
 
 | Case | Measured gap | Why it matters |
 | --- | --- | --- |
-| Compile Clang to a saved artifact, 18 workers, no limits | 64.69 s versus 2.13 s; 30.4x time. Peak RSS 7,204 versus 2,075 MiB. | The largest deployment/cache-miss disadvantage. It does not recur on every call to retained code. |
+| Compile Clang to a saved artifact, 18 workers, no limits | 64.69 s versus 2.13 s; 30.4x time. Peak RSS 7,204 versus 2,075 MiB. | The largest preparation-cost disadvantage. JIT2 can serve initial runs while AOT becomes available in cache; the full AOT time need not delay initial service availability. |
 | ARM JIT1/JIT2 vector matrix/grid workloads, no limits | About 20-23x time. Grid: JIT2 PZAM 6.05 s versus Cranelift 0.260 s. | A conspicuous code-generation limitation if services execute SIMD on these tiers. It does not describe LLVM performance. |
 | LLVM vector grid update | 1.35x time without limits; 1.37x with gas/fuel. | The largest stable execution deficit in the compute suite; relevant to repeated vector loads and arithmetic. |
 | LLVM vector matrix multiplication | 1.15x time without limits; 1.17x with gas/fuel. | A second vector kernel confirms that the grid result is not the only vector-code weakness. |
@@ -226,6 +226,14 @@ Sources: [CLI loading phases](../tools/pzam_run.cpp);
 
 ### 7. Artifact compilation: the largest cold-path gap needs attribution
 
+psizam can use JIT2 for initial runs while LLVM AOT is prepared or loaded into
+cache, then select cached AOT for subsequent runs. The LLVM preparation gap
+therefore measures time until optimized code is available and the resources
+spent preparing it; it need not be a service-startup delay. Initial requests
+still pay JIT2 preparation and execution costs. Background compilation consumes
+CPU and memory that may contend with those requests. The report measures the
+tiers separately and does not measure concurrent preparation or switchover.
+
 The 18-worker comparison already includes parallel compilation. Adding more
 workers is not a diagnosis. Some difference is the expected tradeoff of a more
 expensive optimizing compiler; there is no evidence that all 30x is avoidable.
@@ -292,7 +300,9 @@ successful focused result earns a broader run. Do not optimize to win an
 isolated chart by dropping FP semantics, gas enforcement or per-entry protection.
 For retained LLVM services, prioritize call-heavy integer execution and actual
 IPC capacity. For fast-tier SIMD users, native vector arithmetic is the clearest
-large opportunity. For deployment latency, LLVM preparation is the largest
-problem, with the least defensible attribution until phase profiling is added.
+large opportunity. For deployment, LLVM preparation is the largest resource
+and time-to-optimized-code gap, with the least defensible attribution until
+phase profiling is added. Using JIT2 for initial runs mitigates its effect on
+initial service availability.
 Keep CoreMark's roughly 4-6% gap behind these larger opportunities unless a
 profile shows the same inexpensive change benefits real service workloads.
