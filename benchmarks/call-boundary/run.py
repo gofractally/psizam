@@ -21,8 +21,11 @@ def main():
  if 'llvm-aot' in a.modes and not aot:raise RuntimeError('llvm-aot requires --aot-dir')
  root=pathlib.Path(__file__).resolve().parents[2]
  manifest={str(f.relative_to(root)):sha(f) for directory in ['include','src'] for f in (root/directory).rglob('*') if f.is_file()}
+ revision_file=root/'BENCHMARK_SOURCE_REVISION.json'
+ revision=(json.loads(revision_file.read_text())['commit'] if revision_file.exists() else
+           subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip())
  save('config.json',dict(host=platform.platform(),machine=platform.machine(),binary_sha256=sha(binary),fixture_sha256=sha(fixture),samples=a.samples,aot_sha256={k:sha(v) for k,v in aot.items()},
-      git_head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),source_sha256=manifest,
+      git_head=revision,source_sha256=manifest,
       note='C++ operator new/new[] counts exclude direct malloc, mmap and Wasmtime Rust allocations. Alternate-stack mapping reuse has separate regression tests. No build or other benchmark may run concurrently.'))
  env={k:v for k,v in os.environ.items() if not k.startswith(('PSIZAM_LLVM_','PSIZAM_DUMP_'))}
  rows=[]
