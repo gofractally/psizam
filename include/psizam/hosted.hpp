@@ -33,6 +33,7 @@
 #include <psio/structural.hpp>
 #include <psio/wit_owned.hpp>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -48,6 +49,21 @@ namespace psizam
 
 namespace detail
 {
+
+// Canonical calls have at most MAX_FLAT_PARAMS inline slots. Keep their
+// temporary values on the C++ stack, including nested service calls.
+class canonical_call_slots {
+   std::array<::psio::native_value, ::psio::MAX_FLAT_PARAMS> values_;
+   std::size_t size_ = 0;
+public:
+   std::size_t size() const { return size_; }
+   const ::psio::native_value& operator[](std::size_t i) const { return values_[i]; }
+   void push_back(::psio::native_value value) {
+      PSIZAM_ASSERT(size_ < values_.size(), wasm_interpreter_exception,
+                    "canonical call exceeds inline argument capacity");
+      values_[size_++] = value;
+   }
+};
 
 // ── is_scalar_wasm_type — can this C++ type be passed as a single WASM value?
 template <typename T>
@@ -357,7 +373,7 @@ struct host_lower_policy
 {
    Backend* be;
    Host*    host;
-   std::vector<::psio::native_value> flat_values;
+   canonical_call_slots flat_values;
 
    host_lower_policy(Backend& b, Host& h) : be(&b), host(&h) {}
 
@@ -603,7 +619,7 @@ struct void_host_lower_policy
 {
    Backend* be;
    void*    host;
-   std::vector<::psio::native_value> flat_values;
+   canonical_call_slots flat_values;
 
    void_host_lower_policy(Backend& b, void* h) : be(&b), host(h) {}
 
@@ -703,7 +719,7 @@ struct void_host_lower_policy_erased
    // Cached cabi_realloc index on `be` — resolved lazily on first
    // alloc(), reused for subsequent allocs within the same call.
    uint32_t     realloc_idx = std::numeric_limits<uint32_t>::max();
-   std::vector<::psio::native_value> flat_values;
+   canonical_call_slots flat_values;
 
    void_host_lower_policy_erased(instance_be& b, void* h) : be(&b), host(h) {}
 

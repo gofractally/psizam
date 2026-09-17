@@ -51,3 +51,23 @@ warms every cell, shuffles trials deterministically and executes serially. Run
 on an otherwise idle machine; do not compile or run another benchmark at the
 same time. To omit Wasmtime, leave its CMake path unset and pass
 `--modes jit1 jit2 llvm` to the runner.
+
+## Reflected runtime proxy
+
+`call-runtime` exercises the actual `runtime::bind` and `instance::as` scalar
+path using the composition provider and consumer fixtures. Build the existing
+`composition_provider_guest` and `composition_consumer_guest` targets in a
+normal engine test build, then run:
+
+```sh
+cmake --build build/calls --target call-runtime -j 8
+build/calls/call-runtime /path/to/engine-build/examples/composition jit1 typed
+```
+
+Repeat for `jit2` and `llvm`; `dynamic` selects WIT-driven binding. The output
+includes exact-result validation, C++ allocation counts and the observed gas
+counters. This executable compiles `runtime.cpp` with the selected LLVM feature
+as the runtime-parity test target does. Its resource settings and calling
+convention differ from the natural-signature microbenchmark; compare results
+within each experiment, not across those workloads. Keep warmup and measured
+runs separate and run serially.
