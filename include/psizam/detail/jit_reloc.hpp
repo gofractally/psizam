@@ -127,6 +127,16 @@ namespace psizam::detail {
 
       llvm_call_host_full,
 
+      #define PSIZAM_JIT1_COMMON(symbol, address) symbol,
+      #define PSIZAM_JIT1_X64(symbol, address) symbol,
+      #define PSIZAM_JIT1_A64(symbol, address) symbol,
+      #define PSIZAM_JIT1_SOFTFLOAT(symbol, address) symbol,
+      #include <psizam/detail/jit1_symbols.def>
+      #undef PSIZAM_JIT1_COMMON
+      #undef PSIZAM_JIT1_X64
+      #undef PSIZAM_JIT1_A64
+      #undef PSIZAM_JIT1_SOFTFLOAT
+
       NUM_SYMBOLS
    };
 

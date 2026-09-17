@@ -2,6 +2,8 @@
 
 #include <psizam/allocator.hpp>
 #include <psizam/config.hpp>
+#include <psizam/detail/pzam_compile_result.hpp>
+#include <unordered_map>
 #include <psizam/exceptions.hpp>
 #include <psizam/options.hpp>
 #include <psizam/detail/execution_context.hpp>
@@ -113,9 +115,10 @@ namespace psizam::detail {
 
       machine_code_writer_a64(growable_allocator& alloc, std::size_t source_bytes, module& mod,
                           bool enable_backtrace = false, bool stack_limit_is_bytes = false,
-                          uint32_t /*compile_threads*/ = 0) :
+                          uint32_t /*compile_threads*/ = 0, pzam_compile_result* result = nullptr) :
          _mod(mod), _allocator(alloc), _code_segment_base(_allocator.start_code()),
-         _enable_backtrace(enable_backtrace), _stack_limit_is_bytes(stack_limit_is_bytes) {
+         _enable_backtrace(enable_backtrace), _stack_limit_is_bytes(stack_limit_is_bytes),
+         _compile_result(result) {
 
          // Scale veneer island capacity with function count
          uint32_t num_funcs = mod.get_functions_total();
@@ -1339,7 +1342,7 @@ namespace psizam::detail {
          emit_mov_imm32(X1, table_idx); // table_idx → arg2
          emit32(0xAA1303E0); // MOV X0, X19 (ctx)
          emit_push_x(X19); emit_push_x(X20);
-         emit_mov_imm64(X8, reinterpret_cast<uint64_t>(&__psizam_table_get));
+         emit_pointer(X8, &__psizam_table_get);
          emit32(0xD63F0100); // BLR X8
          emit_pop_x(X20); emit_pop_x(X19);
          emit_push_x(X0); // push result
@@ -1351,7 +1354,7 @@ namespace psizam::detail {
          emit_mov_imm32(X1, table_idx); // table_idx → arg2
          emit32(0xAA1303E0); // MOV X0, X19 (ctx)
          emit_push_x(X19); emit_push_x(X20);
-         emit_mov_imm64(X8, reinterpret_cast<uint64_t>(&__psizam_table_set));
+         emit_pointer(X8, &__psizam_table_set);
          emit32(0xD63F0100); // BLR X8
          emit_pop_x(X20); emit_pop_x(X19);
       }
@@ -1381,7 +1384,7 @@ namespace psizam::detail {
          emit_mov_imm32(X1, table_idx); // table_idx → arg2
          emit32(0xAA1303E0); // MOV X0, X19 (ctx)
          emit_push_x(X19); emit_push_x(X20);
-         emit_mov_imm64(X8, reinterpret_cast<uint64_t>(&__psizam_table_grow));
+         emit_pointer(X8, &__psizam_table_grow);
          emit32(0xD63F0100); // BLR X8
          emit_pop_x(X20); emit_pop_x(X19);
          emit_push_x(X0); // push result
@@ -1391,7 +1394,7 @@ namespace psizam::detail {
          emit_mov_imm32(X1, table_idx); // table_idx → arg2
          emit32(0xAA1303E0); // MOV X0, X19 (ctx)
          emit_push_x(X19); emit_push_x(X20);
-         emit_mov_imm64(X8, reinterpret_cast<uint64_t>(&__psizam_table_size));
+         emit_pointer(X8, &__psizam_table_size);
          emit32(0xD63F0100); // BLR X8
          emit_pop_x(X20); emit_pop_x(X19);
          emit_push_x(X0); // push result
@@ -1404,7 +1407,7 @@ namespace psizam::detail {
          emit_mov_imm32(X1, table_idx); // table_idx → arg2
          emit32(0xAA1303E0); // MOV X0, X19 (ctx)
          emit_push_x(X19); emit_push_x(X20);
-         emit_mov_imm64(X8, reinterpret_cast<uint64_t>(&__psizam_table_fill));
+         emit_pointer(X8, &__psizam_table_fill);
          emit32(0xD63F0100); // BLR X8
          emit_pop_x(X20); emit_pop_x(X19);
       }
@@ -1529,7 +1532,7 @@ namespace psizam::detail {
          // __psizam_eh_throw does not return (longjmp or trap)
       }
       void emit_rethrow(uint32_t, uint8_t, uint32_t, uint32_t = UINT32_MAX) {
-         emit_mov_imm64(X16, reinterpret_cast<uint64_t>(&on_unreachable));
+         emit_pointer(X16, &on_unreachable);
          emit32(0xD61F0200); // BR X16
       }
       void emit_delegate(uint32_t, uint8_t, uint32_t, uint32_t = UINT32_MAX) {}
@@ -1581,7 +1584,7 @@ namespace psizam::detail {
          // C function's epilogue. This value equals SP_try (the SP at try_table entry),
          // which is exactly what we want for the dispatch path.
          emit32(0xAA0803E0); // MOV X0, X8 (jmpbuf)
-         emit_mov_imm64(X8, reinterpret_cast<uint64_t>(&__psizam_setjmp));
+         emit_pointer(X8, &__psizam_setjmp);
          emit32(0xD63F0100); // BLR X8
          // W0 = 0 (normal) or non-zero (longjmp return)
          // SP = SP_try (preserved by callee-saved convention and longjmp)
@@ -1706,7 +1709,7 @@ namespace psizam::detail {
          emit32(0x54000000 | COND_NE); // B.NE skip
          emit32(0xD503201F); // NOP sentinel
          // Null exnref → trap
-         emit_mov_imm64(X16, reinterpret_cast<uint64_t>(&on_unreachable));
+         emit_pointer(X16, &on_unreachable);
          emit32(0xD61F0200); // BR X16
          // Not null: call __psizam_eh_throw_ref(ctx, exnref_idx)
          fix_branch(not_null, code);
@@ -1951,14 +1954,16 @@ namespace psizam::detail {
       }
 
       template<auto F>
-      constexpr auto choose_fn() {
+      static constexpr auto choose_fn() {
+         // The loader also needs these adapters when saved code was compiled
+         // without PSIZAM_NATIVE_FP. Native emission still selects its own path.
          // NOTE: outer branch MUST be compile-time (if constexpr) because the
          // two branches have incompatible return types — a function pointer
          // vs. nullptr — which cannot be unified in a runtime `if`. The
          // adapt_*<F> overloads are also only defined under PSIZAM_SOFTFLOAT,
          // so the `else` path must be excluded from instantiation when
          // softfloat is compile-time off.
-         if constexpr (use_softfloat && !use_native_fp) {
+         if constexpr (use_softfloat) {
             if constexpr (std::is_same_v<decltype(F), float(*)(float)>) {
                return &adapt_f32_unop<F>;
             } else if constexpr(std::is_same_v<decltype(F), float(*)(float,float)>) {
@@ -4522,6 +4527,20 @@ namespace psizam::detail {
          }
       }
 
+      template<class T>
+      void emit_pointer(uint32_t rd, T* pointer) {
+         const auto value = reinterpret_cast<uintptr_t>(pointer);
+         if (!_compile_result) { emit_mov_imm64(rd, value); return; }
+         const auto symbol = pzam_symbol(value);
+         for (unsigned i = 0; i < 4; ++i) {
+            _compile_result->relocs.push_back({
+               static_cast<uint32_t>(code - static_cast<unsigned char*>(_code_segment_base)), symbol,
+               static_cast<reloc_type>(static_cast<unsigned>(reloc_type::aarch64_movw_uabs_g0_nc) + i)});
+            emit32((i == 0 ? 0xD2800000u : 0xF2800000u) | (i << 21) |
+                   (static_cast<uint32_t>((value >> (16 * i)) & 0xffff) << 5) | rd);
+         }
+      }
+
       // Move a 64-bit immediate into an X register
       void emit_mov_imm64(uint32_t rd, uint64_t value) {
          if (value == 0) {
@@ -4902,7 +4921,7 @@ namespace psizam::detail {
          emit32(0x9100011F); // ADD SP, X8, #0
 
          // Load handler address and call
-         emit_mov_imm64(X8, reinterpret_cast<uint64_t>(handler));
+         emit_pointer(X8, handler);
          // BLR X8
          emit32(0xD63F0100);
          return result;
@@ -5012,7 +5031,7 @@ namespace psizam::detail {
          emit32(0x2A1503E3); // MOV W3, W21 (remaining call depth)
          emit32(0xAA1303E0); // MOV X0, X19 (context)
 
-         emit_mov_imm64(X8, reinterpret_cast<uint64_t>(&call_host_function));
+         emit_pointer(X8, &call_host_function);
          emit32(0xD63F0100); // BLR X8
 
          if (buf_size > 0) {
@@ -5132,7 +5151,7 @@ namespace psizam::detail {
          emit32(0x9100011F); // MOV SP, X8
          emit32(0xA9BF27E9); // STP X9, X9, [SP, #-16]!
 
-         emit_mov_imm64(X8, reinterpret_cast<uint64_t>(func));
+         emit_pointer(X8, func);
          emit32(0xD63F0100); // BLR X8
 
          // Restore stack
@@ -5903,6 +5922,7 @@ namespace psizam::detail {
       // Member variables
       // ===================================================================
 
+      pzam_compile_result* _compile_result = nullptr;
       module& _mod;
       growable_allocator& _allocator;
       void* _code_segment_base;
@@ -6053,6 +6073,50 @@ namespace psizam::detail {
          recent_ops[0] = {};
          recent_ops[1] = {};
       }
+    public:
+      template<class T> static void* pzam_address(T pointer) {
+         if constexpr (std::is_null_pointer_v<T>) return nullptr;
+         else return reinterpret_cast<void*>(pointer);
+      }
+
+      // Also used by the PZAM loader. JIT1 helper ABIs have their own symbols.
+      static void populate_pzam_symbols(void** table) {
+         #define PSIZAM_JIT1_COMMON(symbol, address) \
+            table[static_cast<uint32_t>(reloc_symbol::symbol)] = pzam_address(address);
+         #define PSIZAM_JIT1_A64(symbol, address) PSIZAM_JIT1_COMMON(symbol, address)
+         #define PSIZAM_JIT1_X64(symbol, address)
+#ifdef PSIZAM_SOFTFLOAT
+         #define PSIZAM_JIT1_SOFTFLOAT(symbol, address) PSIZAM_JIT1_COMMON(symbol, address)
+#else
+         #define PSIZAM_JIT1_SOFTFLOAT(symbol, address)
+#endif
+         #include <psizam/detail/jit1_symbols.def>
+         #undef PSIZAM_JIT1_COMMON
+         #undef PSIZAM_JIT1_X64
+         #undef PSIZAM_JIT1_A64
+         #undef PSIZAM_JIT1_SOFTFLOAT
+         #define PSIZAM_JIT_HELPER(symbol, function) \
+            table[static_cast<uint32_t>(reloc_symbol::symbol)] = reinterpret_cast<void*>(&function);
+         #include <psizam/detail/jit_helper_symbols.def>
+         #undef PSIZAM_JIT_HELPER
+         static const uint8_t popcnt4[] = {0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4};
+         table[static_cast<uint32_t>(reloc_symbol::simd_popcnt4_table)] = const_cast<uint8_t*>(popcnt4);
+      }
+
+      static reloc_symbol pzam_symbol(uintptr_t address) {
+         static const auto symbols = [] {
+            void* table[static_cast<size_t>(reloc_symbol::NUM_SYMBOLS)]{};
+            populate_pzam_symbols(table);
+            std::unordered_map<uintptr_t, reloc_symbol> result;
+            for (size_t i = 0; i < std::size(table); ++i)
+               if (table[i]) result.emplace(reinterpret_cast<uintptr_t>(table[i]), static_cast<reloc_symbol>(i));
+            return result;
+         }();
+         auto it = symbols.find(address);
+         PSIZAM_ASSERT(it != symbols.end(), wasm_parse_exception, "Unregistered JIT1 PZAM helper");
+         return it->second;
+      }
+
    };
 
    // Backward-compatible alias: on aarch64, machine_code_writer = machine_code_writer_a64

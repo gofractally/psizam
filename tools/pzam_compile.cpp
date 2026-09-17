@@ -1,6 +1,6 @@
 // pzam-compile: Cross-compile WASM modules to native .pzam files.
 //
-// Usage: pzam-compile --target=x86_64|aarch64 [--backend=jit2|llvm] [-o output.pzam] input.wasm
+// Usage: pzam-compile --target=x86_64|aarch64 [--backend=jit1|jit2|llvm] [-o output.pzam] input.wasm
 //
 // Reads a .wasm file, compiles it to native code for the specified target
 // architecture, and writes a .pzam file containing the relocatable code blob.
@@ -34,7 +34,7 @@ struct compile_options : default_options {
 };
 
 static void usage(const char* prog) {
-   std::cerr << "Usage: " << prog << " --target=x86_64|aarch64 [--backend=jit2|llvm] [--opt-level=0|1|2|3] [--softfloat] [--backtrace] [--gas-metering=on|off] [-jN] [--dump-layout=FILE] [-o output.pzam] input.wasm\n";
+   std::cerr << "Usage: " << prog << " --target=x86_64|aarch64 [--backend=jit1|jit2|llvm] [--opt-level=0|1|2|3] [--softfloat] [--backtrace] [--gas-metering=on|off] [-jN] [--dump-layout=FILE] [-o output.pzam] input.wasm\n";
 }
 
 static std::vector<char> write_pzam(
@@ -94,6 +94,11 @@ static bool compile_wasm(
    } catch (const psizam::exception& ex) {
       std::cerr << "Error: " << ex.what() << " : " << ex.detail() << "\n";
       return false;
+   } catch (const std::exception& ex) {
+      // Invalid indices may be rejected by checked container access. Report a
+      // compiler rejection rather than terminating the compiler process.
+      std::cerr << "Error: " << ex.what() << "\n";
+      return false;
    }
 #else
    parser.parse_module(wasm_bytes, mod, debug);
@@ -108,7 +113,9 @@ static bool compile_wasm(
 
    auto pzam_bytes = write_pzam(mod, mod.allocator, compile_result,
                                  wasm_bytes, target_arch, use_softfloat,
-                                 use_backtrace, std::is_same_v<IrWriter, ir_writer_x64> ||
+                                 use_backtrace, std::is_same_v<IrWriter, machine_code_writer_x64> ||
+                                    std::is_same_v<IrWriter, machine_code_writer_a64> ? pzam_opt_tier::jit1
+                                    : std::is_same_v<IrWriter, ir_writer_x64> ||
                                     std::is_same_v<IrWriter, ir_writer_a64>
                                     ? pzam_opt_tier::jit2 : llvm_pzam_tier(opt_level));
 
@@ -118,6 +125,11 @@ static bool compile_wasm(
       return false;
    }
    out.write(pzam_bytes.data(), pzam_bytes.size());
+   out.close();
+   if (!out) {
+      std::cerr << "Error: write failed: " << output_file << "\n";
+      return false;
+   }
 
    if (const char* dump_code_env = std::getenv("PSIZAM_DUMP_CODE_BLOB")) {
       std::ofstream code(dump_code_env, std::ios::binary);
@@ -259,7 +271,14 @@ int pzam_compile_main(int argc, char** argv) {
    auto wasm_bytes = read_wasm(input_file);
 
    bool ok;
-   if (backend_str == "jit2") {
+   if (backend_str == "jit1") {
+      if (target_arch == pzam_arch::x86_64)
+         ok = compile_wasm<machine_code_writer_x64>(wasm_bytes, target_arch, output_file,
+            false, use_backtrace, {}, 2, 0, dump_layout, gas_metering);
+      else
+         ok = compile_wasm<machine_code_writer_a64>(wasm_bytes, target_arch, output_file,
+            false, use_backtrace, {}, 2, 0, dump_layout, gas_metering);
+   } else if (backend_str == "jit2") {
       // jit2 backend ignores compile_threads; pass 0 to keep it serial.
       if (target_arch == pzam_arch::x86_64) {
          ok = compile_wasm<ir_writer_x64>(wasm_bytes, target_arch, output_file,
@@ -281,7 +300,7 @@ int pzam_compile_main(int argc, char** argv) {
 #endif
    } else {
       std::cerr << "Error: unknown backend: " << backend_str << "\n";
-      std::cerr << "Supported backends: jit2, llvm\n";
+      std::cerr << "Supported backends: jit1, jit2, llvm\n";
       return 1;
    }
 

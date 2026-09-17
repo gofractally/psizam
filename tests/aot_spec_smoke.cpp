@@ -3,8 +3,8 @@
 #include "wasm_config.hpp"
 extern psizam::wasm_allocator wa;
 
-TEST_CASE("AOT O2 PZAM reload executes scalar and SIMD exports", "[aot-smoke]") {
-   using backend = psizam::backend<psizam::standalone_function_t, psizam::test::llvm_aot_o2_pzam>;
+BACKEND_TEST_CASE("Saved PZAM reload executes scalar and SIMD exports", "[aot-smoke]") {
+   using backend = psizam::backend<psizam::standalone_function_t, TestType>;
    {
       auto code = psizam::read_wasm(std::string(psizam::wasm_directory) + "i32.0.wasm");
       backend b(code, &wa);

@@ -32,6 +32,8 @@
 #include <psizam/pzam_metadata.hpp>
 #include <psizam/types.hpp>
 #include <psizam/detail/jit_reloc.hpp>
+#include <psizam/detail/x86_64.hpp>
+#include <psizam/detail/aarch64.hpp>
 
 #if defined(__aarch64__)
 #include <psizam/detail/jit_codegen_a64.hpp>
@@ -115,6 +117,11 @@ inline void init_symbol_table(void** symbol_table) {
    build_symbol_table<jit_codegen>(symbol_table);
 #endif
    build_llvm_symbol_table(symbol_table);
+#if defined(__aarch64__)
+   detail::machine_code_writer_a64::populate_pzam_symbols(symbol_table);
+#else
+   detail::machine_code_writer_x64::populate_pzam_symbols(symbol_table);
+#endif
 }
 
 // Step (8) — derive the host-call trampoline direction from `opt_tier`.

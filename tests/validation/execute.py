@@ -59,10 +59,10 @@ class Validation:
     def compile(self, wasm, artifact, timeout):
         artifact.unlink(missing_ok=True)  # Failed compilation cannot reuse old code.
         if self.a.mode.endswith('-api'):
-            backend = 'jit2' if self.a.mode.startswith('jit2') else 'llvm-o2'
+            backend = self.a.mode.split('-')[0] if self.a.mode.startswith(('jit1', 'jit2')) else 'llvm-o2'
             cmd = [self.a.driver, 'compile', backend, wasm, artifact]
         else:
-            backend = 'jit2' if self.a.mode.startswith('jit2') else 'llvm'
+            backend = self.a.mode.split('-')[0] if self.a.mode.startswith(('jit1', 'jit2')) else 'llvm'
             arch = getattr(self.a, 'arch', None) or {'arm64': 'aarch64', 'aarch64': 'aarch64', 'x86_64': 'x86_64', 'AMD64': 'x86_64'}[platform.machine()]
             cmd = [self.a.compiler, '--target=' + arch, '--backend=' + backend, '--opt-level=2', '-j' + str(self.a.compile_jobs)]
             if self.a.mode == 'llvm-softfloat-cli':

@@ -229,7 +229,11 @@ inline void register_spectest_imports() {
    spectest_rhf::add<&spectest_host_t::print_f64_f64>("spectest", "print_f64_f64");
 }
 
-#if defined(PSIZAM_TEST_AOT_O2)
+#if defined(PSIZAM_TEST_JIT1_PZAM)
+  #include "aot_spec_backend.hpp"
+  #define BACKEND_TEST_CASE(name, tags) \
+    TEMPLATE_TEST_CASE(name, tags, psizam::test::jit1_pzam)
+#elif defined(PSIZAM_TEST_AOT_O2)
   #include "aot_spec_backend.hpp"
   #define BACKEND_TEST_CASE(name, tags) \
     TEMPLATE_TEST_CASE(name, tags, psizam::test::llvm_aot_o2_pzam)

@@ -12,7 +12,9 @@ checked("${WAT2WASM}" "${SOURCE}/tests/installed-runtime/smoke.wat"
    -o "${WORK}/smoke.wasm")
 checked("${COMPILER}" "--target=${ARCH}" --backend=jit2 --gas-metering=off
    -o "${WORK}/smoke-jit2.pzam" "${WORK}/smoke.wasm")
-set(cached "${WORK}/smoke-jit2.pzam")
+checked("${COMPILER}" "--target=${ARCH}" --backend=jit1 --gas-metering=off
+   -o "${WORK}/smoke-jit1.pzam" "${WORK}/smoke.wasm")
+set(cached "${WORK}/smoke-jit1.pzam" "${WORK}/smoke-jit2.pzam")
 if(HAVE_LLVM)
    checked("${COMPILER}" "--target=${ARCH}" --backend=llvm --opt-level=2 --gas-metering=off
       -o "${WORK}/smoke-llvm.pzam" "${WORK}/smoke.wasm")

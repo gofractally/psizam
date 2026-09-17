@@ -15,6 +15,8 @@
 
 #include <psizam/detail/parser.hpp>
 #include <psizam/detail/ir_writer.hpp>
+#include <psizam/detail/x86_64.hpp>
+#include <psizam/detail/aarch64.hpp>
 #include <psizam/pzam_cache.hpp>
 #include <psizam/pzam_format.hpp>
 #include <psizam/pzam_metadata.hpp>
@@ -117,7 +119,7 @@ namespace psizam {
       inline pzam_code_section make_pzam_code_section(
             const module& mod, const pzam_compile_result& result,
             pzam_arch arch, pzam_opt_tier tier, bool softfloat, bool backtrace) {
-         const bool llvm = tier != pzam_opt_tier::jit2;
+         const bool llvm = tier != pzam_opt_tier::jit1 && tier != pzam_opt_tier::jit2;
          if (llvm && result.function_offsets.size() != mod.code.size())
             throw std::runtime_error("pzam_compile: incomplete LLVM function table");
          pzam_code_section cs;
@@ -129,7 +131,7 @@ namespace psizam {
          cs.stack_limit_mode = mod.stack_limit_is_bytes;
          cs.page_size = static_cast<uint32_t>(wasm_allocator::table_size());
          cs.max_stack = static_cast<uint32_t>(mod.maximum_stack);
-         cs.compiler.compiler_name = llvm ? "psizam-llvm" : "psizam-jit2";
+         cs.compiler.compiler_name = llvm ? "psizam-llvm" : tier == pzam_opt_tier::jit1 ? "psizam-jit1" : "psizam-jit2";
          cs.compiler.compiler_version = "0.1.0";
          cs.compiler.compiler_hash = pzam_cache::compiler_identity(arch);
          cs.functions.resize(mod.code.size());
@@ -182,9 +184,9 @@ namespace psizam {
       }
    }
 
-   /// Compile each requested architecture/tier independently. JIT1 PZAM output
-   /// and debug-info emission are not implemented and are rejected.
-   /// Link psizam-llvm for LLVM tiers; both JIT2 targets are always available.
+   /// Compile each requested architecture/tier independently.
+   /// Link psizam-llvm for LLVM tiers; both JIT1 and JIT2 targets are available.
+   /// Debug-info emission is not implemented and is rejected.
    inline std::vector<char> pzam_compile(std::span<const uint8_t> wasm_bytes,
                                          const pzam_compile_options& opts = {}) {
       using namespace detail;
@@ -192,15 +194,13 @@ namespace psizam {
          throw std::invalid_argument("pzam_compile: invalid or empty architecture flags");
       if (!opts.tier || !!(opts.tier & ~pzam_tier_flags::all))
          throw std::invalid_argument("pzam_compile: invalid or empty tier flags");
-      if (!!(opts.tier & pzam_tier_flags::jit1))
-         throw std::invalid_argument("pzam_compile: JIT1 PZAM output is not supported");
       constexpr auto supported = pzam_compile_flags::softfloat | pzam_compile_flags::backtrace | pzam_compile_flags::gas_meter;
       if (!!(opts.flags & ~supported))
          throw std::invalid_argument("pzam_compile: unsupported instrumentation flags");
       const bool softfloat = !!(opts.flags & pzam_compile_flags::softfloat);
       const bool gas_metering = !!(opts.flags & pzam_compile_flags::gas_meter);
       const bool backtrace = !!(opts.flags & pzam_compile_flags::backtrace);
-      if (softfloat && !!(opts.tier & pzam_tier_flags::jit2))
+      if (softfloat && !!(opts.tier & pzam_tier_flags::all_jit))
          throw std::invalid_argument("pzam_compile: softfloat requires LLVM for every requested tier");
 #ifndef PSIZAM_ENABLE_LLVM_BACKEND
       if (!!(opts.tier & pzam_tier_flags::all_llvm))
@@ -213,7 +213,12 @@ namespace psizam {
          if (!(opts.arch & arch_flag)) continue;
          for (auto [tier_flag, tier] : tier_map) {
             if (!(opts.tier & tier_flag)) continue;
-            if (tier == pzam_opt_tier::jit2) {
+            if (tier == pzam_opt_tier::jit1) {
+               if (arch == pzam_arch::x86_64)
+                  compile_pzam_section<machine_code_writer_x64>(wasm, file, arch, tier, false, backtrace, 2, gas_metering);
+               else
+                  compile_pzam_section<machine_code_writer_a64>(wasm, file, arch, tier, false, backtrace, 2, gas_metering);
+            } else if (tier == pzam_opt_tier::jit2) {
                if (arch == pzam_arch::x86_64)
                   compile_pzam_section<ir_writer_x64>(wasm, file, arch, tier, false, backtrace, 2, gas_metering);
                else

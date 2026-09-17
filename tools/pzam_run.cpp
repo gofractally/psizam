@@ -311,6 +311,11 @@ int pzam_run_main(int argc, char** argv) {
 
    // Overlay LLVM runtime symbols
    build_llvm_symbol_table(symbol_table);
+#if defined(__aarch64__)
+   machine_code_writer_a64::populate_pzam_symbols(symbol_table);
+#else
+   machine_code_writer_x64::populate_pzam_symbols(symbol_table);
+#endif
 
    profile.mark("build symbol table");
 

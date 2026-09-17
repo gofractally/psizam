@@ -28,8 +28,8 @@ int main(int argc, char** argv) {
    try {
       if (argc == 5 && std::string_view(argv[1]) == "compile") {
          const std::string_view mode = argv[2];
-         if (mode != "jit2" && mode != "llvm-o2") return 2;
-         const auto tier = mode == "jit2" ? pzam_tier_flags::jit2 : pzam_tier_flags::llvm_O2;
+         if (mode != "jit1" && mode != "jit2" && mode != "llvm-o2") return 2;
+         const auto tier = mode == "jit1" ? pzam_tier_flags::jit1 : mode == "jit2" ? pzam_tier_flags::jit2 : pzam_tier_flags::llvm_O2;
          auto bytes = pzam_compile(read_wasm(argv[3]), {.tier=tier});
          std::ofstream output(argv[4], std::ios::binary);
          output.write(bytes.data(), bytes.size());

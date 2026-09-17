@@ -54,7 +54,7 @@ endif()
 set(_tools --arch "${_execution_arch}" --driver $<TARGET_FILE:psizam_execution_driver>
    --compiler $<TARGET_FILE:pzam-compile> --runner $<TARGET_FILE:pzam-run>
    --compile-jobs "${PSIZAM_VALIDATION_COMPILE_JOBS}")
-set(_modes interpreter-softfloat jit1-fast jit1-softfloat jit2-fast jit2-softfloat jit2-cli jit2-api)
+set(_modes interpreter-softfloat jit1-fast jit1-softfloat jit2-fast jit2-softfloat jit1-cli jit1-api jit2-cli jit2-api)
 if(PSIZAM_ENABLE_LLVM)
    list(APPEND _modes llvm-fast llvm-o2-cli llvm-softfloat-cli llvm-o2-api)
 endif()
@@ -83,7 +83,7 @@ add_custom_command(OUTPUT ${_far_wasms}
    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/generate-far-traps.py" VERBATIM)
 add_custom_target(psizam_far_trap_fixtures DEPENDS ${_far_wasms})
 add_dependencies(psizam_execution_driver psizam_far_trap_fixtures)
-foreach(_mode jit1-fast jit1-softfloat jit2-fast jit2-softfloat jit2-cli jit2-api)
+foreach(_mode jit1-fast jit1-softfloat jit2-fast jit2-softfloat jit1-cli jit1-api jit2-cli jit2-api)
    foreach(_fixture far-stack far-div32 far-div64)
       set(_name "execution.${_mode}.${_fixture}")
       if(_fixture STREQUAL "far-stack")
@@ -108,7 +108,7 @@ if(PSIZAM_ENABLE_COMPILER_TESTS)
       --work "${CMAKE_CURRENT_BINARY_DIR}/results/compiler.fixtures")
    set_tests_properties(compiler.fixtures PROPERTIES LABELS "execution;compiler" TIMEOUT 30
       FIXTURES_SETUP compiler_data)
-   set(_compiler_modes jit1-fast jit1-softfloat jit2-fast jit2-softfloat jit2-cli jit2-api)
+   set(_compiler_modes jit1-fast jit1-softfloat jit2-fast jit2-softfloat jit1-cli jit1-api jit2-cli jit2-api)
    if(PSIZAM_ENABLE_LLVM)
       list(APPEND _compiler_modes llvm-o2-cli)
    endif()
@@ -169,3 +169,10 @@ if(PSIZAM_ENABLE_INSTALL)
    set_tests_properties(execution.installed-runtime PROPERTIES
       LABELS "execution;release;runtime" TIMEOUT 300 RUN_SERIAL TRUE)
 endif()
+
+add_test(NAME execution.jit1-saved-roundtrip
+   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/jit1_saved.py"
+      --compiler $<TARGET_FILE:pzam-compile> --runner $<TARGET_FILE:pzam-run>
+      --fixtures "${CMAKE_CURRENT_BINARY_DIR}" --arch "${_execution_arch}")
+set_tests_properties(execution.jit1-saved-roundtrip PROPERTIES
+   LABELS "execution;quick;pzam" TIMEOUT 180)

@@ -58,8 +58,7 @@ TEST_CASE("pzam_compile softfloat selects software floating point code", "[pzam-
 TEST_CASE("pzam_compile rejects requests it cannot fulfill", "[pzam-compile]") {
    for (auto arch : {pzam_arch_flags::none, static_cast<pzam_arch_flags>(128)})
       CHECK_THROWS_AS(pzam_compile(add_wasm, {.arch=arch}), std::invalid_argument);
-   for (auto tier : {pzam_tier_flags::none, pzam_tier_flags::jit1,
-                     pzam_tier_flags::all_jit, static_cast<pzam_tier_flags>(128)})
+   for (auto tier : {pzam_tier_flags::none, static_cast<pzam_tier_flags>(128)})
       CHECK_THROWS_AS(pzam_compile(add_wasm, {.tier=tier}), std::invalid_argument);
    for (auto flags : {pzam_compile_flags::debug_info,
                       pzam_compile_flags::softfloat, static_cast<pzam_compile_flags>(128)})
@@ -76,16 +75,16 @@ TEST_CASE("JIT PZAM rejects an incompatible memory page layout", "[pzam-compile]
 }
 
 TEST_CASE("pzam_compile emits actual code for each requested target and tier", "[pzam-compile]") {
-   auto tiers = pzam_tier_flags::jit2;
+   auto tiers = pzam_tier_flags::all_jit;
 #ifdef PSIZAM_ENABLE_LLVM_BACKEND
    tiers = tiers | pzam_tier_flags::all_llvm;
 #endif
    auto bytes = pzam_compile(add_wasm, {.arch=pzam_arch_flags::all, .tier=tiers});
    auto file = pzam_load(bytes);
 #ifdef PSIZAM_ENABLE_LLVM_BACKEND
-   REQUIRE(file.code_sections.size() == 8);
+   REQUIRE(file.code_sections.size() == 10);
 #else
-   REQUIRE(file.code_sections.size() == 2);
+   REQUIRE(file.code_sections.size() == 4);
 #endif
    for (const auto& section : file.code_sections) {
       auto arch = static_cast<pzam_arch>(section.arch);
@@ -93,7 +92,7 @@ TEST_CASE("pzam_compile emits actual code for each requested target and tier", "
       CAPTURE(section.arch, section.opt_tier);
       REQUIRE(section.functions.size() == 1);
       REQUIRE_FALSE(section.code_blob.empty());
-      CHECK(section.compiler.compiler_name == (tier == pzam_opt_tier::jit2 ? "psizam-jit2" : "psizam-llvm"));
+      CHECK(section.compiler.compiler_name == (tier == pzam_opt_tier::jit1 ? "psizam-jit1" : tier == pzam_opt_tier::jit2 ? "psizam-jit2" : "psizam-llvm"));
       pzam_compile_options single;
       for (auto [flag, val] : psizam::detail::arch_map) if (val == arch) single.arch = flag;
       for (auto [flag, val] : psizam::detail::tier_map) if (val == tier) single.tier = flag;
@@ -108,13 +107,13 @@ TEST_CASE("pzam_compile emits actual code for each requested target and tier", "
 }
 
 TEST_CASE("pzam_compile preserves identity for empty modules and instrumentation", "[pzam-compile]") {
-   auto tiers = pzam_tier_flags::jit2;
+   auto tiers = pzam_tier_flags::all_jit;
 #ifdef PSIZAM_ENABLE_LLVM_BACKEND
    tiers = tiers | pzam_tier_flags::all_llvm;
 #endif
    auto file = pzam_load(pzam_compile(empty_wasm, {.tier=tiers}));
    for (const auto& section : file.code_sections) {
-      CHECK(section.compiler.compiler_name == (section.opt_tier == uint8_t(pzam_opt_tier::jit2) ? "psizam-jit2" : "psizam-llvm"));
+      CHECK(section.compiler.compiler_name == (section.opt_tier == uint8_t(pzam_opt_tier::jit1) ? "psizam-jit1" : section.opt_tier == uint8_t(pzam_opt_tier::jit2) ? "psizam-jit2" : "psizam-llvm"));
       CHECK(section.functions.empty());
       CHECK(section.code_blob.empty());
    }
@@ -160,7 +159,7 @@ TEST_CASE("page interruption restores reusable code without gas checks", "[resou
 }
 
 TEST_CASE("PZAM gas instrumentation is effective and correctly labeled", "[resource-limits][pzam-compile]") {
-   std::vector<pzam_tier_flags> tiers{pzam_tier_flags::jit2};
+   std::vector<pzam_tier_flags> tiers{pzam_tier_flags::jit1, pzam_tier_flags::jit2};
 #ifdef PSIZAM_ENABLE_LLVM_BACKEND
    tiers.push_back(pzam_tier_flags::llvm_O2);
 #endif

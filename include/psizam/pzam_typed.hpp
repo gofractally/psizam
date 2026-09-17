@@ -1,4 +1,6 @@
 #pragma once
+#include <psizam/detail/x86_64.hpp>
+#include <psizam/detail/aarch64.hpp>
 
 // Typed C++ API for loading and interacting with .pzam WASM modules.
 //
@@ -243,6 +245,11 @@ namespace psizam {
          build_symbol_table<detail::jit_codegen>(symbol_table);
 #endif
          build_llvm_symbol_table(symbol_table);
+#if defined(__aarch64__)
+   detail::machine_code_writer_a64::populate_pzam_symbols(symbol_table);
+#else
+   detail::machine_code_writer_x64::populate_pzam_symbols(symbol_table);
+#endif
 
          // Build relocations
          std::vector<code_relocation> relocs(cs->relocations.size());

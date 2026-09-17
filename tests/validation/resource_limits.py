@@ -18,7 +18,7 @@ def main():
     for arg in ['runner', 'compiler', 'pzam-run', 'wat2wasm', 'arch', 'llvm']:
         p.add_argument('--'+arg, required=True)
     a = p.parse_args()
-    modes = [('jit', False), ('jit2', False), ('jit2', True)]
+    modes = [('jit', False), ('jit1', True), ('jit2', False), ('jit2', True)]
     if a.llvm == 'ON': modes += [('llvm', False), ('llvm', True)]
     count = 0
     with tempfile.TemporaryDirectory(prefix='psizam-resource-') as temp:

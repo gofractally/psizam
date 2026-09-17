@@ -2,6 +2,8 @@
 
 #include <psizam/allocator.hpp>
 #include <psizam/config.hpp>
+#include <psizam/detail/pzam_compile_result.hpp>
+#include <unordered_map>
 #include <psizam/exceptions.hpp>
 #include <psizam/options.hpp>
 #include <psizam/detail/execution_context.hpp>
@@ -78,9 +80,10 @@ namespace psizam::detail {
     public:
       machine_code_writer_t(growable_allocator& alloc, std::size_t source_bytes, module& mod,
                           bool enable_backtrace, bool stack_limit_is_bytes,
-                          uint32_t /*compile_threads*/ = 0) :
+                          uint32_t /*compile_threads*/ = 0, pzam_compile_result* result = nullptr) :
          _mod(mod), _allocator(alloc), _code_segment_base(_allocator.start_code()),
-         _enable_backtrace(enable_backtrace), _stack_limit_is_bytes(stack_limit_is_bytes) {
+         _enable_backtrace(enable_backtrace), _stack_limit_is_bytes(stack_limit_is_bytes),
+         _compile_result(result) {
          _code_start = _allocator.alloc<unsigned char>(128);
          _code_end = _code_start + 128;
          code = _code_start;
@@ -1896,7 +1899,7 @@ namespace psizam::detail {
       // whether to *emit* a softfloat call (which consumes this pointer)
       // or emit native FP instructions (which ignore this pointer).
       template<auto F>
-      constexpr auto choose_fn() {
+      static constexpr auto choose_fn() {
          if constexpr (use_softfloat) {
             if constexpr (std::is_same_v<decltype(F), float(*)(float)>) {
                return &adapt_f32_unop<F>;
@@ -4098,7 +4101,7 @@ namespace psizam::detail {
 
          // movabsq $popcnt4, %rax
          emit_bytes(0x48, 0xb8);
-         emit_operand_ptr(&popcnt4);
+         emit_operand_ptr(&popcnt4, reloc_symbol::simd_popcnt4_table);
          emit_vmovdqu(*rsp, xmm0);
          emit_vmovdqu(*rax, xmm3);
          emit_mov(0x0f, al);
@@ -6298,6 +6301,7 @@ namespace psizam::detail {
 
       bool is_memory64() const { return !_mod.memories.empty() && _mod.memories[0].is_memory64; }
 
+      pzam_compile_result* _compile_result = nullptr;
       module& _mod;
       growable_allocator& _allocator;
       void * _code_segment_base;
@@ -6472,10 +6476,14 @@ namespace psizam::detail {
          memcpy(code, &val, sizeof(val)); code += sizeof(val);
       }
       template<class T>
-      void emit_operand_ptr(T* val) {
+      void emit_operand_ptr(T* val, reloc_symbol symbol = reloc_symbol::unknown) {
          // Always emit 8 bytes — target is x86_64 regardless of host pointer size
          if (code + 8 > _code_end) grow_code_buffer();
          uint64_t ptr = reinterpret_cast<uintptr_t>(val);
+         if (_compile_result) {
+            if (symbol == reloc_symbol::unknown) symbol = pzam_symbol(ptr);
+            _compile_result->relocs.push_back({static_cast<uint32_t>(code - static_cast<unsigned char*>(_code_segment_base)), symbol});
+         }
          memcpy(code, &ptr, 8);
          code += 8;
       }
@@ -7820,6 +7828,50 @@ namespace psizam::detail {
       static void on_call_indirect_error() { signal_throw<wasm_interpreter_exception>( "call_indirect out of range" ); }
       static void on_type_error() { signal_throw<wasm_interpreter_exception>( "call_indirect incorrect function type" ); }
       static void on_stack_overflow() { signal_throw<wasm_interpreter_exception>( "stack overflow" ); }
+    public:
+      template<class T> static void* pzam_address(T pointer) {
+         if constexpr (std::is_null_pointer_v<T>) return nullptr;
+         else return reinterpret_cast<void*>(pointer);
+      }
+
+      // Also used by the PZAM loader. JIT1 helper ABIs have their own symbols.
+      static void populate_pzam_symbols(void** table) {
+         #define PSIZAM_JIT1_COMMON(symbol, address) \
+            table[static_cast<uint32_t>(reloc_symbol::symbol)] = pzam_address(address);
+         #define PSIZAM_JIT1_X64(symbol, address) PSIZAM_JIT1_COMMON(symbol, address)
+         #define PSIZAM_JIT1_A64(symbol, address)
+#ifdef PSIZAM_SOFTFLOAT
+         #define PSIZAM_JIT1_SOFTFLOAT(symbol, address) PSIZAM_JIT1_COMMON(symbol, address)
+#else
+         #define PSIZAM_JIT1_SOFTFLOAT(symbol, address)
+#endif
+         #include <psizam/detail/jit1_symbols.def>
+         #undef PSIZAM_JIT1_COMMON
+         #undef PSIZAM_JIT1_X64
+         #undef PSIZAM_JIT1_A64
+         #undef PSIZAM_JIT1_SOFTFLOAT
+         #define PSIZAM_JIT_HELPER(symbol, function) \
+            table[static_cast<uint32_t>(reloc_symbol::symbol)] = reinterpret_cast<void*>(&function);
+         #include <psizam/detail/jit_helper_symbols.def>
+         #undef PSIZAM_JIT_HELPER
+         static const uint8_t popcnt4[] = {0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4};
+         table[static_cast<uint32_t>(reloc_symbol::simd_popcnt4_table)] = const_cast<uint8_t*>(popcnt4);
+      }
+
+      static reloc_symbol pzam_symbol(uintptr_t address) {
+         static const auto symbols = [] {
+            void* table[static_cast<size_t>(reloc_symbol::NUM_SYMBOLS)]{};
+            populate_pzam_symbols(table);
+            std::unordered_map<uintptr_t, reloc_symbol> result;
+            for (size_t i = 0; i < std::size(table); ++i)
+               if (table[i]) result.emplace(reinterpret_cast<uintptr_t>(table[i]), static_cast<reloc_symbol>(i));
+            return result;
+         }();
+         auto it = symbols.find(address);
+         PSIZAM_ASSERT(it != symbols.end(), wasm_parse_exception, "Unregistered JIT1 PZAM helper");
+         return it->second;
+      }
+
    };
    using machine_code_writer_x64 = machine_code_writer_t<>;
 #ifdef __x86_64__

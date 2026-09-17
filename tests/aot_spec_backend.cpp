@@ -15,7 +15,7 @@ extern char** environ;
 
 namespace psizam::test {
 namespace {
-std::filesystem::path compile_artifact(const wasm_code& code) {
+std::filesystem::path compile_artifact(const wasm_code& code, bool jit1) {
    const char* compiler = std::getenv("PSIZAM_AOT_SPEC_COMPILER");
    const char* directory = std::getenv("PSIZAM_AOT_SPEC_DIR");
    if (!compiler || !directory || ::access(compiler, X_OK) != 0) {
@@ -26,7 +26,7 @@ std::filesystem::path compile_artifact(const wasm_code& code) {
    std::ostringstream hex;
    for (auto byte : pzam_cache::hash_wasm(code))
       hex << std::hex << std::setfill('0') << std::setw(2) << unsigned(byte);
-   std::filesystem::path base = std::filesystem::path(directory) / hex.str();
+   std::filesystem::path base = std::filesystem::path(directory) / ((jit1 ? "jit1-" : "llvm-o2-") + hex.str());
    std::filesystem::create_directories(directory);
    const auto wasm = base.string() + ".wasm";
    const auto pzam = base.string() + ".pzam";
@@ -41,7 +41,7 @@ std::filesystem::path compile_artifact(const wasm_code& code) {
 #else
 #error AOT spec execution requires ARM64 or x86_64
 #endif
-   std::vector<std::string> args{compiler, target, "--backend=llvm", "--opt-level=2", "-j6", wasm, "-o", pzam};
+   std::vector<std::string> args{compiler, target, jit1 ? "--backend=jit1" : "--backend=llvm", "--opt-level=2", "-j6", wasm, "-o", pzam};
    std::vector<char*> argv;
    for (auto& arg : args) argv.push_back(arg.data());
    argv.push_back(nullptr);
@@ -67,8 +67,8 @@ std::filesystem::path compile_artifact(const wasm_code& code) {
 }
 }
 
-void load_aot_o2_roundtrip(wasm_code& code, module& mod) {
-   const auto path = compile_artifact(code);
+void load_aot_roundtrip(wasm_code& code, module& mod, bool jit1) {
+   const auto path = compile_artifact(code, jit1);
    std::ifstream in(path, std::ios::binary);
    std::vector<char> bytes{std::istreambuf_iterator<char>{in}, {}};
    if (!pzam_validate(bytes)) throw std::runtime_error("AOT produced invalid PZAM: " + path.string());
@@ -76,10 +76,10 @@ void load_aot_o2_roundtrip(wasm_code& code, module& mod) {
    if (file.magic != PZAM_MAGIC || file.format_version != PZAM_VERSION || file.code_sections.size() != 1)
       throw std::runtime_error("Unexpected PZAM header");
    const auto& cs = file.code_sections.front();
-   if (cs.compiler.compiler_name != "psizam-llvm" || file.input_hash != pzam_cache::hash_wasm(code))
+   if (cs.compiler.compiler_name != (jit1 ? "psizam-jit1" : "psizam-llvm") || file.input_hash != pzam_cache::hash_wasm(code))
       throw std::runtime_error("Wrong AOT compiler or input hash");
-   if (cs.opt_tier != static_cast<uint8_t>(pzam_opt_tier::llvm_O2))
-      throw std::runtime_error("Expected LLVM O2 PZAM code");
+   if (cs.opt_tier != static_cast<uint8_t>(jit1 ? pzam_opt_tier::jit1 : pzam_opt_tier::llvm_O2))
+      throw std::runtime_error("Wrong saved-code compiler tier");
 
    auto loaded = detail::load_pzam(file);
    mod.allocator.release_base_memory();

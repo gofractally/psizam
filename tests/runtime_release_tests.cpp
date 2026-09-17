@@ -108,7 +108,7 @@ struct cache_host {
 
 TEST_CASE("public runtime executes cached native code with isolated instance state", "[runtime-release][pzam]") {
    const auto wasm = fixture("import");
-   std::vector<psizam::pzam_tier_flags> compiled_tiers{psizam::pzam_tier_flags::jit2};
+   std::vector<psizam::pzam_tier_flags> compiled_tiers{psizam::pzam_tier_flags::jit1, psizam::pzam_tier_flags::jit2};
 #ifdef PSIZAM_ENABLE_LLVM_BACKEND
    compiled_tiers.push_back(psizam::pzam_tier_flags::llvm_O2);
 #endif
@@ -127,7 +127,8 @@ TEST_CASE("public runtime executes cached native code with isolated instance sta
          mod.set_host_ptr(&host);
          auto first = rt.instantiate(mod);
          survivor = rt.instantiate(mod);
-         CHECK(first.kind() == (tier == psizam::pzam_tier_flags::jit2 ?
+         CHECK(first.kind() == (tier == psizam::pzam_tier_flags::jit1 ? psizam::backend_kind::jit :
+            tier == psizam::pzam_tier_flags::jit2 ?
             psizam::backend_kind::jit2 : psizam::backend_kind::jit_llvm));
          CHECK(first.linear_memory() != survivor.linear_memory());
          REQUIRE(word(first, 0) == 1);

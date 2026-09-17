@@ -1,59 +1,82 @@
-# PZAM compilation API correction — September 16, 2026
+# Compiling WebAssembly to PZAM
 
-`pzam_compile(wasm, options)` now compiles each requested architecture/tier
-combination separately. Both x86-64 and ARM64 use their respective JIT2 writer;
-LLVM O1/O2/O3 requests select `ir_writer_llvm_aot`, the correct target triple,
-and the requested optimization level. LLVM must be enabled by linking the
-`psizam-llvm` target. The default remains host JIT2.
+The C++ API and `pzam-compile` produce relocatable native code for x86-64 and
+AArch64. Each requested architecture and tier is compiled independently.
+JIT1 uses the single-pass machine-code writer, JIT2 uses the optimizing IR
+writer, and LLVM O1/O2/O3 uses LLVM AOT at the requested optimization level.
+The default C++ request is host-architecture JIT2.
 
-Each section takes its bytes, function offsets and relocations from its own
-compilation. Relocation sites are canonicalized before serialization. The CLI
-and C++ API share section construction, which uses explicit compiler identity
-and tier rather than guessing LLVM from a nonempty code blob. Consequently an
-empty LLVM module retains the correct LLVM identity and tier.
+```cpp
+#include <psizam/pzam_compile.hpp>
 
-Unsupported requests throw `std::invalid_argument` before compilation:
+psizam::pzam_compile_file("module.wasm", "module.pzam", {
+    .arch = psizam::pzam_arch_flags::all,
+    .tier = psizam::pzam_tier_flags::all_jit,
+    .flags = psizam::pzam_compile_flags::gas_meter,
+});
+```
 
-- Empty or unknown architecture/tier flags.
-- JIT1 PZAM output (including a bitmap that requests JIT1 alongside other tiers).
-- Gas-meter or debug-info flags, whose emitters are not implemented here.
-- Softfloat on any requested JIT2 section; softfloat is supported with LLVM.
-- LLVM tiers in a build without the LLVM backend.
+This creates four code sections: JIT1 and JIT2 for each architecture. Consumers
+select a section for their architecture. LLVM tiers require linking the
+`psizam-llvm` target when compiling; executing saved LLVM output only requires
+the execution library.
 
-Backtrace remains supported. `pzam_compile_file` also checks stream errors after
-writing and closing its output. Target availability errors from LLVM propagate
-as compilation failures; a missing target cannot produce a mislabeled section.
+```sh
+pzam-compile --target=aarch64 --backend=jit1 --gas-metering=off \
+  -o module.pzam module.wasm
+pzam-run --cpu-limit=none module.pzam
+```
 
-The CLI now labels O0/O1/O2/O3 accurately and rejects levels outside 0..3.
-`llvm_O0 = 5` is appended to the format's tier enum, preserving all existing tier
-numbers. Readers of these newly labeled O0 artifacts must include the O0-aware
-loader/runner changes. The container layout and PZAM version remain 3. Existing
-bootstrap artifacts retain their original labels and tool provenance.
+The CLI accepts `--backend=jit1|jit2|llvm`, `--backtrace`, and
+`--gas-metering=on|off`. Gas is on by default in the CLI and off by default in
+the C++ API. LLVM accepts `--opt-level=0|1|2|3` and compilation worker counts;
+JIT1 and JIT2 CLI compilation is serial. Page-based time limits use unmetered
+code. A runtime gas budget requires a file compiled with gas instrumentation.
 
-## Regression coverage
+The pSSZ container holds module metadata, native code, function descriptors,
+and relocations. JIT1 records helper addresses from the beginning of code
+emission, including trap handlers and import stubs. Its helper catalog is
+shared by the compiler and loader. Helpers with different argument layouts
+have distinct symbols. Unregistered addresses cause compilation to fail.
+AArch64 saved pointers use fixed-width MOVZ/MOVK sequences, and x86-64 uses
+64-bit address relocations. Pointer immediates are canonicalized before saving
+and resolved in the loading process. Ordinary in-memory JIT compilation does
+not collect PZAM relocations.
 
-Build and run `psizam_pzam_compile_tests` (CTest name `pzam_compile_api`) with
-LLVM enabled and disabled. The tests exercise the public compile API, reload
-its output through the shared PZAM loader, and execute host code through the
-execution context. They cover both targets, requested tiers, independent versus
-combined compilations, explicit rejection, empty modules, backtrace, and
-software versus hardware floating-point code. Foreign-architecture code is
-generated and compared; execution of x86-64 code still requires an x86-64 host.
+Saved JIT1 code is supported by `pzam-run`, `pzam_instance`, and
+`runtime::load_cached()` followed by `runtime::instantiate()`. Runtime instances
+own their executable mappings and mutable state. JIT1 and JIT2 files require
+the runtime's memory-page layout to match the recorded layout.
 
-On macOS ARM64 the LLVM build passes 74 assertions in four cases; the build
-without LLVM passes 30 assertions in three cases. A separate CLI check compiles
-16 artifacts (both targets, O0..O3, empty/nonempty), verifies their labels with
-`pzam inspect`, and executes all four nonempty host variants. Evidence is under
-`/Users/dlarimer/psiserve/outputs/tag-and-pzam-fixes-2026-09-16/`.
+The API rejects empty or unknown architecture/tier flags, unsupported
+instrumentation flags, LLVM tiers without LLVM enabled, and explicit softfloat
+requests containing JIT tiers. Explicit `--softfloat` is available with LLVM.
+Debug-info emission is not implemented. File-writing APIs report stream errors.
 
-The scalar/SIMD AOT O2 test backend now requires the exact O2 metadata even for
-empty modules. The separate ORC JIT remains outside that suite.
+## Validation
 
-## Separate release gates
+`pzam_compile_api` checks independently compiled versus combined sections,
+compiler identity, cross-architecture emission, host execution, empty modules,
+backtrace, gas enforcement, and LLVM floating-point selection. Public-runtime
+tests cover saved JIT1/JIT2/LLVM host calls, initialization, independent memory,
+budgets, and lifetime after the runtime and module handles are destroyed.
 
-This corrects compile dispatch and section labels. Compiler/cache identity still
-needs a stronger source/options/ABI fingerprint. Also, `runtime::instantiate()`
-does not yet consume the module loaded by `runtime::load_cached()`; it tries to
-parse empty Wasm bytes. That separate runtime API gap was exposed during this
-work and remains listed in `release-status.md`. It does not affect the shared
-loader execution checks or the CLI bootstrap path.
+The `execution.jit1-cli.*` and `execution.jit1-api.*` CTests compile and execute
+in separate processes, including scalar/SIMD floating point and distant trap
+handlers. `execution.resource-limits` exercises saved JIT1 gas and page timeout
+traps, including nonterminating module initialization. The installed-package
+acceptance test loads JIT1 output through the public runtime.
+
+With `PSIZAM_ENABLE_AOT_SPEC_TESTS=ON`, the scalar, SIMD and smoke suites also
+have saved-JIT1 executables. Each construction invokes the real CLI and reloads
+its output; there is no in-process JIT fallback. For example:
+
+```sh
+PSIZAM_AOT_SPEC_COMPILER="$PWD/build/bin/pzam-compile" \
+PSIZAM_AOT_SPEC_DIR="$PWD/build/jit1-spec-artifacts" \
+  build/bin/psizam_scalar_jit1_pzam_tests
+```
+
+Use a separate fresh artifact directory for each validation run. Native x86-64
+and AArch64 execution remain separate platform gates; emitting foreign code
+alone is not proof that it executes correctly.

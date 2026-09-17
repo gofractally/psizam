@@ -3372,8 +3372,15 @@ namespace psizam::detail {
 
       void write_code_out(growable_allocator& allocator, wasm_code_ptr& code, const void* code_start) {
          auto _compile_threads = get_compile_threads(_options);
-         Writer code_writer(allocator, code.bounds() - code.offset(), *_mod,
-                            _enable_backtrace, _stack_limit_is_bytes, _compile_threads);
+         Writer code_writer = [&] {
+            if constexpr (std::is_constructible_v<Writer, growable_allocator&, size_t, module&,
+                                                 bool, bool, uint32_t, pzam_compile_result*>)
+               return Writer(allocator, code.bounds() - code.offset(), *_mod,
+                             _enable_backtrace, _stack_limit_is_bytes, _compile_threads, _compile_result);
+            else
+               return Writer(allocator, code.bounds() - code.offset(), *_mod,
+                             _enable_backtrace, _stack_limit_is_bytes, _compile_threads);
+         }();
          if constexpr (requires { code_writer.set_compile_result(_compile_result); }) {
             code_writer.set_compile_result(_compile_result);
          }
