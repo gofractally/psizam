@@ -15,6 +15,7 @@
 #include <psizam/gas.hpp>   // gas_state, gas_handler_t
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string_view>
@@ -24,6 +25,8 @@ namespace psizam {
 
 class wasm_allocator;
 class host_function_table;
+struct host_function;
+union native_value;
 
 namespace detail {
 
@@ -50,7 +53,13 @@ constexpr const char* to_string(backend_kind k) noexcept {
 // `instance_be_impl<Impl>` lives in runtime.cpp where the per-backend
 // template instantiations are realized exactly once.
 class instance_be {
+   // A bound import may outlive its provider. Weak tokens detect that without
+   // allocating or taking a shared ownership reference on the call path.
+   std::shared_ptr<void> lifetime_ = std::make_shared<int>(0);
 public:
+   std::weak_ptr<void> lifetime() const noexcept { return lifetime_; }
+   using canonical_call = std::function<native_value(void*, native_value*, char*)>;
+   virtual canonical_call bind_canonical_export(std::string_view name, void* host) = 0;
    virtual ~instance_be() = default;
 
    // Which backend variant this is. Lets `instance::as<Tag>()` and
@@ -95,6 +104,8 @@ public:
    // the target export, avoiding per-call re-resolution on the hot
    // cross-module path.
    virtual uint32_t resolve_export(std::string_view name) = 0;
+   virtual uint32_t resolve_export_checked(std::string_view name,
+                                          const host_function& signature) = 0;
 
    // Canonical 16-slot flat call by resolved index. Counterpart to
    // `call_export_canonical` that skips the export-name lookup; used

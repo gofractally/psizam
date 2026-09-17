@@ -153,6 +153,40 @@ public:
       return be_->resolve_export(name);
    }
 
+   uint32_t resolve_export_checked(std::string_view name,
+                                   const host_function& signature) override {
+      const uint32_t index = be_->resolve_export(name);
+      PSIZAM_ASSERT(index != std::numeric_limits<uint32_t>::max(), wasm_link_exception,
+                    "bound provider export not found");
+      PSIZAM_ASSERT(signature == be_->get_module().get_function_type(index), wasm_link_exception,
+                    "bound provider export signature mismatch");
+      return index;
+   }
+
+   canonical_call bind_canonical_export(std::string_view name, void* host) override {
+      host_function signature;
+      signature.params.assign(16, types::i64);
+      signature.ret = {types::i64};
+      const auto index = resolve_export_checked(name, signature);
+      return [this, index, host, live = lifetime()](void*, native_value* args, char*) {
+         PSIZAM_ASSERT(!live.expired(), wasm_link_exception, "bound provider instance expired");
+         std::optional<operand_stack_elem> result;
+         if constexpr (Impl::is_jit) {
+            // Signature and arity are fixed by the sealed binding above. Keep
+            // the ordinary protected entry, host/depth restoration and stack
+            // leases, but consume the caller's slots without copying them.
+            result = be_->get_context().execute_dynamic(host, index, args, 16);
+         } else {
+            uint64_t slots[16];
+            for (int i = 0; i < 16; ++i) slots[i] = args[i].i64;
+            result = call_export_by_index(host, index, slots, 16);
+         }
+         native_value value;
+         value.i64 = result ? result->to_ui64() : 0;
+         return value;
+      };
+   }
+
    uint32_t call_cabi_realloc(void*    host,
                               uint32_t index,
                               uint32_t old_ptr,
@@ -761,8 +795,8 @@ void runtime::bind(module_handle& consumer_mod, instance& provider,
 
    // For each WIT-declared method, register a bridge entry on the
    // consumer's host function table. The entry's slow_dispatch routes
-   // calls into the provider via the erased `call_export_canonical` —
-   // works regardless of which backend kind the provider runs on.
+   // calls through a validated callable resolved at bind time, independently
+   // of the provider backend. Each call retains its trap boundary.
    //
    // The bridge uses the canonical-ABI 16-slot flat call convention
    // (matches the typed bind<InterfaceTag>() in runtime.hpp). The
@@ -786,19 +820,18 @@ void runtime::bind(module_handle& consumer_mod, instance& provider,
       e.signature.params.assign(16, types::i64);
       e.signature.ret = {types::i64};
 
-      const std::string export_name = wf.name;
-      e.slow_dispatch = [provider_be, provider_host, export_name](
-         void*, native_value* args, char*) -> native_value
-      {
-         uint64_t slots[16];
-         for (int i = 0; i < 16; ++i)
-            slots[i] = static_cast<uint64_t>(args[i].i64);
-         auto r = provider_be->call_export_canonical(
-            provider_host, std::string_view{export_name}, slots, 16);
-         native_value rv;
-         rv.i64 = r ? r->to_ui64() : 0;
-         return rv;
-      };
+      // PSIO renders WIT names in kebab case while its core Wasm symbols
+      // retain C++ underscores. Prefer an exact export, then the PSIO spelling.
+      std::string export_name = wf.name;
+      if (provider_be->resolve_export(export_name) == std::numeric_limits<uint32_t>::max())
+         std::replace(export_name.begin(), export_name.end(), '-', '_');
+      e.func_name = export_name;
+      e.slow_dispatch = provider_be->bind_canonical_export(export_name, provider_host);
+      if (e.func_name != wf.name) {
+         auto alias = e;
+         alias.func_name = wf.name;
+         mod_impl->table.add_entry(std::move(alias));
+      }
 
       mod_impl->table.add_entry(std::move(e));
    }

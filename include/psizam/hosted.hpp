@@ -752,9 +752,11 @@ struct void_host_lower_policy_erased
 
 template <typename Ret, typename... Args>
 auto invoke_canonical_export_void_erased(instance_be& be, void* host,
-                                         std::string_view name, Args&&... args)
+                                         const instance_be::canonical_call& call,
+                                         uint32_t realloc_index, Args&&... args)
 {
    void_host_lower_policy_erased lp{be, host};
+   lp.realloc_idx = realloc_index;
    // Qualified call: `void_host_lower_policy_erased` is a non-template
    // struct in psizam::detail, so ADL doesn't reach the main template
    // in the parent psizam:: namespace. The templated counterpart above
@@ -763,11 +765,12 @@ auto invoke_canonical_export_void_erased(instance_be& be, void* host,
    (::psizam::canonical_lower_flat(args, lp), ...);
 
    auto& fv = lp.flat_values;
-   uint64_t slots[16];
+   native_value slots[16];
    for (size_t i = 0; i < 16; ++i)
-      slots[i] = i < fv.size() ? fv[i].i64 : uint64_t{0};
+      slots[i].i64 = i < fv.size() ? fv[i].i64 : uint64_t{0};
 
-   auto r = be.call_export_canonical(host, name, slots, 16);
+   const auto result = call(host, slots, nullptr);
+   const std::optional<operand_stack_elem> r{i64_const_t{result.i64}};
 
    if constexpr (std::is_void_v<Ret>) {
       return;
@@ -804,57 +807,48 @@ auto invoke_canonical_export_void_erased(instance_be& be, void* host,
 }
 
 // Backend-agnostic proxy adapter. `_be` is the abstract instance backend;
-// the adapter routes every export call through `call_export_canonical()`
-// rather than a typed Backend::call_with_return — making
-// `instance::as<Tag>()` work for jit / jit2 / jit_llvm in addition to
-// the interpreter.
+// the adapter resolves and validates exports once at construction. Each cached
+// call retains its own protected entry. Handles follow the instance's thread
+// confinement and expire when that instance is destroyed.
 template <typename Info>
 struct void_proxy_adapter_erased
 {
    instance_be* _be;
    void*        _host;
+   std::weak_ptr<void> _lifetime;
+   uint32_t _realloc_index;
+   std::array<instance_be::canonical_call, Info::func_names.size()> _calls;
 
-   void_proxy_adapter_erased(instance_be& b, void* h) : _be(&b), _host(h) {}
+   void_proxy_adapter_erased(instance_be& b, void* h)
+      : _be(&b), _host(h), _lifetime(b.lifetime()), _realloc_index(b.resolve_export("cabi_realloc")) {
+      for (size_t i = 0; i < _calls.size(); ++i)
+         _calls[i] = b.bind_canonical_export(Info::func_names[i], h);
+   }
 
    template <std::size_t Index, typename Fn, typename... Args>
    auto call(Args&&... args)
    {
       using Traits = free_fn_traits<Fn>;
       using Ret    = typename Traits::ReturnType;
-      std::string_view name = Info::func_names[Index];
-
-      // Match composition's tl_* setup so re-entrant cabi_realloc from
-      // within WASM (e.g. when the export returns a string into a host-
-      // allocated return area) finds a working fallback. The lambda
-      // captures `_be` and routes through call_cabi_realloc with a
-      // cached index, same as void_host_lower_policy_erased's alloc().
-      tl_active_backend = static_cast<void*>(_be);
-      tl_active_host    = _host;
-      static thread_local uint32_t cached_realloc_idx =
-         std::numeric_limits<uint32_t>::max();
-      tl_cabi_realloc = [](void* be_void, void* host, uint32_t align, uint32_t size) -> uint32_t {
-         auto* be = static_cast<instance_be*>(be_void);
-         if (cached_realloc_idx == std::numeric_limits<uint32_t>::max())
-            cached_realloc_idx = be->resolve_export("cabi_realloc");
-         return be->call_cabi_realloc(host, cached_realloc_idx, 0u, 0u, align, size);
+      PSIZAM_ASSERT(!_lifetime.expired(), wasm_link_exception, "bound provider instance expired");
+      const auto saved_backend = tl_active_backend;
+      const auto saved_host = tl_active_host;
+      const auto saved_realloc = tl_cabi_realloc;
+      auto restore = scope_guard{[&] {
+         tl_active_backend = saved_backend;
+         tl_active_host = saved_host;
+         tl_cabi_realloc = saved_realloc;
+      }};
+      tl_active_backend = this;
+      tl_active_host = _host;
+      tl_cabi_realloc = [](void* self_void, void* host, uint32_t align, uint32_t size) -> uint32_t {
+         auto* self = static_cast<void_proxy_adapter_erased*>(self_void);
+         PSIZAM_ASSERT(self->_realloc_index != std::numeric_limits<uint32_t>::max(),
+                       wasm_link_exception, "cabi_realloc export not found");
+         return self->_be->call_cabi_realloc(host, self->_realloc_index, 0u, 0u, align, size);
       };
-
-      auto cleanup = [&]() noexcept {
-         tl_active_backend = nullptr;
-         tl_active_host    = nullptr;
-         tl_cabi_realloc   = nullptr;
-      };
-
-      if constexpr (std::is_void_v<Ret>) {
-         invoke_canonical_export_void_erased<Ret>(*_be, _host, name,
-                                                  std::forward<Args>(args)...);
-         cleanup();
-      } else {
-         auto result = invoke_canonical_export_void_erased<Ret>(*_be, _host, name,
-                                                  std::forward<Args>(args)...);
-         cleanup();
-         return result;
-      }
+      return invoke_canonical_export_void_erased<Ret>(*_be, _host, _calls[Index], _realloc_index,
+                                                     std::forward<Args>(args)...);
    }
 };
 

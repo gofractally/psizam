@@ -379,10 +379,8 @@ namespace psizam {
 
 template <typename Tag>
 auto instance::as() {
-   // Step 10: dispatch through `instance_be::call_export_canonical` so
-   // the proxy works for any backend kind (interpreter / jit / jit2 /
-   // jit_llvm). The adapter no longer carries a typed Backend
-   // parameter; it routes everything through the abstract base.
+   // Resolve and validate the reflected exports when constructing the proxy.
+   // Calls work across backend kinds and retain a protected entry per call.
    using info    = ::psio::detail::interface_info<Tag>;
    using adapter = detail::void_proxy_adapter_erased<info>;
    using proxy_t = typename info::template proxy<adapter>;
@@ -594,7 +592,7 @@ namespace detail_runtime {
    // Bridge entry: forward a consumer import to a provider export.
    //
    // For all-scalar signatures (bool / int / float all the way through):
-   // the fast path uses `instance_be::call_export_canonical` directly,
+   // the fast path binds a validated canonical callable once,
    // passing the 16-slot flat call without marshalling — scalars don't
    // need memory translation.
    //
@@ -624,31 +622,11 @@ namespace detail_runtime {
       e.signature.params.assign(16, types::i64);
       e.signature.ret = {types::i64};
 
-      std::string export_name{func_name};
-
       if constexpr (Traits::all_scalar) {
-         // Fast scalar path — no marshalling needed. Cache the export
-         // index on first call and route through `call_export_by_index`
-         // (matching composition's pattern; avoids a string resolve on
-         // every bridge invocation and is what the JIT fast path uses
-         // internally).
-         auto cached_idx = std::make_shared<uint32_t>(
-            std::numeric_limits<uint32_t>::max());
-         e.slow_dispatch = [provider_be, provider_host, export_name, cached_idx](
-            void*, native_value* args, char*) -> native_value
-         {
-            if (*cached_idx == std::numeric_limits<uint32_t>::max())
-               *cached_idx = provider_be->resolve_export(export_name);
-            uint64_t slots[16];
-            for (int i = 0; i < 16; ++i)
-               slots[i] = static_cast<uint64_t>(args[i].i64);
-            auto r = provider_be->call_export_by_index(
-               provider_host, *cached_idx, slots, 16);
-            native_value rv;
-            rv.i64 = r ? r->to_ui64() : 0;
-            return rv;
-         };
+         e.slow_dispatch = provider_be->bind_canonical_export(func_name, provider_host);
       } else {
+         provider_be->resolve_export_checked(func_name, e.signature);
+         auto provider_lifetime = provider_be->lifetime();
          // Threaded-dispatch path — compile a bridge_program once from
          // the FnPtr's C++ type signature, then at each call run the
          // mini-interpreter against consumer + provider linear memories.
@@ -660,9 +638,11 @@ namespace detail_runtime {
          auto prog_ptr = std::make_shared<bridge::bridge_program>(
             bridge::compile_bridge<FnPtr>(func_name));
 
-         e.slow_dispatch = [prog_ptr, provider_be, provider_host, consumer_mod](
+         e.slow_dispatch = [prog_ptr, provider_be, provider_host, consumer_mod, provider_lifetime](
             void*, native_value* args, char*) -> native_value
          {
+            PSIZAM_ASSERT(!provider_lifetime.expired(), wasm_link_exception,
+                          "bound provider instance expired");
             // Consumer's live_be is filled in at instantiate time
             // (after bind). At call time it must be non-null.
             detail::instance_be* consumer_be = live_be_of(consumer_mod);

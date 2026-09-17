@@ -119,7 +119,7 @@ struct live_runtime
    psizam::instance           provider;
    psizam::instance           consumer;
 
-   live_runtime()
+   explicit live_runtime(bool dynamic = false)
       : provider_bytes(read_wasm(PROVIDER_WASM))
       , consumer_bytes(read_wasm(CONSUMER_WASM))
    {
@@ -140,7 +140,8 @@ struct live_runtime
       // bridge entries are read from the host_function_table at
       // construction time.
       provider = rt.instantiate(provider_mod, policy);
-      rt.template bind<greeter>(consumer_mod, provider);
+      if (dynamic) rt.bind(consumer_mod, provider, "greeter");
+      else rt.template bind<greeter>(consumer_mod, provider);
       consumer = rt.instantiate(consumer_mod, policy);
    }
 };
@@ -361,4 +362,74 @@ TEST_CASE("gas_pool: handler throws when pool cannot cover lease",
 
    // try_lease rolls back on failure; pool must be unchanged.
    CHECK(*pool.balance() == 500);
+}
+
+PARITY_TEST_CASE("runtime cached bindings: dynamic scalar names and provider lifetime", "[runtime-bind-cache]") {
+   for (bool dynamic : {false, true}) {
+      live_runtime<TestType> lc(dynamic);
+      auto proxy = lc.consumer.template as<processor>();
+      CHECK(proxy.test_add(19u, 23u) == 42u);
+      CHECK(proxy.test_double(uint64_t{21}) == 42u);
+      lc.provider.get_instance_be()->set_gas_budget(0);
+      CHECK_THROWS(proxy.test_add(1u, 2u));
+      lc.provider.get_instance_be()->set_gas_budget(1000000);
+      CHECK(proxy.test_add(19u, 23u) == 42u);
+      auto moved = std::move(lc.provider);
+      CHECK(proxy.test_add(20u, 22u) == 42u);
+      moved = {};
+      CHECK_THROWS_WITH(proxy.test_add(1u, 2u), "bound provider instance expired");
+      // A failing nested call restores the caller's canonical allocation context.
+      CHECK(psizam::detail::tl_active_backend == nullptr);
+      CHECK(psizam::detail::tl_cabi_realloc == nullptr);
+   }
+}
+
+PARITY_TEST_CASE("runtime cached proxy expires with its instance", "[runtime-bind-cache]") {
+   live_runtime<TestType> lc;
+   auto proxy = lc.consumer.template as<processor>();
+   lc.consumer = {};
+   CHECK_THROWS_WITH(proxy.test_add(1u, 2u), "bound provider instance expired");
+}
+
+PARITY_TEST_CASE("runtime cached bindings validate exports before the first call", "[runtime-bind-cache]") {
+   live_runtime<TestType> lc;
+   // The consumer exports test_add, not add: linking must fail immediately.
+   CHECK_THROWS_WITH(lc.rt.template bind<greeter>(lc.consumer_mod, lc.consumer),
+                     "bound provider export not found");
+   // Core Wasm (i32, i32)->i32 cannot satisfy the canonical 16xi64->i64 binding.
+   const std::vector<uint8_t> narrow{
+      0,97,115,109,1,0,0,0,1,7,1,0x60,2,0x7f,0x7f,1,0x7f,
+      3,2,1,0,7,7,1,3,'a','d','d',0,0,10,9,1,7,0,0x20,0,0x20,1,0x6a,0x0b};
+   psizam::instance_policy policy{}; policy.initial = TestType::value;
+   auto mod = lc.rt.prepare(psizam::wasm_bytes{narrow}, policy);
+   auto provider = lc.rt.instantiate(mod, policy);
+   CHECK_THROWS_WITH(lc.rt.template bind<greeter>(lc.consumer_mod, provider),
+                     "bound provider export signature mismatch");
+}
+
+PARITY_TEST_CASE("runtime cached proxy restores an enclosing canonical context", "[runtime-bind-cache]") {
+   live_runtime<TestType> lc;
+   auto proxy = lc.consumer.template as<processor>();
+   const auto old_backend = psizam::detail::tl_active_backend;
+   const auto old_host = psizam::detail::tl_active_host;
+   const auto old_realloc = psizam::detail::tl_cabi_realloc;
+   auto restore = psizam::scope_guard{[&] {
+      psizam::detail::tl_active_backend = old_backend;
+      psizam::detail::tl_active_host = old_host;
+      psizam::detail::tl_cabi_realloc = old_realloc;
+   }};
+   int outer_backend, outer_host;
+   auto allocator = +[](void*, void*, uint32_t, uint32_t) -> uint32_t { return 0; };
+   psizam::detail::tl_active_backend = &outer_backend;
+   psizam::detail::tl_active_host = &outer_host;
+   psizam::detail::tl_cabi_realloc = allocator;
+   CHECK(proxy.test_add(19u, 23u) == 42u);
+   CHECK(psizam::detail::tl_active_backend == &outer_backend);
+   CHECK(psizam::detail::tl_active_host == &outer_host);
+   CHECK(psizam::detail::tl_cabi_realloc == allocator);
+   lc.provider = {};
+   CHECK_THROWS(proxy.test_add(1u, 2u));
+   CHECK(psizam::detail::tl_active_backend == &outer_backend);
+   CHECK(psizam::detail::tl_active_host == &outer_host);
+   CHECK(psizam::detail::tl_cabi_realloc == allocator);
 }

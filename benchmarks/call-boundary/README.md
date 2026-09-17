@@ -71,3 +71,12 @@ as the runtime-parity test target does. Its resource settings and calling
 convention differ from the natural-signature microbenchmark; compare results
 within each experiment, not across those workloads. Keep warmup and measured
 runs separate and run serially.
+
+Reflected proxies and scalar service bindings validate the canonical Wasm
+signature at binding time and retain one protected entry per invocation. A
+proxy is tied to its instance; destroying the instance invalidates its cached
+calls, and moving the owning instance preserves them. Instances and proxies
+remain confined to their executing thread. The runtime benchmark reads the
+backend's actual gas counter. Logical WIT schema compatibility and dynamic
+non-scalar marshalling are separate from validation of the lowered Wasm
+signature; this scalar benchmark does not certify either.

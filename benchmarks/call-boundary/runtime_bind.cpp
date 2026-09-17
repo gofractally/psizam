@@ -59,6 +59,6 @@ int main(int argc,char** argv) {
       if(sum!=uint64_t(n)*(n-1)/2+uint64_t(n)*17)throw std::runtime_error("result mismatch");
       std::printf("{\"ns_per_call\":%.6f,\"iterations\":%u,\"cpp_allocations\":%llu,\"consumer_gas\":%llu,\"provider_gas\":%llu,\"valid\":true}\n",
          std::chrono::duration<double,std::nano>(end-start).count()/n,n,(unsigned long long)allocations,
-         (unsigned long long)consumer.gas_consumed(),(unsigned long long)provider.gas_consumed());
+         (unsigned long long)consumer.get_instance_be()->gas_consumed_raw(),(unsigned long long)provider.get_instance_be()->gas_consumed_raw());
    }catch(const std::exception& e){std::fprintf(stderr,"%s\n",e.what());return 1;}
 }
