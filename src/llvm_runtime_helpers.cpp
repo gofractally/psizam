@@ -129,7 +129,7 @@ int64_t __psizam_call_host_nothrow(void* ctx, uint32_t func_idx,
 }
 
 // Combined host call: call_depth_dec + call_host + call_depth_inc + get_memory in one.
-// Reduces 4 extern "C" calls to 1, eliminating ~15ns of function call overhead.
+// One exception-safe native frame owns depth, dispatch and memory refresh.
 int64_t __psizam_call_host_full(void* ctx, uint32_t func_idx,
                                  void* args_buf, uint32_t nargs,
                                  void** mem_out) {
@@ -142,22 +142,22 @@ int64_t __psizam_call_host_full(void* ctx, uint32_t func_idx,
       escape_or_throw<wasm_interpreter_exception>("stack overflow");
    c.set_max_call_depth(depth - 1);
 
-   // Call host function
+   // Catch and finish C++ exception cleanup before escaping generated frames.
+   // This is required for both LLVM AOT and JIT, without relying on unwind info.
    int64_t result;
-   if (c._host_trampoline_ptrs) {
-      auto trampoline = c._host_trampoline_ptrs[func_idx];
-      if (trampoline) {
-         result = trampoline(c.get_host_ptr(), args, c.linear_memory()).i64;
-         goto done;
+   longjmp_on_exception([&] {
+      if (c._host_trampoline_ptrs) {
+         auto trampoline = c._host_trampoline_ptrs[func_idx];
+         if (trampoline) {
+            result = trampoline(c.get_host_ptr(), args, c.linear_memory()).i64;
+            return;
+         }
       }
-   }
-   {
       auto* table = c.get_host_table();
       uint32_t mapped_index = c.get_module().import_functions[func_idx];
       result = table->call(c.get_host_ptr(), mapped_index, args, c.linear_memory()).i64;
-   }
+   });
 
-done:
    // Inline call_depth_inc
    c.set_max_call_depth(c.get_remaining_call_depth() + 1);
 

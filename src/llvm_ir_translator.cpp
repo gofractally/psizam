@@ -449,10 +449,10 @@ namespace psizam::detail {
 
          // int64_t __psizam_call_host_full(void* ctx, uint32_t func_idx, void* args, uint32_t nargs, void** mem_out)
          // Combined: depth_dec + call + depth_inc + memory reload in one extern call
-         if (opts.nothrow_host_calls) {
-            rt_call_host_full = decl("__psizam_call_host_full",
-               llvm::FunctionType::get(i64_ty, {ptr_ty, i32_ty, ptr_ty, i32_ty, ptr_ty}, false));
-         }
+         // The combined helper catches host exceptions before escaping JIT
+         // frames, so it is also safe for AOT and JIT without unwind metadata.
+         rt_call_host_full = decl("__psizam_call_host_full",
+            llvm::FunctionType::get(i64_ty, {ptr_ty, i32_ty, ptr_ty, i32_ty, ptr_ty}, false));
 
          // void __psizam_memory_init(void* ctx, uint32_t seg, uint32_t dest, uint32_t src, uint32_t n)
          rt_memory_init = decl("__psizam_memory_init",

@@ -3,6 +3,7 @@
 #include <wasmtime.h>
 #endif
 #include <psizam/backend.hpp>
+#include <psizam/detail/pzam_loader.hpp>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -26,12 +27,17 @@ void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 static void require(bool ok, const char* what) { if(!ok) throw std::runtime_error(what); }
 static uint32_t get_value(uint32_t x) { return (x*1664525u+1013904223u)&0x7fffffffu; }
 static uint32_t mix_value(uint32_t a,uint32_t b) { return (a^(b*33u))&0x7fffffffu; }
+static int destroyed_host_exceptions=0;
+struct host_failure : std::exception {
+   ~host_failure() override { ++destroyed_host_exceptions; }
+   const char* what() const noexcept override { return "host failure"; }
+};
 struct host {
    std::function<int32_t(int32_t,int32_t)> cross_call;
    std::function<void()> on_get;
    bool fail=false;
    __attribute__((noinline)) int32_t get(int32_t x) {
-      if(fail) throw std::runtime_error("host failure");
+      if(fail) throw host_failure{};
       if(on_get) on_get();
       return get_value(x);
    }
@@ -42,6 +48,25 @@ struct options : psizam::default_options {
    psizam::fp_mode fp=psizam::fp_mode::fast;
    uint32_t compile_threads=1;
    uint32_t max_call_depth=64;
+};
+// Execute only the saved native code; the compiler is a separate CLI process.
+template<typename Options, typename DebugInfo> struct saved_llvm_parser {
+   saved_llvm_parser(psizam::growable_allocator&, const Options&, bool, bool) {}
+   psizam::module& parse_module(psizam::wasm_code& bytes,psizam::module& mod,DebugInfo&) {
+      auto file=psizam::pzam_load({reinterpret_cast<const char*>(bytes.data()),bytes.size()});
+      require(file.code_sections.size()==1 && file.code_sections[0].opt_tier==static_cast<uint8_t>(psizam::pzam_opt_tier::llvm_O2),"expected LLVM O2 PZAM");
+      require(file.code_sections[0].compiler.compiler_name=="psizam-llvm","expected LLVM compiler");
+      auto loaded=psizam::detail::load_pzam(file);
+      mod.allocator.release_base_memory();mod=std::move(loaded.mod);
+      loaded.mod.allocator=psizam::growable_allocator{};
+      mod.jit_engine=std::shared_ptr<void>(loaded.exec_code,[](void* p){psizam::jit_allocator::instance().free(p);});
+      return mod;
+   }
+};
+struct saved_llvm {
+   using context=psizam::detail::jit_execution_context<false>;
+   template<typename Options,typename DebugInfo> using parser=saved_llvm_parser<Options,DebugInfo>;
+   static constexpr bool is_jit=true,enable_backtrace=false,reverse_host_args=false;
 };
 using clock_type=std::chrono::steady_clock;
 static constexpr int loops=1000000;
@@ -85,8 +110,10 @@ template<class Impl> void run(psizam::wasm_code code,bool gas,bool check_only) {
       expect_throw([&]{a.call_with_return(&ha,"unreachable");});
       expect_throw([&]{a.call_with_return(&ha,"overflow",int32_t(0));});
       hb.fail=true;
+      const int destroyed_before=destroyed_host_exceptions;
       expect_throw([&]{a.call_by_index(&ha,reenter,int32_t(1),int32_t(1));});
       hb.fail=false;
+      require(destroyed_host_exceptions==destroyed_before+1,"host exception cleanup skipped");
       require(a.call_by_index(&ha,reenter,int32_t(7),int32_t(4))->to_ui32()==get_value(7),"recovery failed");
    }
    // Exercise actual A -> B -> A execution on distinct leased large stacks.
@@ -97,8 +124,10 @@ template<class Impl> void run(psizam::wasm_code code,bool gas,bool check_only) {
       require(a.call_by_index(&ha,reenter,int32_t(17),int32_t(4))->to_ui32()==get_value(17),"large-stack reentry mismatch");
       require(psizam::detail::stack_guard_range.data()==prior_guard.data(),"stale stack guard after return");
       hb.fail=true;
+      const int destroyed_before=destroyed_host_exceptions;
       expect_throw([&]{a.call_by_index(&ha,reenter,int32_t(1),int32_t(1));});
       hb.fail=false;
+      require(destroyed_host_exceptions==destroyed_before+1,"host exception cleanup skipped");
       require(psizam::detail::stack_guard_range.data()==prior_guard.data(),"stale stack guard after trap");
    }
    a.get_module().maximum_stack=max_a;b.get_module().maximum_stack=max_b;
@@ -245,6 +274,7 @@ int main(int argc,char** argv) {
       const bool gas=policy=="gas",checks=std::string(argv[4])=="check";
       if(mode=="jit1")run<psizam::jit>(code,gas,checks);
       else if(mode=="jit2")run<psizam::jit2>(code,gas,checks);
+      else if(mode=="llvm-aot")run<saved_llvm>(code,gas,checks);
 #ifdef PSIZAM_ENABLE_LLVM_BACKEND
       else if(mode=="llvm") {psizam::detail::set_llvm_opt_level(2);run<psizam::jit_llvm>(code,gas,checks);}
 #endif

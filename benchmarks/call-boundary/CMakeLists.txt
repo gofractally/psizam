@@ -38,3 +38,7 @@ foreach(mode IN LISTS call_modes)
     add_test(NAME calls.${mode}.${policy} COMMAND call-boundary ${mode} "${CMAKE_CURRENT_BINARY_DIR}/calls.wasm" ${policy} check)
   endforeach()
 endforeach()
+
+set(call_test_target call-boundary)
+set(call_test_wasm "${CMAKE_CURRENT_BINARY_DIR}/calls.wasm")
+include(aot-tests.cmake)

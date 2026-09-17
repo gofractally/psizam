@@ -66,6 +66,7 @@ namespace psizam::detail {
          {"__psizam_memory_size",      reloc_symbol::llvm_memory_size},
          {"__psizam_memory_grow",      reloc_symbol::llvm_memory_grow},
          {"__psizam_call_host",        reloc_symbol::llvm_call_host},
+         {"__psizam_call_host_full",   reloc_symbol::llvm_call_host_full},
          {"__psizam_memory_init",      reloc_symbol::llvm_memory_init},
          {"__psizam_data_drop",        reloc_symbol::llvm_data_drop},
          {"__psizam_memory_copy",      reloc_symbol::llvm_memory_copy},

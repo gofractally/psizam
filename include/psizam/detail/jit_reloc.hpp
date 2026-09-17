@@ -125,6 +125,8 @@ namespace psizam::detail {
       // Generic/unknown (for addresses not yet categorized)
       unknown,
 
+      llvm_call_host_full,
+
       NUM_SYMBOLS
    };
 

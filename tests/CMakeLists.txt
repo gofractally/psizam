@@ -485,3 +485,7 @@ foreach(_mode IN LISTS _call_modes)
       set_tests_properties(calls.${_mode}.${_policy} PROPERTIES LABELS "execution;quick;calls" TIMEOUT 60)
    endforeach()
 endforeach()
+
+set(call_test_target psizam_call_boundary_tests)
+set(call_test_wasm "${CMAKE_CURRENT_BINARY_DIR}/call-boundary.wasm")
+include("${CMAKE_CURRENT_SOURCE_DIR}/../benchmarks/call-boundary/aot-tests.cmake")
