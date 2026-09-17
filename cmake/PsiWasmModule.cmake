@@ -135,7 +135,15 @@ function(psi_add_wasm_module name)
    foreach(_dir ${_include_dirs})
       # INSTALL_INTERFACE evaluates to empty in a build tree. Guard the
       # entire flag; a bare -I would consume the next include argument.
-      list(APPEND _include_flags "$<$<BOOL:${_dir}>:-I${_dir}>")
+      # A native header dependency (for example distro Boost) can expose
+      # /usr/include. Keep its headers available without overriding the
+      # WASI SDK's C/C++ headers with the host libc headers.
+      if(_dir IN_LIST CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES OR
+         _dir IN_LIST CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES)
+         list(APPEND _include_flags "$<$<BOOL:${_dir}>:-idirafter${_dir}>")
+      else()
+         list(APPEND _include_flags "$<$<BOOL:${_dir}>:-I${_dir}>")
+      endif()
    endforeach()
 
    set(_base_flags
