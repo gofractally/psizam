@@ -5443,7 +5443,10 @@ namespace psizam::detail {
                llvm::Type* ret_ty = wasm_type_to_llvm(ft.return_type);
                if (ret_ty == v128_ty) {
                   // Store full v128 result into args_raw buffer (caller reads it)
-                  b.CreateStore(ret, arr_arg);
+                  // native_value slots promise eight-byte alignment, including
+                  // buffers passed through indirect calls. A vector's natural
+                  // alignment would incorrectly permit aligned x86 stores.
+                  b.CreateAlignedStore(ret, arr_arg, llvm::Align(8));
                   // Return low i64 for scalar result path
                   ret = b.CreateExtractElement(ret, b.getInt32(0));
                } else if (ret_ty == i32_ty) {
