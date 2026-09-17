@@ -7,6 +7,11 @@ C++ runtime proxies. Direct-engine experiments compare no CPU limits, gas/fuel,
 and an armed elapsed deadline. The canonical runtime proxy experiment has
 active gas instrumentation and reports actual backend consumption. Compilation and timing run serially.
 
+The opening abstract interprets the results for reusable psibase services and
+distinguishes measured engine costs from hypothetical transaction-level impact.
+Its call-cost examples assume unchanged surrounding work; they do not measure
+database execution, serialization, full IPC or production tail latency.
+
 ## Inspect or regenerate the report
 
 Install Python 3.11 or newer, matplotlib and reportlab, then run from the extracted kit:
