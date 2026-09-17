@@ -23,6 +23,7 @@
 #include <psizam/exceptions.hpp>
 #include <psizam/types.hpp>
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
