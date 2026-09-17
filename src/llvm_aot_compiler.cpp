@@ -89,6 +89,8 @@ namespace psizam::detail {
          {"__psizam_gas_exhausted_check", reloc_symbol::llvm_gas_exhausted_check},
          {"__psizam_trap",             reloc_symbol::llvm_trap},
          {"__psizam_get_memory",       reloc_symbol::llvm_get_memory},
+         {"fmaf",                     reloc_symbol::libm_f32_fma},
+         {"fma",                      reloc_symbol::libm_f64_fma},
          // Softfloat function symbols
          {"__psizam_sf_f32_add",       reloc_symbol::sf_f32_add},
          {"__psizam_sf_f32_sub",       reloc_symbol::sf_f32_sub},

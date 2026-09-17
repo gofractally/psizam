@@ -25,6 +25,7 @@
 #include <psizam/detail/softfloat.hpp>
 #endif
 
+#include <cmath>
 #include <cstring>
 #include <span>
 #include <vector>
@@ -70,6 +71,15 @@ namespace psizam {
       table[static_cast<uint32_t>(reloc_symbol::call_host_function)] = reinterpret_cast<void*>(&call_host_function);
       table[static_cast<uint32_t>(reloc_symbol::current_memory)]     = reinterpret_cast<void*>(&current_memory_impl);
       table[static_cast<uint32_t>(reloc_symbol::grow_memory)]        = reinterpret_cast<void*>(&grow_memory_impl);
+
+      // LLVM can emit these calls when lowering memory operations or fused
+      // arithmetic for a target without native FMA instructions.
+      table[static_cast<uint32_t>(reloc_symbol::libc_memset)] = reinterpret_cast<void*>(&std::memset);
+      table[static_cast<uint32_t>(reloc_symbol::libc_memmove)] = reinterpret_cast<void*>(&std::memmove);
+      table[static_cast<uint32_t>(reloc_symbol::libm_f32_fma)] =
+         reinterpret_cast<void*>(static_cast<float (*)(float, float, float)>(&::fmaf));
+      table[static_cast<uint32_t>(reloc_symbol::libm_f64_fma)] =
+         reinterpret_cast<void*>(static_cast<double (*)(double, double, double)>(&::fma));
 
       // Bulk memory
       table[static_cast<uint32_t>(reloc_symbol::memory_fill)]  = reinterpret_cast<void*>(&memory_fill_impl);

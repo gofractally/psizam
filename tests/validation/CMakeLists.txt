@@ -26,12 +26,12 @@ target_link_libraries(psizam_regalloc_tests PRIVATE psizam psizam-exec)
 add_test(NAME execution.regalloc COMMAND psizam_regalloc_tests)
 set_tests_properties(execution.regalloc PROPERTIES LABELS "execution;quick" TIMEOUT 30)
 
-set(_fixtures integer normal-return scalar-f32 scalar-f64 scalar-conversions simd-f32 simd-f64 simd-mixed-call)
+set(_fixtures integer normal-return scalar-f32 scalar-f64 scalar-conversions simd-f32 simd-f64 simd-mixed-call simd-relaxed-fma)
 set(_wasms)
 foreach(_fixture IN LISTS _fixtures)
    set(_wasm "${CMAKE_CURRENT_BINARY_DIR}/${_fixture}.wasm")
    add_custom_command(OUTPUT "${_wasm}"
-      COMMAND "${PSIZAM_WAT2WASM}" --enable-tail-call "${CMAKE_CURRENT_SOURCE_DIR}/${_fixture}.wat" -o "${_wasm}"
+      COMMAND "${PSIZAM_WAT2WASM}" --enable-tail-call --enable-relaxed-simd "${CMAKE_CURRENT_SOURCE_DIR}/${_fixture}.wat" -o "${_wasm}"
       DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${_fixture}.wat" VERBATIM)
    list(APPEND _wasms "${_wasm}")
 endforeach()

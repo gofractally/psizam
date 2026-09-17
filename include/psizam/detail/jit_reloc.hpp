@@ -137,6 +137,9 @@ namespace psizam::detail {
       #undef PSIZAM_JIT1_A64
       #undef PSIZAM_JIT1_SOFTFLOAT
 
+      libm_f32_fma,
+      libm_f64_fma,
+
       NUM_SYMBOLS
    };
 
