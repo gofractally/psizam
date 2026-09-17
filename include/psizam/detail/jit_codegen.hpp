@@ -637,10 +637,15 @@ namespace psizam::detail {
          // Slow: call __psizam_gas_exhausted_check(ctx)
          this->emit_bytes(0x57);
          this->emit_bytes(0x56);
+         // Preserve the operand-stack position while satisfying the SysV ABI.
+         this->emit_bytes(0x48, 0x89, 0xe0); // mov %rsp, %rax
+         this->emit_bytes(0x48, 0x83, 0xe4, 0xf0); // andq $-16, %rsp
+         this->emit_bytes(0x50, 0x50);       // saved restore point, alignment pad
          this->emit_bytes(0x48, 0xb8);
          emit_reloc(reloc_symbol::llvm_gas_exhausted_check);
          this->emit_operand_ptr(&__psizam_gas_exhausted_check);
          this->emit(CALL, rax);
+         this->emit_bytes(0x48, 0x8b, 0x24, 0x24); // mov (%rsp), %rsp
          this->emit_bytes(0x5e);
          this->emit_bytes(0x5f);
 

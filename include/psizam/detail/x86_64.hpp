@@ -287,8 +287,12 @@ namespace psizam::detail {
          // Slow path: call __psizam_gas_exhausted_check(ctx)
          emit_bytes(0x57);                                 // pushq %rdi
          emit_bytes(0x56);                                 // pushq %rsi
+         // Operand-stack depth may leave RSP eight bytes off SysV alignment.
+         // The exception handler must enter C++ with an aligned call frame.
+         emit_align_stack(rax);
          emit_mov(&__psizam_gas_exhausted_check, rax);
          emit(CALL, rax);
+         emit_restore_stack();
          emit_bytes(0x5e);                                 // popq %rsi
          emit_bytes(0x5f);                                 // popq %rdi
 
