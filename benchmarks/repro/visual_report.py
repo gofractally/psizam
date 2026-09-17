@@ -167,11 +167,10 @@ def generate(s,out,extension=None):
         comparison=json.loads((out/'platform-comparison/platform-comparison.json').read_text())
         title('How relative performance changes across platforms')
         para('Each host supplies its own Wasmtime reference. A value of 1.20x means psizam achieves 20% higher throughput for the measured work on that host. Comparing these ratios shows whether psizam becomes more competitive in the recorded VPS environment.')
-        para('These are platform comparisons, not isolated instruction-set measurements: CPU, operating system, LLVM version and engine revision differ. All eight compute Wasm binaries, CoreMark, the service-call fixture and both compiler-job fixture manifests match exactly. The Wasmtime version is also identical.','Small')
+        para('These are platform comparisons, not isolated instruction-set measurements: CPU, operating system, engine-build LLVM version and engine revision differ. All eight compute Wasm binaries, CoreMark, the service-call fixture and the compared compiler inputs match exactly. The Wasmtime version is also identical.','Small')
         rows=[['Saved LLVM / Wasmtime speed','Apple M5 Max','EPYC-Turin VPS']]
         metrics=[('Eight compute workloads',{'kind':'compute'}),('CoreMark',{'kind':'coremark'}),
-                 ('Clang: SipHash C++ job',{'kind':'clang','workload':'SipHash.cpp'}),
-                 ('Clang: APInt C++ job',{'kind':'clang','workload':'APInt.cpp'})]
+                 *[('Clang: '+name,{'kind':'clang','workload':name}) for name in comparison.get('shared_compiler_workloads',['SipHash.cpp','APInt.cpp'])]]
         for name,fields in metrics:
             values=[]
             for platform in ['ARM','x86']:
@@ -194,15 +193,20 @@ def generate(s,out,extension=None):
             'platform-repeated_host_query_ns.png':'Repeated host queries across platforms',
             'platform-service_a_host_service_b_ns.png':'Protected service round trips across platforms'}
         for name in comparison['charts']:
-            title(descriptions[name]);picture('platform-comparison/'+name,390)
+            native_chart=name.startswith('platform-clang-')
+            heading='Compiler penalty versus native: '+name[len('platform-clang-'):-len('-native.png')] if native_chart else descriptions[name]
+            title(heading);picture('platform-comparison/'+name,390)
             charts.append('platform-comparison/'+name)
-            para('Wasmtime is 100 on each host. Higher bars favor psizam; a higher VPS bar than its ARM counterpart indicates improved relative performance for that measurement. Compute uses Wasmtime AOT. Call tests use the cached Wasmtime API with per-entry trap protection and tiny scalar payloads. These are not complete psibase IPC measurements.','Small')
+            para(('Native Clang 22.1.2 is 1 on each host; lower multipliers mean a smaller penalty for running the compiler inside Wasm. Each trial emits the same wasm32 object content from the same preprocessed input. Saved engines include file loading, instantiation, guest compilation and output. Native and Wasm compiler build configurations and ABIs differ; this does not isolate engine execution overhead.' if native_chart else
+                  'Wasmtime is 100 on each host. Higher bars favor psizam; a higher VPS bar than its ARM counterpart indicates improved relative performance for that measurement. Compute uses Wasmtime AOT. Call tests use the cached Wasmtime API with per-entry trap protection and tiny scalar payloads. These are not complete psibase IPC measurements.'),'Small')
     title('How the tests were run and what they cover')
     config=s['config'];hardware=config.get('hardware',{}).get('machdep.cpu.brand_string',config['machine'])
     para(html.escape(hardware+' | '+config['platform']+' | '+config['date_utc']))
     if comprehensive:
         para('Build toolchain: '+html.escape(config['wasi_compiler'].splitlines()[0])+' (WASI SDK); '+html.escape(config['native_compiler'].splitlines()[0])+'. Workloads come from the pinned LLVM test suite and EEMBC CoreMark sources. Revisions, file hashes, build commands and local instrumentation are retained with the benchmark evidence.','Small')
     para(f'<b>Limits:</b> gas budget {s["gas_budget"]:,}; wall deadline {s["timeout_ms"]/1000:g} seconds, armed for every timeout trial. psizam uses code-page interruption for JIT1, JIT2, LLVM JIT and saved PZAM. Wasmtime uses epoch interruption. None of these is a process-CPU-time quota.')
+    if 'extended' in s and s['extended']['clang'].get('paired'):
+        para('The paired native/compiler jobs use larger non-exhausting limits: a 10^13 work budget or 600-second deadline, with a 900-second process watchdog. Their native baseline has no engine resource instrumentation.','Small')
     para('Gas/fuel units differ between engines and are not equivalent amounts of work. Performance budgets are deliberately non-exhausting. Both instrumented execution and actual exhaustion are tested. Timeout profiles omit gas accounting; the no-check profile omits both resource mechanisms.')
     para(f'<b>Correctness:</b> {s["enforcement_checks"]} resource checks pass, including finite completion, infinite loops and nonterminating module initialization. psizam must report its exact gas/timeout exception; Wasmtime must report its fuel/interrupt trap. The outer {s["outer_watchdog_s"]}-second process watchdog is distinct and never counts as successful enforcement.')
     para(f'{s["validation_checks"]} output comparisons pass against native output where applicable. PolyBench compares its printed arrays; this is not bitwise floating-point equality. CoreMark, if included, requires both CRC seed sets and at least ten seconds per accepted run.')
@@ -211,11 +215,14 @@ def generate(s,out,extension=None):
     runtime_workers=sorted({int(v.split('/j')[1]) for v in profiles})
     selection='the one-worker build' if runtime_workers==[1] else 'the lowest compiler worker count available for each engine'
     para('Compute runtime charts and tables show one entry per engine, using '+selection+' consistently across tests and limit settings. Build parallelism is compared on the compilation page. Measurements from all compiler configurations remain in the raw data; they are not pooled into runtime results.','Small')
-    para(s.get('scope_text') or ('This report covers eight compute workloads, sustained CoreMark, Clang artifact creation and two C++ jobs, and scalar host-call microbenchmarks. It does not measure a complete Clang bootstrap, cold-cache deployment, concurrent instances, or blocked host calls. ' if 'extended' in s else 'This report covers only the workloads listed in its charts. It does not measure a complete Clang bootstrap, host-call microbenchmarks, cold-cache deployment, concurrent instances, or blocked host calls. ')+'Page interruption is exercised with one execution owning its module.','Small')
+    para(s.get('scope_text') or ('This report covers eight compute workloads, sustained CoreMark, Clang artifact creation and C++ compilation jobs, and scalar host-call microbenchmarks. It does not time a complete Clang bootstrap, cold-cache deployment, concurrent instances, or blocked host calls. ' if 'extended' in s else 'This report covers only the workloads listed in its charts. It does not measure a complete Clang bootstrap, host-call microbenchmarks, cold-cache deployment, concurrent instances, or blocked host calls. ')+'Page interruption is exercised with one execution owning its module.','Small')
     if 'extended' in s:
         title('Source identities and reproducibility')
         clang_workers=s['extended']['clang']['config']['runtime_workers']
         para(f'Compute, CoreMark and compiler jobs use the same frozen CLI binaries. The supplementary scalar-boundary runner matches that source; the natural-signature service and canonical-proxy experiments use their independently archived public-runtime build. CoreMark has three measured trials for each seed set; C++ jobs and host calls have five; artifact creation has three. Clang runtime uses the {clang_workers}-worker saved builds; compute runtime uses the one-worker saved builds. The reproduction kit records each experiment separately and retains all commands and outputs. Compiler-worker counts are never pooled or shown as extra runtime engines.','Small')
+        paired=s['extended']['clang'].get('paired')
+        if paired:
+            para('Compiler-job cohort: '+html.escape(paired['config']['date_utc'])+'. Native compiler: '+html.escape(paired['config']['native']['version'].splitlines()[0])+'. Its jobs reuse the verified Wasm engine artifacts and interleave all native/Wasm trials; no compiler timing cell combines cohorts. Native hashes, library identities and input/output equivalence evidence are in evidence/compiler-jobs-native/.','Small')
     if 'extended' in s:
         e=s['extended']; writer=e['artifact_sizes']['jit1_provenance']
         para('Service-call source commit: '+e['service_cohort']['commit']+'; manifest: '+e['service_cohort']['source_manifest_sha256']+'.<br/>JIT1 saved-file writer / release source commit: '+writer['config']['psizam']['commit']+'; manifest: '+writer['source_manifest_sha256']+'. Each experiment retains its own source archive, compiler hash and inputs. No different builds are pooled within a timing cell.','Small')
@@ -233,7 +240,7 @@ def generate(s,out,extension=None):
                 if heading!='Contents':self.notify('TOCEntry',(0,heading,self.page,key))
     doc=ReportDocument(str(out/'psizam-cranelift-report.pdf'),pagesize=(612,792),rightMargin=54,leftMargin=54,topMargin=43,bottomMargin=48,title='psizam and Cranelift: '+('completed benchmark results' if extension else 'comprehensive performance and release readiness' if 'extended' in s else 'compute speed, work budgets and timeouts'))
     if comprehensive:
-        toc=TableOfContents();toc.levelStyles=[ParagraphStyle(name='ContentsEntry',fontName='Helvetica',fontSize=8.5,leading=10,spaceBefore=0,textColor=colors.HexColor('#19364B'))]
+        toc=TableOfContents();toc.levelStyles=[ParagraphStyle(name='ContentsEntry',fontName='Helvetica',fontSize=8,leading=9,spaceBefore=0,textColor=colors.HexColor('#19364B'))]
         toc.tableStyle.add('TOPPADDING',(0,0),(-1,-1),0)
         toc.tableStyle.add('BOTTOMPADDING',(0,0),(-1,-1),0)
         first_break=next(i for i,f in enumerate(story) if isinstance(f,PageBreak))

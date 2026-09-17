@@ -92,7 +92,11 @@ def main():
                   [dict(r,mode='native',profile='none') for r in read('coremark/native-coremark.json')['measurements']])
         write_csv('compiler-preparation.csv',data['compilation']+
                   [dict(r,workload='clang') for r in read('clang-resource-compilation.json')])
-        write_csv('compiler-jobs.csv',read('clang-resource-measurements.json'))
+        write_csv('compiler-jobs.csv',read('compiler-jobs-native/measurements.json' if s['extended']['clang'].get('paired') else 'clang-resource-measurements.json'))
+        if s['extended']['clang'].get('paired'):
+            write_csv('compiler-job-summary.csv',[
+                dict(zip(['workload','mode','profile'],key.split('/')),**cell)
+                for key,cell in sorted(s['extended']['clang']['jobs'].items())])
         write_csv('host-calls.csv',read('boundary.json'))
         directory=s['extended']['service_cohort']['directory']
         write_csv('service-calls.csv',read(directory+'/service-calls/measurements.json'))

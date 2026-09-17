@@ -1,7 +1,7 @@
 # Reproducing the comprehensive psizam / Cranelift report
 
 The report contains the latest completed measurements for each experiment: eight compute workloads,
-CoreMark, Clang artifact creation and two real C++ jobs, memory, startup costs,
+CoreMark, Clang artifact creation and real C++ jobs, memory, startup costs,
 scalar host-call paths, independently protected service round trips, and actual
 C++ runtime proxies. Direct-engine experiments compare no CPU limits, gas/fuel,
 and an armed elapsed deadline. The canonical runtime proxy experiment has
@@ -36,7 +36,7 @@ build. `evidence/artifact-sizes.json` identifies the JIT1 writer snapshot used f
 saved-file sizes and release validation. Timing cells never pool different builds.
 No native executable or native-code cache is needed to regenerate charts.
 
-When `platform-comparison/` is included, it preserves the prior ARM summary
+When `platform-comparison/` is included, it preserves the paired ARM summary
 and a comparison against this run, also included in the PDF. The archived
 `evidence/platform-reference/arm-summary.json` makes full report regeneration
 include those comparison pages automatically. Regenerate just its bars with:
@@ -50,6 +50,25 @@ python3 experiment-source/compare_platforms.py \
 The comparison requires identical compute Wasm hashes, compiler fixtures and
 Wasmtime versions. Each host supplies its own Wasmtime reference; the resulting
 ratios describe the measured platforms, without isolating instruction-set effects.
+
+The expanded compiler cohort includes SipHash, APInt and LLVM's LLParser, with
+native Clang 22.1.2 as a same-host reference. Both native and Wasm compilers emit
+wasm32 objects from identical frozen preprocessed inputs using `-cc1 -O2`.
+Absolute-time charts include native; separate saved-compiler charts show the
+elapsed-time multiplier versus native. Both ARM and VPS compiler cohorts use
+all three inputs; the cross-platform pages compare their native-relative costs.
+
+`evidence/compiler-jobs-native/` retains the randomized paired trials, native
+compiler/version/library identities, input hashes and reference objects. All
+object bytes except the `producers` custom section must match between native and
+Wasm. That section identifies the different compiler builds; code, data,
+relocations, symbols and target features are never excluded. Raw object hashes
+remain separately checked for each compiler. The native release and WASI fork
+share version 22.1.2 but differ in build options, ABI and allocator, so this is a
+complete compiler-deployment comparison, not isolated Wasm instruction overhead.
+The pinned Wasm compiler itself was built with MinSizeRel (`-Os`) and ThinLTO;
+the `-O2` benchmark argument controls the object produced by that compiler.
+The original guest-build CMake cache is retained in `platform-config/`.
 
 ## Build and rerun the measurements
 
@@ -90,6 +109,36 @@ cross-compilation checks. Adjust paths for another distribution. Worker budgets 
 from the kit's recorded compute and compiler matrices. CPU affinity applies
 to execution; compilation retains the available CPU set.
 
+For a kit containing `compiler-jobs-native`, also set `BENCH_NATIVE_CLANG` to
+native Clang 22.1.2. The VPS uses the official Linux X64 release archive recorded
+in that cohort's `config.json` (including download URL and SHA-256). The replay
+checks compiler version and object equivalence before timing. Acquire and
+verify the compiler before starting any timed stages. Its runtime libraries
+and binary are hashed; they are not bundled in the reproduction kit.
+For a different native compiler distribution, set `BENCH_NATIVE_TOOLCHAIN` to
+its acquisition/provenance JSON; do not attribute it to the recorded Linux archive.
+
+To rerun only compiler jobs against the existing validated tools and artifacts,
+use a working measurement directory whose `compiler-jobs-native` subdirectory
+does not already exist, then run `compiler_jobs.py prepare` and `measure`.
+Pass `--native-cc`, `--native-toolchain` (the acquisition JSON from the recorded
+configuration), `--extra-fixture .../LLParser.cpp.ii`,
+`--fixture-metadata .../fixture-metadata.json`, and `--cpu 2` on the VPS to
+`prepare`. The script refuses to overwrite evidence. This focused experiment
+does not require rerunning compute, CoreMark, calls or artifact compilation.
+Retain the `measurement-source` archive and its SHA-256 manifest using the
+small archive step in `replay-comprehensive.sh` before `measure`; it records the
+actual measurement harness independently of the older frozen engine source.
+
+The recorded VPS compiler cohort has two serial segments with unchanged tools,
+artifacts and inputs. `pause-state.json` identifies the accepted prefix; the
+unpublished boundary trial is excluded and repeated. `resume_compiler_jobs.py`
+checks that prefix and every input identity, runs seven excluded conditioning
+jobs, then completes the original randomized schedule with distinct log names.
+`resumption.json` and `resume-conditioning.json` preserve this audit. Archive
+the helper and add its hash to `measurement-source.json` before resuming. A fresh
+reproduction can run the entire schedule continuously; no pause is required.
+
 Use a new measurement directory. The script refuses to overwrite trial files.
 It verifies pinned input hashes, records every process command and output,
 checks exact compiler-object hashes and requires all timing cells. A failed
@@ -105,7 +154,7 @@ states that limitation explicitly.
 
 The pinned `clang.wasm` imports only WASI Preview 1 functions. It runs with
 Wasmtime's standard WASI implementation; a psizam-specific host is unnecessary.
-Both compiler workloads in this suite run the same guest compiler under
+All compiler workloads in this suite run the same guest compiler under
 Wasmtime and psizam and require the same output-object SHA-256.
 
 For example, with the pinned files under `fixtures/` and an existing `output/`:
@@ -145,6 +194,10 @@ Wasmtime uses its own saved native-code artifact, not `.pzam`.
   Saved LLVM
   and Cranelift use the higher-worker artifact consistently. Whole-module LLVM ORC
   cold Clang startup and a full Clang self-bootstrap are outside this test.
+  The paired native/compiler cohort uses three inputs, including LLParser's
+  11,108 original source lines (145,305 preprocessed lines). Native and Wasm
+  process trials are interleaved. Native appears only as an unrestricted
+  baseline; no artificial native gas/fuel result is implied.
 - Boundaries: five trials plus one warmup, ten million scalar calls per path.
   Checked and cached/unchecked API paths have different semantics, stated in
   the report. This does not benchmark WIT records or serialization.
@@ -171,6 +224,9 @@ Wasmtime uses its own saved native-code artifact, not `.pzam`.
 - Limits: psizam gas and Wasmtime fuel units differ. Timed runs use a 10^12 work
   budget and 120-second elapsed deadline, both sufficient to finish. Separate
   gates verify exhaustion. No-limit profiles omit both kinds of checking.
+  The larger paired compiler cohort uses a 10^13 budget and 600-second deadline,
+  with a separate 900-second outer watchdog. These remain non-exhausting
+  performance settings, not equivalent counts of work across engines.
 - Runtime figures show one fixed build per engine; worker counts appear only
   in compilation comparisons. Overhead bars use a 0% unrestricted baseline and
   show only work-budget and time-limit overhead, including negative variation.

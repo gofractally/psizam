@@ -28,6 +28,24 @@ case "$(uname -m)" in
   *) echo 'Unsupported host architecture.' >&2; exit 2 ;;
 esac
 python3 "$bench_kit/experiment-source/verify_package.py" "$bench_kit"
+if [ -d "$bench_kit/evidence/compiler-jobs-native" ]; then
+  if [ -z "${BENCH_NATIVE_CLANG:-}" ]; then
+    echo 'This kit includes paired native/compiler jobs. Set BENCH_NATIVE_CLANG to native Clang 22.1.2.' >&2
+    exit 2
+  fi
+  case "$("$BENCH_NATIVE_CLANG" --version)" in
+    *22.1.2*) ;;
+    *) echo 'BENCH_NATIVE_CLANG must be version 22.1.2.' >&2; exit 2 ;;
+  esac
+  python3 - "$BENCH_NATIVE_CLANG" "$bench_kit/evidence/compiler-jobs-native/config.json" "${BENCH_NATIVE_TOOLCHAIN:-}" <<'PY'
+import hashlib,json,sys
+from pathlib import Path
+with Path(sys.argv[1]).open('rb') as f:actual=hashlib.file_digest(f,'sha256').hexdigest()
+expected=json.load(open(sys.argv[2]))['native']['sha256']
+if actual!=expected and not sys.argv[3]:
+    raise SystemExit('Different native compiler build: set BENCH_NATIVE_TOOLCHAIN to its acquisition/provenance JSON.')
+PY
+fi
 bench_threads=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(",".join(map(str,sorted({int(v.split("/j")[1].split("/")[0]) for v in d["matrix"] if v.startswith(("llvm-o2-pzam/","cranelift-aot/"))}))))' "$bench_kit/evidence/resources.json")
 bench_clang_threads=$(python3 -c 'import json,sys; print(",".join(map(str,json.load(open(sys.argv[1]))["threads"])))' "$bench_kit/evidence/clang-resource-config.json")
 bench_run() {
@@ -84,7 +102,57 @@ fi
 bench_run "$bench_scripts/resources.py" --work "$bench_work" --threads "$bench_threads" --samples 5 --compile-samples 3
 bench_run "$bench_scripts/clang_resources.py" prepare --work "$bench_work" --fixtures "$bench_kit/evidence/compiler-fixtures" --threads "$bench_clang_threads"
 bench_run "$bench_scripts/clang_resources.py" compile --work "$bench_work"
-bench_run "$bench_scripts/clang_resources.py" measure --work "$bench_work"
+if [ -d "$bench_kit/evidence/compiler-jobs-native" ]; then
+  python3 - "$bench_kit/evidence/compiler-jobs-native/config.json" "$bench_build/native-clang-acquisition.json" <<'PY'
+import json,sys
+config=json.load(open(sys.argv[1]))
+with open(sys.argv[2],'w') as f:json.dump(config['native']['acquisition'],f,indent=2)
+PY
+  if [ -n "${BENCH_NATIVE_TOOLCHAIN:-}" ]; then
+    cp "$BENCH_NATIVE_TOOLCHAIN" "$bench_build/native-clang-acquisition.json"
+  fi
+  set --
+  if [ -n "${BENCH_CPU:-}" ]; then set -- --cpu "$BENCH_CPU"; fi
+  python3 "$bench_scripts/compiler_jobs.py" prepare --work "$bench_work" \
+    --native-cc "$BENCH_NATIVE_CLANG" --native-toolchain "$bench_build/native-clang-acquisition.json" \
+    --extra-fixture "$bench_kit/evidence/compiler-jobs-native/inputs/LLParser.cpp.ii" \
+    --fixture-metadata "$bench_kit/evidence/compiler-jobs-native/fixture-metadata.json" "$@"
+  python3 - "$bench_scripts" "$bench_work/compiler-jobs-native" <<'PY'
+import hashlib,json,shutil,sys
+from pathlib import Path
+source=Path(sys.argv[1]);work=Path(sys.argv[2]);archive=work/'measurement-source';archive.mkdir()
+manifest={}
+for name in ['compiler_jobs.py','run.py','resources.py','clang_resources.py']:
+    shutil.copy2(source/name,archive/name)
+    manifest[name]=hashlib.sha256((archive/name).read_bytes()).hexdigest()
+(work/'measurement-source.json').write_text(json.dumps(manifest,indent=2)+'\n')
+PY
+  # Homebrew Clang's non-system libraries use this recorded loader-relative RPATH.
+  # Linux preparation already resolves and hashes libraries with ldd.
+  python3 - "$bench_work/compiler-jobs-native/config.json" <<'PY'
+import hashlib,json,platform,subprocess,sys
+from pathlib import Path
+if platform.system()=='Darwin':
+    path=Path(sys.argv[1]);config=json.loads(path.read_text());cc=Path(config['native']['path'])
+    linked=subprocess.check_output(['otool','-L',str(cc)],text=True)
+    loads=subprocess.check_output(['otool','-l',str(cc)],text=True)
+    if '@rpath/' in linked and '@loader_path/../lib' not in loads:
+        raise SystemExit('Resolve this native compiler library layout before timing.')
+    libraries=[]
+    for line in linked.splitlines()[1:]:
+        name=line.strip().split(' (')[0]
+        if name.startswith('@rpath/'):
+            lib=(cc.parent.parent/'lib'/name[len('@rpath/'):]).resolve()
+            with lib.open('rb') as f:digest=hashlib.file_digest(f,'sha256').hexdigest()
+            libraries.append(dict(path=str(lib),sha256=digest))
+    config['native']['libraries']=libraries
+    config['native']['library_resolution']='otool: @loader_path/../lib; Apple system libraries remain in the OS dyld shared cache.'
+    path.write_text(json.dumps(config,indent=2)+'\n')
+PY
+  python3 "$bench_scripts/compiler_jobs.py" measure --work "$bench_work"
+else
+  bench_run "$bench_scripts/clang_resources.py" measure --work "$bench_work"
+fi
 bench_run "$bench_scripts/boundary.py" --work "$bench_work" --runner "$bench_build/compute/runner/repro-boundary" --samples 5
 for bench_policy in none gas; do
   bench_gas=off

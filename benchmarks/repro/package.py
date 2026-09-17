@@ -21,6 +21,15 @@ def main():
     data=json.loads((w/'resources.json').read_text())
     if not data.get('complete'):raise ValueError('Cannot package an incomplete matrix')
     manifest=json.loads((w/'source-manifest.json').read_text())
+    compiler_config=w/'compiler-jobs-native/config.json'
+    if compiler_config.exists():
+        measured=json.loads(compiler_config.read_text())
+        if sha(Path(__file__).with_name('compiler_jobs.py'))!=measured['script_sha256']:
+            raise ValueError('Paired compiler measurement script changed')
+        harness_manifest=json.loads((w/'compiler-jobs-native/measurement-source.json').read_text())
+        for name,digest in harness_manifest.items():
+            if sha(Path(__file__).with_name(name))!=digest:
+                raise ValueError('Compiler measurement dependency changed: '+name)
     for repo,files in manifest.items():
         for name,digest in files.items():
             if sha(w/'source'/repo/name)!=digest:raise ValueError('Frozen source changed: '+repo+'/'+name)
@@ -33,7 +42,7 @@ def main():
         shutil.copy2(source,directory/name)
     for item in w.iterdir():
         if item.is_file() and item.suffix in ['.json','.jsonl']:shutil.copy2(item,e/item.name)
-    for name in ['logs','sources','validation-evidence','platform-config','platform-reference']:
+    for name in ['logs','sources','validation-evidence','platform-config','platform-reference','compiler-jobs-native']:
         if (w/name).exists():shutil.copytree(w/name,e/name)
     (e/'modules').mkdir()
     for item in (w/'modules').glob('*.wasm'):
@@ -67,7 +76,7 @@ def main():
             size_evidence_sha256=sha(size_file),
             omitted_native_artifacts=sorted({r['artifact'] for r in sizes['rows']})))
         engineering=kit/'engineering';engineering.mkdir()
-        for name in ['host-call-performance.md','runtime-release-review.md']:
+        for name in ['host-call-performance.md','runtime-release-review.md','compiler-bootstrap.md']:
             shutil.copy2(Path(__file__).resolve().parents[2]/'docs'/name,engineering/name)
     for name in ['summary.json','psizam-cranelift-report.pdf','report.html','charts.json',
                  *sorted(p.name for p in out.glob('*.csv')),*json.loads((out/'charts.json').read_text())]:
@@ -78,7 +87,7 @@ def main():
     shutil.copy2(Path(__file__).parent/('COMPREHENSIVE.md' if a.comprehensive else 'README.md'),kit/'README.md')
     # Report presentation may evolve independently of the frozen measured engine.
     renderer=kit/'report-source';renderer.mkdir()
-    for name in ['report.py','visual_report.py','extended_report.py','service_report.py','size_report.py','provenance.py','run.py','compare_platforms.py','sources.lock.json']:
+    for name in ['report.py','visual_report.py','extended_report.py','service_report.py','size_report.py','provenance.py','run.py','compare_platforms.py','compiler_jobs.py','compiler_job_report.py','clang_resources.py','resources.py','sources.lock.json']:
         shutil.copy2(Path(__file__).parent/name,renderer/name)
     (renderer/'README.md').write_text('Requires Python 3.11 or newer, matplotlib and reportlab. From the kit root, verify the kit and regenerate the report with:\n\n```sh\npython3 experiment-source/verify_package.py .\nPYTHONDONTWRITEBYTECODE=1 python3 report-source/report.py --work evidence --out ../regenerated-report'+(' --comprehensive' if a.comprehensive else '')+'\n```\n\nThe source/ directory preserves the compute/compiler snapshot. evidence/public-release/source preserves the measured call build; the JIT1 source location is recorded in artifact-sizes.json. Native artifacts are omitted explicitly; inspected sizes and SHA-256 identities are retained. report-source/ contains the renderer for the included report.\n')
     save(kit/'MANIFEST.json',{str(f.relative_to(kit)):{'sha256':sha(f),'bytes':f.stat().st_size} for f in sorted(kit.rglob('*')) if f.is_file()})

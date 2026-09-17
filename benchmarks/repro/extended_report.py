@@ -77,11 +77,18 @@ def summarize_experiments(work, main):
               for t in ([1] if m=='jit2-pzam' else cc['threads'])
               for p in (POLICIES if m=='cranelift-aot' else ['none','gas'])}
     if set(comp_cells)!=expected:raise ValueError('Incomplete Clang compilation cells')
-    jobs=read('clang-resource-measurements.json')
-    if any(r['object_sha256']!=cc['fixtures']['objects'][r['workload']] for r in jobs):raise ValueError('Clang object mismatch')
-    job_cells=cells(jobs,['workload','mode','profile'],cc['samples'],['wall_s','peak_rss_bytes'])
-    if set(job_cells)!={f'{n}/{m}/{p}' for n in cc['fixtures']['objects'] for m in cc['modes'] for p in POLICIES}:
-        raise ValueError('Incomplete Clang job cells')
+    paired=None
+    if (work/'compiler-jobs-native').exists():
+        from compiler_job_report import summarize as summarize_compiler_jobs
+        paired=summarize_compiler_jobs(work,main,cc)
+        job_cells=paired['cells'];job_trials=paired['trials']
+    else:
+        jobs=read('clang-resource-measurements.json')
+        if any(r['object_sha256']!=cc['fixtures']['objects'][r['workload']] for r in jobs):raise ValueError('Clang object mismatch')
+        job_cells=cells(jobs,['workload','mode','profile'],cc['samples'],['wall_s','peak_rss_bytes'])
+        if set(job_cells)!={f'{n}/{m}/{p}' for n in cc['fixtures']['objects'] for m in cc['modes'] for p in POLICIES}:
+            raise ValueError('Incomplete Clang job cells')
+        job_trials=len(jobs)
     bc=read('boundary-config.json');boundary=read('boundary.json')
     if bc['engine_source_manifest_sha256']!=main['source_manifest_sha256']:raise ValueError('Boundary source identity differs')
     boundary_cells=cells(boundary,['mode','profile'],bc['samples'],
@@ -109,7 +116,7 @@ def summarize_experiments(work, main):
                        'counters_available':counters_available,
                        'trials':len(core_rows),'source_manifest_sha256':core['source_manifest_sha256'],
                        'native':native_cells,'native_compiler':native['compiler']},
-            'clang':{'config':cc,'compilation':comp_cells,'jobs':job_cells,'trials':len(jobs)},
+            'clang':{'config':cc,'compilation':comp_cells,'jobs':job_cells,'trials':job_trials,'paired':paired},
             'boundary':{'config':bc,'cells':boundary_cells,'trials':len(boundary)},
             'validation':validation,'services':services,'service_cohort':cohort,
             'artifact_sizes':sizes,'release_validation':release,
@@ -122,26 +129,34 @@ def render(s,out,title,para,picture,charts,phase):
     from matplotlib.ticker import PercentFormatter
     from visual_report import WORKLOAD_TEXT
     ext=s['extended'];profiles=s['runtime_profiles'];names=s['workloads']
+    paired=ext['clang'].get('paired')
+    compiler_names=(sorted(paired['config']['inputs'],key=lambda n:paired['config']['inputs'][n]['bytes'])
+                    if paired else list(ext['clang']['config']['fixtures']['objects']))
+    compiler_samples=(paired['config'] if paired else ext['clang']['config'])['samples']
     host=html.escape(s['config'].get('hardware',{}).get('machdep.cpu.brand_string',s['config']['machine']))
     is_arm=s['config']['machine'] in ['arm64','aarch64']
     def label(v):return LABELS[v.split('/')[0]]
-    def bars(filename,labels,series,xlabel,percent=False):
+    def bars(filename,labels,series,xlabel,percent=False,reference=None):
         fig,ax=plt.subplots(figsize=(9,max(2.8,len(labels)*.66+1.1)),layout='constrained')
-        n=len(series);height=.72/n; allvals=[v for _,values,_ in series for v in values]
-        lo=min(0,min(allvals));hi=max(0,max(allvals));span=max(hi-lo,1e-5)
+        n=len(series);height=.72/n; allvals=[v for _,values,_ in series for v in values if v is not None]
+        lo=min(0,min(allvals));hi=max(0,max(allvals),reference or 0);span=max(hi-lo,1e-5)
+        counts=[sum(values[i] is not None for _,values,_ in series) for i in range(len(labels))]
         for j,(legend,values,color) in enumerate(series):
-            ys=[i+(j-(n-1)/2)*height for i in range(len(labels))]
-            ax.barh(ys,values,height=height*.90,color=color,label=legend)
+            ys=[i+(0 if counts[i]==1 else (j-(n-1)/2)*height) for i in range(len(labels))]
+            present=[(y,v) for y,v in zip(ys,values) if v is not None]
+            ax.barh([y for y,v in present],[v for y,v in present],height=height*.90,color=color,label=legend)
             for y,v in zip(ys,values):
+                if v is None:continue
                 display=(f'{v:+.1f}%' if abs(v)>=.05 else '0.0%') if percent else (f'{v:.2f}' if abs(v)<10 else f'{v:.1f}')
                 ax.text(v+span*.012*(1 if v>=0 else -1),y,display,va='center',ha='left' if v>=0 else 'right',fontsize=9)
         ax.set_yticks(range(len(labels)),labels);ax.invert_yaxis();ax.set_xlim(lo-span*.17 if lo<0 else 0,hi+span*.20)
         ax.set_xlabel(xlabel);ax.set_axisbelow(True);ax.grid(axis='x',color='#E7ECEF')
+        if reference is not None:ax.axvline(reference,color='#637280',lw=.8,linestyle='--')
         if percent:ax.xaxis.set_major_formatter(PercentFormatter(xmax=100));ax.axvline(0,color='#637280',lw=.7)
         if n>1:ax.legend(loc='upper center',bbox_to_anchor=(.5,1.14),ncol=n,frameon=False,fontsize=9)
         fig.savefig(out/filename,dpi=175,bbox_inches='tight');plt.close(fig);charts.append(filename)
-    def chartpage(filename,heading,description,labels,series,xlabel,notes,percent=False,height=365):
-        bars(filename,labels,series,xlabel,percent)
+    def chartpage(filename,heading,description,labels,series,xlabel,notes,percent=False,height=365,reference=None):
+        bars(filename,labels,series,xlabel,percent,reference)
         title(heading);para(description);picture(filename,height);para(notes,'Small')
     ref=next(v for v in profiles if v.startswith('cranelift-aot/'))
     llvm=next(v for v in profiles if v.startswith('llvm-o2-pzam/'))
@@ -157,7 +172,7 @@ def render(s,out,title,para,picture,charts,phase):
         comp=ext['clang']['compilation'];large=ext['clang']['config']['runtime_workers']
         sizes=ext['artifact_sizes']['cells']
         jobs=ext['clang']['jobs']
-        compiler_ratios=[jobs[n+'/llvm-o2-pzam/none']['wall_s']/jobs[n+'/cranelift-aot/none']['wall_s'] for n in ['SipHash.cpp','APInt.cpp']]
+        compiler_ratios=[jobs[n+'/llvm-o2-pzam/none']['wall_s']/jobs[n+'/cranelift-aot/none']['wall_s'] for n in compiler_names]
         mixed_service_case=(means['none']>1 and ours['repeated_host_query_ns']<theirs['repeated_host_query_ns']
                             and call_delta>0 and core_gap['none']>0 and min(compiler_ratios)>1)
         title('Abstract: engine choice for psibase services')
@@ -169,10 +184,14 @@ def render(s,out,title,para,picture,charts,phase):
         para(f'<b>Preparation and deployment:</b> Preparing Clang takes {comp[f"cranelift-aot/{large}/none"]["wall_s"]:.2f} s with Cranelift versus {comp[f"llvm-o2-pzam/{large}/none"]["wall_s"]:.1f} s with LLVM at {large} workers; saved files are {sizes["clang/cranelift-aot/none"]["artifact_bytes"]/2**20:.1f} versus {sizes["clang/llvm-o2-pzam/none"]["artifact_bytes"]/2**20:.1f} MiB. psizam can use JIT2 for initial runs while LLVM AOT is prepared or loaded into cache, then use cached AOT for subsequent runs. Full AOT preparation therefore need not block initial service availability. Background compilation still consumes CPU and memory; this report measures the tiers separately, not concurrent preparation or switchover.')
         compiler_gap=max(compiler_ratios)
         compiler_note=(f'The complete Clang jobs reach {compiler_gap:.2f}x Wasmtime AOT latency, so compiler-service work deserves separate load/setup and execution profiling. ' if compiler_gap>1.2 else '')
-        para('<b>Engineering decision:</b> Pursue inexpensive improvements to protected calls. '+compiler_note+'Accept a residual gap when end-to-end latency and capacity targets are met; this report cannot certify that users will never notice it. A controlled full-LLVM-O2 comparison remains justified before settling the optimized tier.')
+        native_note=''
+        if paired:
+            penalties=[jobs[n+'/llvm-o2-pzam/none']['native_slowdown'] for n in compiler_names]
+            native_note=f'Saved LLVM takes {min(penalties):.2f}-{max(penalties):.2f}x native Clang time across these fresh-process jobs. This includes loading and the guest compiler\'s size-optimized build. '
+        para('<b>Engineering decision:</b> Pursue inexpensive improvements to protected calls. '+compiler_note+native_note+'Accept a residual gap when end-to-end latency and capacity targets are met; this report cannot certify that users will never notice it. A controlled full-LLVM-O2 comparison remains justified before settling the optimized tier.')
         para('<b>Scope:</b> '+host+'. Compute compares saved artifacts; call tests compare loaded LLVM PZAM with warm Cranelift C API modules, excluding compilation and linking. They measure scalar boundaries, not database execution, payload serialization, full IPC, concurrent load or tail latency. Canonical runtime proxies lack a matching Cranelift comparison. The report\'s LLVM O2 label means backend code generation at level 2 plus a custom IR pass sequence, not LLVM\'s full default O2 pipeline.','Small')
         title('Wasm engines: performance and development priorities')
-        para('A practical guide to choosing and improving psizam execution backends. The report measures seven engine configurations, eight compute workloads, CoreMark, two real C++ compiler jobs, host queries, protected service round trips and canonical runtime bindings on '+host+'.')
+        para(f'A practical guide to choosing and improving psizam execution backends. The report measures seven engine configurations, eight compute workloads, CoreMark, {len(compiler_names)} real C++ compiler jobs'+(' with native Clang baselines' if paired else '')+', host queries, protected service round trips and canonical runtime bindings on '+host+'.')
         para('<b>Three separate questions:</b> How quickly does compiled code run? What does enforcing a work budget or deadline add? What does it cost to prepare, load and call that code? The charts keep these costs separate.')
         means={p:gm(s['cells'][n][ref+'/'+p]['median_s']/s['cells'][n][llvm+'/'+p]['median_s'] for n in names) for p in POLICIES}
         gas=[100*(s['relative_time'][v]['gas']-1) for v in [llvm,ref]]
@@ -196,9 +215,12 @@ def render(s,out,title,para,picture,charts,phase):
         boundary=ext['boundary']['cells'];checked=boundary['jit2/none']['host_to_guest_checked_ns'];typed=boundary['jit2/none']['host_to_guest_optimized_ns']
         service=ext['services']['service-calls']['cells']
         jobs=ext['clang']['jobs']
-        compiler_ratios={n:jobs[n+'/llvm-o2-pzam/none']['wall_s']/jobs[n+'/cranelift-aot/none']['wall_s'] for n in ['SipHash.cpp','APInt.cpp']}
+        compiler_ratios={n:jobs[n+'/llvm-o2-pzam/none']['wall_s']/jobs[n+'/cranelift-aot/none']['wall_s'] for n in compiler_names}
+        compiler_comparison='Complete saved-LLVM Clang jobs take '+', '.join(f'{compiler_ratios[n]:.2f}x Wasmtime AOT time for {n.removesuffix(".cpp")}' for n in compiler_names)+'. '
         code_priority=(f'LLVM O2 reaches {ratio:.2f}x Cranelift AOT CoreMark throughput. Its weakest relative compute result is {WORKLOAD_TEXT[worst]["short"]}, at {speedups[worst]:.2f}x. Use those kernels and compiler jobs to guide IR and native-code inspection, then validate changes across all workloads. Counters alone do not identify the cause.' if is_arm else
-                       f'Complete saved-LLVM Clang jobs take {compiler_ratios["SipHash.cpp"]:.2f}x Wasmtime AOT time for SipHash and {compiler_ratios["APInt.cpp"]:.2f}x for APInt. These are process-wall measurements. First separate file loading, deserialization, relocations, instantiation, guest compilation and output; target the dominant phase before changing code generation. CoreMark reaches {ratio:.2f}x Wasmtime throughput. Also compare live LLVM with saved LLVM on scalar matrix multiplication, where the kernel timings expose a separate disparity.')
+                       compiler_comparison+f'These are process-wall measurements. First separate file loading, deserialization, relocations, instantiation, guest compilation and output; target the dominant phase before changing code generation. CoreMark reaches {ratio:.2f}x Wasmtime throughput. Also compare live LLVM with saved LLVM on scalar matrix multiplication, where the kernel timings expose a separate disparity.')
+        if paired:
+            code_priority+=' Compare a speed-optimized guest Clang build with the recorded MinSizeRel build, holding engines and inputs fixed; the native penalty includes both compiler-build and engine costs.'
         call_priority=f"Protected A→host→B round trips cost {service['jit2/none']['service_a_host_service_b_ns']:.1f} ns for JIT2, {service['llvm-aot/none']['service_a_host_service_b_ns']:.1f} ns for LLVM O2 PZAM and {service['cranelift-cached/none']['service_a_host_service_b_ns']:.1f} ns for cached Cranelift. Profile remaining trap-entry and argument-adapter costs. Keep per-call protection and use the focused query and nested-call benchmarks before broader reruns."
         priorities=[
             ('1. Reduce protected call-entry and import overhead',call_priority),
@@ -208,7 +230,7 @@ def render(s,out,title,para,picture,charts,phase):
              ('4. Complete JIT1 hardware-deterministic floating point','The x86 JIT1 scalar arithmetic emitters select software helpers for every mode except fast, including the requested hardware-deterministic mode. This is a concrete implementation cost to address before treating its floating-point results as a limit of the JIT design. Add native arithmetic with the required NaN, rounding and trap behavior, then validate against softfloat and rerun focused floating-point kernels.')),
         ]
         for heading,text in priorities:para('<b>'+heading+'</b><br/>'+text)
-        para('<b>Release gate:</b> Keep exact compiler-output checks, scalar/SIMD suites and real gas/deadline exhaustion in standard validation. The measured compiler jobs cover two translation units; they do not prove a complete Clang self-bootstrap. Concurrent execution and other host architectures require separate acceptance runs.','Small')
+        para('<b>Release gate:</b> Keep exact compiler-output checks, scalar/SIMD suites and real gas/deadline exhaustion in standard validation. These compiler jobs measure individual translation units. A functional ARM bootstrap is recorded separately; a byte-identical fixed point and full native-x86 bootstrap remain unverified. Concurrent execution requires separate acceptance.','Small')
         jobs=ext['clang']['jobs'];jobname='APInt.cpp'
         savings=jobs[jobname+'/cranelift-aot/none']['wall_s']-jobs[jobname+'/llvm-o2-pzam/none']['wall_s']
         if savings>0 and lt>ct:
@@ -221,11 +243,11 @@ def render(s,out,title,para,picture,charts,phase):
         for p in ['none','gas']:
             values=[100*gm(s['cells'][n][ref+'/'+p]['median_s']/s['cells'][n][llvm+'/'+p]['median_s'] for n in group) for _,group in families]
             values.append(100*core['llvm-o2-pzam/'+p+'/performance']['score']/core['cranelift-aot/'+p+'/performance']['score'])
-            values.extend(100*jobs[n+'/cranelift-aot/'+p]['wall_s']/jobs[n+'/llvm-o2-pzam/'+p]['wall_s'] for n in ['SipHash.cpp','APInt.cpp'])
+            values.extend(100*jobs[n+'/cranelift-aot/'+p]['wall_s']/jobs[n+'/llvm-o2-pzam/'+p]['wall_s'] for n in compiler_names)
             series.append((POLICY_NAMES[p],values,COLORS[p]))
         chartpage('application-families.png','Which application work favors each engine?',
                   'Saved LLVM O2 relative to Cranelift AOT, using the same inputs and matching CPU-limit settings. Separate families expose differences hidden by a single average.',
-                  [name for name,_ in families]+['CoreMark: mixed integer tasks','C++ compilation: SipHash','C++ compilation: APInt'],series,
+                  [name for name,_ in families]+['CoreMark: mixed integer tasks']+['C++ compilation: '+n.removesuffix('.cpp') for n in compiler_names],series,
                   'LLVM speed index | matching Cranelift AOT setting = 100 | higher is better',
                   'Compute families use equal-weight geometric means of kernel speed ratios. CoreMark compares iterations per second. Compiler jobs compare total process time, including loading and object output. Each row keeps its own timer definition; the rows are not combined into one score. Values above 100 favor LLVM; below 100 favor Cranelift.',height=355)
         chartpage('gas-throughput.png','Compute speed with work limits enabled',
@@ -308,7 +330,7 @@ def render(s,out,title,para,picture,charts,phase):
         meter_note=(f' Its gas-instrumented variant takes {live_meter:.2f}x its unrestricted time; compare both generated-code variants in the same investigation.'
                     if live_meter < .8 or live_meter > 1.2 else '')
         para(f'<b>Live LLVM versus saved LLVM:</b> The live JIT takes {live_gap:.2f}x the saved LLVM kernel time on scalar matrix multiplication without CPU limits. The live path builds one module through ORC LLJIT; the saved path explicitly creates its target machine and compiles functions or batches. Compare their target settings, optimized IR and assembly on this kernel before changing the shared optimization pipeline.'+meter_note+' These timings establish investigation targets, not their causes.')
-    para('<b>Acceptance:</b> Change one factor at a time, preserve the unrestricted/gas/timeout matrix, run exact-output and scalar/SIMD validation, then rerun sustained CoreMark and both C++ jobs. These are source-grounded investigation targets; the current measurements do not assign a fraction of the runtime gap to any one of them.','Small')
+    para('<b>Acceptance:</b> Change one factor at a time, preserve the unrestricted/gas/timeout matrix, run exact-output and scalar/SIMD validation, then rerun sustained CoreMark and the C++ compiler jobs. These are source-grounded investigation targets; the current measurements do not assign a fraction of the runtime gap to any one of them.','Small')
     para('Source references in the reproduction kit: source/psizam/src/llvm_ir_translator.cpp (optimization passes and helper calls), source/psizam/src/llvm_aot_compiler.cpp (saved-code target and backend level), source/psizam/src/llvm_jit_compiler.cpp (ORC setup), source/psizam/include/psizam/detail/x86_64.hpp (JIT1 scalar floating-point emission).','Small')
     comp=ext['clang']['compilation'];config=ext['clang']['config'];jobs=ext['clang']['jobs']
     entries=[('jit2-pzam',1)]+[(m,t) for m in ['llvm-o2-pzam','cranelift-aot'] for t in config['threads']]
@@ -319,17 +341,44 @@ def render(s,out,title,para,picture,charts,phase):
                   [LABELS[m]+f' / {t} '+('worker' if t==1 else 'workers') for m,t in entries],
                   [(POLICY_NAMES[p],[comp[f'{m}/{t}/{p}'][metric]/div for m,t in entries],COLORS[p]) for p in ['none','gas']],xlabel,
                   f'Median of {config["compile_samples"]} fresh compiler processes. The command includes startup, code generation and writing the artifact. A {config["compile_watchdog"]}-second watchdog allows long LLVM compilations. psizam timeouts reuse the exact no-limit code artifact; Cranelift epoch artifacts are separately measured and retained in summary.json. JIT2 can handle initial runs while LLVM AOT is prepared or loaded into cache, followed by cached AOT execution. These bars measure artifact preparation, not time to first service response under that strategy. Background contention and switchover are unmeasured; compilation and execution were timed separately.',height=390)
-    for name in config['fixtures']['objects']:
-        display='SipHash: a compact hashing implementation' if name.startswith('SipHash') else 'APInt: arbitrary-precision integer code'
+    if paired:
+        title('Native Clang as the compiler-performance reference')
+        para('Native Clang 22.1.2 and the pinned Wasm Clang compile the same preprocessed C++ inputs into wasm32 objects with identical -cc1 -O2 options. The native compiler runs directly on this host. This measures the cost of executing the compiler inside Wasm; it does not compare different output architectures.')
+        para(f'The compiler-job cohort interleaves native and all six Wasm engine configurations in randomized order, with one excluded warmup and {compiler_samples} measured fresh processes per cell. Saved artifacts come from the same validated preparation matrix. Other benchmark sections retain their own completed measurements.')
+        if paired.get('resumption'):
+            para('The VPS compiler measurements use two serial segments with unchanged engines and inputs. Seven additional conditioning runs after the interval are excluded. One unpublished boundary trial is excluded and repeated; no accepted timing includes a suspended process. The original sample order and five measured trials per cell are preserved.','Small')
+        metadata=paired['fixture_metadata']
+        para(f'<b>Larger input:</b> {metadata["name"]} implements the parser for LLVM\'s textual intermediate representation, with {metadata["source_lines"]:,} original C++ lines. Its preprocessed input contains {metadata["preprocessed_lines"]:,} lines and {metadata["preprocessed_bytes"]/2**20:.2f} MiB. Compiling it exercises more parsing, templates and code generation than the compact hashing job.')
+        para('<b>Input sizes:</b> '+', '.join(f'{n}: {paired["config"]["inputs"][n]["bytes"]/2**20:.2f} MiB preprocessed' for n in compiler_names)+'. Preprocessing and linking are outside the timer. Larger source size alone does not predict optimization difficulty.')
+        para('<b>Output equivalence:</b> Every native and Wasm object has identical code, data, symbols, relocations and target-feature sections after removing only the producers custom section, which identifies the compiler build. Raw SHA-256 values are retained and checked separately for native and Wasm. No executable or linking content is ignored.')
+        para('<b>Build conditions:</b> The pinned Wasm compiler was built with MinSizeRel (-Os) and ThinLTO. The -O2 setting in these charts describes the object it emits, not how the compiler executable was built. The native release compiler and WASI fork share version 22.1.2 but differ in build configuration, ABI and allocator. The measured penalty includes those differences plus engine loading, setup and execution. Native compiler acquisition, binary and shared-library hashes are retained. A speed-optimized guest compiler build is a separate experiment; no gain from it is assumed.','Small')
+        para('The saved LLVM O2 label describes the engine\'s separate Wasm-to-native pipeline. It does not change the guest compiler\'s -Os build or the emitted object\'s -O2 setting.','Small')
+    job_modes=(['native'] if paired else [])+config['modes']
+    def compiler_value(name,mode,profile,metric):
+        if mode=='native' and profile!='none':return None
+        return jobs[f'{name}/{mode}/{profile}'][metric]
+    for name in compiler_names:
+        display={'SipHash.cpp':'SipHash: a compact hashing implementation','APInt.cpp':'APInt: arbitrary-precision integer code','LLParser.cpp':'LLParser: LLVM textual-IR parser'}.get(name,name)
+        notes=f'{compiler_samples} measured runs after one excluded warmup. Time includes process launch, loading or fresh JIT compilation, Clang execution and object output. Fresh JITs use one compiler worker; LLVM O2 and Cranelift saved code use {config["runtime_workers"]}-worker artifacts throughout. Guest Clang execution is single-threaded. This represents compiler-as-a-service latency; it is not a complete compiler bootstrap. Whole-module LLVM ORC cold Clang startup is outside this experiment.'
+        if paired:notes+=' Native is a single unrestricted baseline. This compiler cohort uses a non-exhausting 10^13 work budget or 600-second deadline, with a separate 900-second process watchdog.'
         chartpage('clang-'+name+'-runtime.png','Running Clang: '+display,
-                  'Each fresh Wasm process runs Clang -cc1 to compile one frozen preprocessed C++ translation unit into a wasm32 object at -O2. Every output must match the expected SHA-256 exactly.',
-                  [LABELS[m] for m in config['modes']],[(POLICY_NAMES[p],[jobs[f'{name}/{m}/{p}']['wall_s'] for m in config['modes']],COLORS[p]) for p in POLICIES],
+                  'Each fresh compiler process compiles one frozen preprocessed C++ translation unit into a wasm32 object at -O2. Every output must match its recorded SHA-256 exactly.',
+                  ['Native Clang 22.1.2' if m=='native' else LABELS[m] for m in job_modes],[(POLICY_NAMES[p],[compiler_value(name,m,p,'wall_s') for m in job_modes],COLORS[p]) for p in POLICIES],
                   'End-to-end C++ compilation job, seconds | lower is better',
-                  f'Five measured runs after one excluded warmup. Time includes process launch, Wasm loading or fresh JIT compilation, Clang execution and object output. Fresh JITs use one compiler worker; LLVM O2 and Cranelift saved code use {config["runtime_workers"]}-worker artifacts throughout. Guest Clang execution is single-threaded. This represents compiler-as-a-service latency; it is not a complete compiler bootstrap. Whole-module LLVM ORC cold Clang startup is outside this experiment.',height=390)
-    chartpage('clang-job-memory.png','Memory used while compiling C++ inside Wasm',
-              'Peak resident memory during the two complete C++ jobs, including any fresh engine compilation and the Clang working set.',
-              [LABELS[m] for m in config['modes']],[(POLICY_NAMES[p],[stats.median(jobs[f'{n}/{m}/{p}']['peak_rss_bytes']/2**20 for n in config['fixtures']['objects']) for m in config['modes']],COLORS[p]) for p in POLICIES],
-              'Peak resident memory, MiB | median of the two job medians',
+                  notes,height=390)
+        if paired:
+            saved_modes=['jit2-pzam','llvm-o2-pzam','cranelift-aot']
+            ranges='; '.join(('native' if m=='native' else LABELS[m])+f': {jobs[f"{name}/{m}/none"]["wall_s_min"]:.3f}-{jobs[f"{name}/{m}/none"]["wall_s_max"]:.3f} s' for m in ['native',*saved_modes])
+            chartpage('clang-'+name+'-native-penalty.png',name+': saved compiler versus native',
+                      'Each bar divides the saved engine\'s median complete compilation time by native Clang\'s median for the same input and wasm32 output target. A value of 2 means twice the elapsed time.',
+                      [LABELS[m] for m in saved_modes],
+                      [(POLICY_NAMES[p],[jobs[f'{name}/{m}/{p}']['native_slowdown'] for m in saved_modes],COLORS[p]) for p in POLICIES],
+                      'Elapsed-time multiplier | native Clang = 1 | lower is better',
+                      f'Native median: {jobs[name+"/native/none"]["wall_s"]:.4f} seconds, marked by the dashed line. These are warm-filesystem, fresh-process jobs. Saved engines include loading and instantiation. Fresh-JIT totals appear on the preceding elapsed-time chart. These are complete-job penalties, not guest-only execution overhead.<br/><br/>Unrestricted five-run ranges: {ranges}. These describe observed variation, not confidence intervals. All limit-setting ranges are retained in compiler-job-summary.csv.',height=350,reference=1)
+    chartpage('clang-job-memory.png','Memory used by C++ compiler jobs',
+              f'Peak resident memory during the {len(compiler_names)} complete C++ jobs, including any fresh engine compilation and the Clang working set.',
+              ['Native Clang 22.1.2' if m=='native' else LABELS[m] for m in job_modes],[(POLICY_NAMES[p],[None if m=='native' and p!='none' else stats.median(jobs[f'{n}/{m}/{p}']['peak_rss_bytes']/2**20 for n in compiler_names) for m in job_modes],COLORS[p]) for p in POLICIES],
+              'Peak resident memory, MiB | median of job medians',
               'Use this as a single-process capacity signal. It does not predict aggregate memory for concurrent tenants, copy-on-write sharing, or the effect of a warm resident compiler service.')
     boundary=ext['boundary']['cells'];bm=['jit1','jit2','llvm-jit','cranelift']
     for metric,heading,description,notes in [
@@ -354,7 +403,7 @@ def render(s,out,title,para,picture,charts,phase):
     para('<b>Outstanding compatibility scope:</b> The scalar suite reports an unsupported multiple-memory memory.grow case. This remains a release-scope decision or implementation item. The benchmark workloads do not exercise every Wasm proposal, shared modules across concurrently executing instances, or blocked host calls.')
     for gap in v.get('coverage_gaps',[]):
         para('<b>Harness coverage gap:</b> '+gap,'Small')
-    para('<b>Next acceptance milestone:</b> Reproduce a complete Clang self-bootstrap from pinned C++ sources and SDK; verify reproducible artifacts and output hashes, then run the independent-checkout validation on each supported host architecture. The two measured C++ translation units establish a narrower compiler-execution check.','Small')
+    para('<b>Bootstrap scope:</b> The retained ARM checkpoint completes the functional Clang self-bootstrap and final compile/link/run probe. It does not establish a byte-identical fixed point. Repeat the full chain on native x86 and establish normalized, reproducible outputs before claiming those gates. These measured translation units provide a narrower compiler-performance check; see engineering/compiler-bootstrap.md in the kit.','Small')
     title('Public library acceptance and release scope')
     para('Public library acceptance is recorded against the separately archived JIT1 writer and release build. These checks exercise the installed runtime and saved-code APIs; the preceding performance measurements retain their own exact build identities.')
     for entry in ext['release_validation']['checks']:
@@ -365,6 +414,6 @@ def render(s,out,title,para,picture,charts,phase):
         ('Resource controls', 'Public counters, budgets and interrupt requests use executing backend state. Finite budgets apply before initialization. The public timeout policy polls wall time at gas checkpoints; lower-level code-page interruption is the timeout mechanism measured in the engine comparison.'),
         ('Installed packages and diagnostics', 'Independent base and LLVM consumers use find_package. Base execution consumers load LLVM-generated PZAM without the LLVM compiler. Raw, prepared and cached modules report missing functions, signature mismatches, unsupported imports and missing dispatch implementations.'),
         ('Remaining contracts', 'Review memory, stack and compilation-policy enforcement; allocation-free public code-page deadlines; immutable code caching; instance-specific nonscalar bindings; gas-pool credits; library linking; logical WIT compatibility and dynamic cross-memory marshalling.'),
-        ('Compatibility and bootstrap', 'Review full compiler/options/runtime-ABI cache identity and malformed metadata bounds. Keep native ARM64 and x86-64 acceptance in the release gate, including 4 KiB and 16 KiB page layouts. Reproduce the complete Clang self-bootstrap. The Wasm-hosted pzam compiler also needs its 32-bit context layout and exception configuration resolved.')]:
+        ('Compatibility and bootstrap', 'Review full compiler/options/runtime-ABI cache identity and malformed metadata bounds. Keep native ARM64 and x86-64 acceptance in the release gate, including 4 KiB and 16 KiB page layouts. Extend the recorded functional ARM bootstrap to native x86 and verify a reproducible fixed point. The Wasm-hosted pzam compiler also needs its 32-bit context layout and exception configuration resolved.')]:
         para('<b>'+heading+':</b> '+description)
     para('The engineering/runtime-release-review.md checklist in the reproduction kit records source-review findings and test references. Working CLI paths and scalar call benchmarks establish narrower capabilities than a stable public-library contract.','Small')
