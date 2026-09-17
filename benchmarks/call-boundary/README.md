@@ -64,9 +64,21 @@ cmake --build build/calls --target call-runtime -j 8
 build/calls/call-runtime /path/to/engine-build/examples/composition jit1 typed
 ```
 
-Repeat for `jit2` and `llvm`; `dynamic` selects WIT-driven binding. The output
+For a complete serial run with retained evidence:
+
+```sh
+python3 benchmarks/call-boundary/run_runtime.py \
+  --binary build/calls/call-runtime \
+  --fixtures /path/to/engine-build/examples/composition \
+  --out build/runtime-call-results --samples 5
+```
+
+`jit2` and `llvm` select the other backends; `dynamic` selects WIT-driven binding. The output
 includes exact-result validation, C++ allocation counts and the observed gas
-counters. This executable compiles `runtime.cpp` with the selected LLVM feature
+counters. Both backend instances receive a finite 10^12 gas budget, and the
+runner rejects zero consumption. The public runtime facade currently has
+separate resource state; this benchmark sets and reads the executing backend
+explicitly. It is a gas-instrumented experiment, not an unrestricted baseline. This executable compiles `runtime.cpp` with the selected LLVM feature
 as the runtime-parity test target does. Its resource settings and calling
 convention differ from the natural-signature microbenchmark; compare results
 within each experiment, not across those workloads. Keep warmup and measured

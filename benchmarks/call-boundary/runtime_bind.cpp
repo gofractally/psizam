@@ -47,6 +47,9 @@ int main(int argc,char** argv) {
       else if(binding=="dynamic")runtime.bind(cm,provider,"greeter");
       else throw std::runtime_error("unknown binding");
       auto consumer=runtime.instantiate(cm,policy);
+      // The public facade has separate budget state; exercise actual enforcement.
+      provider.get_instance_be()->set_gas_budget(policy.gas_budget);
+      consumer.get_instance_be()->set_gas_budget(policy.gas_budget);
       auto proxy=consumer.as<processor>();
       if(proxy.test_add(7u,11u)!=18)throw std::runtime_error("warmup mismatch");
       constexpr uint32_t n=1000000;
@@ -57,6 +60,8 @@ int main(int argc,char** argv) {
       auto end=std::chrono::steady_clock::now();
       count_allocations=false;
       if(sum!=uint64_t(n)*(n-1)/2+uint64_t(n)*17)throw std::runtime_error("result mismatch");
+      if(!consumer.get_instance_be()->gas_consumed_raw() || !provider.get_instance_be()->gas_consumed_raw())
+         throw std::runtime_error("expected active backend gas instrumentation");
       std::printf("{\"ns_per_call\":%.6f,\"iterations\":%u,\"cpp_allocations\":%llu,\"consumer_gas\":%llu,\"provider_gas\":%llu,\"valid\":true}\n",
          std::chrono::duration<double,std::nano>(end-start).count()/n,n,(unsigned long long)allocations,
          (unsigned long long)consumer.get_instance_be()->gas_consumed_raw(),(unsigned long long)provider.get_instance_be()->gas_consumed_raw());
