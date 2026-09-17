@@ -396,7 +396,6 @@ catch_discover_tests(composition_tests)
 
 add_executable(runtime_parity_tests main.cpp
    runtime_parity_tests.cpp
-   ${PSIZAM_SOURCE_DIR}/src/runtime.cpp
 )
 target_link_libraries(runtime_parity_tests psizam psizam-exec Catch2::Catch2)
 if(PSIZAM_ENABLE_LLVM)

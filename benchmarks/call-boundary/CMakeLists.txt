@@ -39,7 +39,7 @@ foreach(mode IN LISTS call_modes)
   endforeach()
 endforeach()
 
-add_executable(call-runtime runtime_bind.cpp "${PSIZAM_SOURCE_CHECKOUT}/src/runtime.cpp")
+add_executable(call-runtime runtime_bind.cpp)
 target_include_directories(call-runtime PRIVATE "${PSIZAM_SOURCE_CHECKOUT}/examples/composition")
 target_link_libraries(call-runtime PRIVATE psizam-exec)
 if(PSIZAM_ENABLE_LLVM)

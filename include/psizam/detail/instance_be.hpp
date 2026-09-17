@@ -158,5 +158,14 @@ std::unique_ptr<instance_be> make_instance_be(
    char* external_base = nullptr,
    uint32_t external_budget_bytes = 0);
 
+// The optional LLVM library supplies this factory. Selecting it at the call
+// site gives static linkers a strong reference and keeps psizam-exec usable
+// without installing or linking LLVM.
+using instance_backend_factory = decltype(&make_instance_be);
+std::unique_ptr<instance_be> make_llvm_instance_be(
+   backend_kind kind, const std::vector<uint8_t>& wasm,
+   host_function_table table, void* host_ptr,
+   char* external_base, uint32_t external_budget_bytes);
+
 } // namespace detail
 } // namespace psizam

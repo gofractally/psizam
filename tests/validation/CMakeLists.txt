@@ -156,3 +156,15 @@ set_tests_properties(execution.resource-limits PROPERTIES LABELS "execution;quic
 add_dependencies(check-execution psizam_resource_runner)
 
 add_dependencies(psizam_execution_driver psizam_resource_runner psizam_pzam_compile_tests)
+
+if(PSIZAM_ENABLE_INSTALL)
+   add_test(NAME execution.installed-runtime
+      COMMAND "${CMAKE_COMMAND}" "-DBUILD=${CMAKE_BINARY_DIR}"
+         "-DSOURCE=${PSIZAM_SOURCE_DIR}" "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/installed-runtime"
+         "-DCC=${CMAKE_C_COMPILER}" "-DCXX=${CMAKE_CXX_COMPILER}"
+         "-DLLVM_DIR=${LLVM_DIR}" "-DHAVE_LLVM=${PSIZAM_ENABLE_LLVM}"
+         "-DWAT2WASM=${PSIZAM_WAT2WASM}"
+         -P "${CMAKE_CURRENT_SOURCE_DIR}/installed_runtime.cmake")
+   set_tests_properties(execution.installed-runtime PROPERTIES
+      LABELS "execution;release;runtime" TIMEOUT 300 RUN_SERIAL TRUE)
+endif()

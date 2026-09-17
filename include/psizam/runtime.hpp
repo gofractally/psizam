@@ -26,6 +26,7 @@
 #include <psio/wit_abi.hpp>
 
 #include <psizam/canonical_dispatch.hpp>
+#include <psizam/detail/instance_be.hpp>
 #include <psizam/gas.hpp>
 #include <psizam/gas_pool.hpp>
 #include <psizam/host_function_table.hpp>
@@ -309,7 +310,14 @@ class runtime {
    std::unique_ptr<runtime_impl> impl_;
 
 public:
-   explicit runtime(runtime_config config = {});
+   explicit runtime(runtime_config config = {},
+      detail::instance_backend_factory factory =
+#if defined(PSIZAM_ENABLE_LLVM_BACKEND)
+         &detail::make_llvm_instance_be
+#else
+         &detail::make_instance_be
+#endif
+   );
    ~runtime();
 
    runtime(runtime&&) noexcept;

@@ -227,6 +227,7 @@ if(PSIZAM_ENABLE_LLVM)
       add_library(psizam-llvm-jit STATIC
          src/llvm_jit_compiler.cpp
          src/llvm_compile.cpp
+         src/runtime_llvm.cpp
       )
       # llvm_compile.cpp uses llvm_ir_translator (in per-arch AOT targets).
       # Link the host-platform AOT target so the translator symbols resolve.

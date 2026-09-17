@@ -78,8 +78,8 @@ includes exact-result validation, C++ allocation counts and the observed gas
 counters. Both backend instances receive a finite 10^12 gas budget, and the
 runner rejects zero consumption. The public runtime facade currently has
 separate resource state; this benchmark sets and reads the executing backend
-explicitly. It is a gas-instrumented experiment, not an unrestricted baseline. This executable compiles `runtime.cpp` with the selected LLVM feature
-as the runtime-parity test target does. Its resource settings and calling
+explicitly. It is a gas-instrumented experiment, not an unrestricted baseline. This executable uses the same optional LLVM runtime factory as an installed
+library consumer; it does not compile a private copy of `runtime.cpp`. Its resource settings and calling
 convention differ from the natural-signature microbenchmark; compare results
 within each experiment, not across those workloads. Keep warmup and measured
 runs separate and run serially.
