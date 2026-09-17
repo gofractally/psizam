@@ -4,6 +4,7 @@
 #endif
 #include <psizam/backend.hpp>
 #include <psizam/detail/pzam_loader.hpp>
+#include <psizam/detail/watchdog.hpp>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -82,7 +83,7 @@ template<class F> metric measure(int n,F&& f) {
 static void print(const char* key,metric m) {
    std::printf("\"%s_ns\":%.6f,\"%s_cpp_allocations\":%llu,",key,m.ns,key,(unsigned long long)m.allocs);
 }
-template<class Impl> void run(psizam::wasm_code code,bool gas,bool check_only) {
+template<class Impl> void run(psizam::wasm_code code,bool gas,bool check_only,bool timeout=false) {
    using hosts=psizam::registered_host_functions<host>;
    hosts::template add<&host::get>("db","get");
    hosts::template add<&host::mix>("db","mix");
@@ -94,6 +95,7 @@ template<class Impl> void run(psizam::wasm_code code,bool gas,bool check_only) {
    hosts::resolve(a.get_module());hosts::resolve(b.get_module());
    a.initialize(&ha);b.initialize(&hb);
    if(gas) {a.get_context().set_gas_budget(psizam::gas_units{1000000000000ull});b.get_context().set_gas_budget(psizam::gas_units{1000000000000ull});}
+   auto test_and_measure = [&] {
    const auto leaf=a.resolve_export("leaf"),round=a.resolve_export("roundtrip"),queries=a.resolve_export("queries"),reenter=a.resolve_export("reenter");
    const auto other_reenter=b.resolve_export("reenter");
    ha.cross_call=[&](int32_t x,int32_t d){return b.call_by_index(&hb,other_reenter,x,d)->to_i32();};
@@ -142,6 +144,19 @@ template<class Impl> void run(psizam::wasm_code code,bool gas,bool check_only) {
       a.get_context().set_gas_budget(psizam::gas_units{1000000000000ull});
       require(a.call_by_index(&ha,leaf,int32_t(1))->to_ui32()==get_value(1),"gas recovery");
    }
+   if(timeout) {
+      for(auto* engine : {&a,&b}) {
+         auto* h=engine==&a?&ha:&hb;
+         bool interrupted=false;
+         try {
+            engine->timed_run(psizam::detail::watchdog{std::chrono::milliseconds(2)},[&] {
+               engine->call_by_index(h,queries,int32_t(500000000),int32_t(1));
+            });
+         }catch(const psizam::timeout_exception&) { interrupted=true; }
+         require(interrupted,"page timeout did not interrupt guest queries");
+         require(engine->call_by_index(h,leaf,int32_t(1))->to_ui32()==get_value(1),"timeout recovery failed");
+      }
+   }
    if(check_only) {std::puts("{\"valid\":true}");return;}
    std::printf("{");
    auto time_calls=[&](const char* key,auto&& call,auto&& expected){
@@ -170,6 +185,12 @@ template<class Impl> void run(psizam::wasm_code code,bool gas,bool check_only) {
    print("alternate_stack_entry",large);
    require((a.get_context().gas().consumed>0)==gas,"gas instrumentation mismatch");
    std::printf("\"iterations\":%d,\"valid\":true}\n",loops);
+   };
+   if(timeout) {
+      a.timed_run(psizam::detail::watchdog{std::chrono::seconds(120)},[&] {
+         b.timed_run(psizam::detail::watchdog{std::chrono::seconds(120)},test_and_measure);
+      });
+   } else test_and_measure();
 }
 #ifdef HAVE_WASMTIME
 static void check(wasmtime_error_t* error,wasm_trap_t* trap=nullptr) {
@@ -185,18 +206,20 @@ static wasm_trap_t* callback(void* env,wasmtime_caller_t*,wasmtime_val_raw_t* ar
       return nullptr;
    }catch(const std::exception& e){return wasmtime_trap_new(e.what(),std::strlen(e.what()));}
 }
-static void run_wasmtime(const psizam::wasm_code& code,bool gas,bool check_only,bool checked) {
+static void run_wasmtime(const psizam::wasm_code& code,bool gas,bool check_only,bool checked,bool timeout=false) {
    auto* config=wasm_config_new();
    wasmtime_config_strategy_set(config,WASMTIME_STRATEGY_CRANELIFT);
    wasmtime_config_cranelift_opt_level_set(config,WASMTIME_OPT_LEVEL_SPEED);
    wasmtime_config_parallel_compilation_set(config,false);
    wasmtime_config_consume_fuel_set(config,gas);
+   wasmtime_config_epoch_interruption_set(config,timeout);
    wasmtime_config_memory_reservation_set(config,1ull<<32);
    wasmtime_config_memory_guard_size_set(config,1ull<<32);
    auto* engine=wasm_engine_new_with_config(config);
    wasmtime_module_t* module=nullptr;check(wasmtime_module_new(engine,code.data(),code.size(),&module));
    auto* store=wasmtime_store_new(engine,nullptr,nullptr);auto* ctx=wasmtime_store_context(store);
    if(gas)check(wasmtime_context_set_fuel(ctx,1000000000000ull));
+   if(timeout)wasmtime_context_set_epoch_deadline(ctx,1);
    host hosts[2];std::pair<host*,int> callbacks[2][3];
    wasmtime_func_t functions[2][4];
    for(int instance=0;instance<2;++instance) {
@@ -240,6 +263,17 @@ static void run_wasmtime(const psizam::wasm_code& code,bool gas,bool check_only,
    };
    hosts[0].cross_call=[&](int32_t x,int32_t d){return call(1,2,x,d);};
    hosts[1].cross_call=[&](int32_t x,int32_t d){return call(0,2,x,d);};
+   auto test_and_measure = [&] {
+   if(timeout) {
+      bool interrupted=false;
+      {
+         auto deadline=psizam::detail::watchdog{std::chrono::milliseconds(2)}.scoped_run([&] {wasmtime_engine_increment_epoch(engine);});
+         try { call(0,3,500000000,1); }
+         catch(const std::exception&) { interrupted=true; }
+      }
+      require(interrupted,"Wasmtime epoch timeout did not interrupt queries");
+      wasmtime_context_set_epoch_deadline(ctx,1);
+   }
    for(int32_t x : {0,1,37,23456}) {
       require(uint32_t(call(0,1,x))==mix_value(get_value(x),x),"Wasmtime roundtrip mismatch");
       require(uint32_t(call(0,2,x,4))==get_value(x),"Wasmtime reentry mismatch");
@@ -262,24 +296,29 @@ static void run_wasmtime(const psizam::wasm_code& code,bool gas,bool check_only,
       require(value==expected,"Wasmtime query mismatch");print("repeated_host_query",result);
       std::printf("\"iterations\":%d,\"valid\":true}\n",loops);
    }else std::puts("{\"valid\":true}");
+   };
+   if(timeout) {
+      auto deadline=psizam::detail::watchdog{std::chrono::seconds(120)}.scoped_run([&] {wasmtime_engine_increment_epoch(engine);});
+      test_and_measure();
+   } else test_and_measure();
    wasmtime_store_delete(store);wasmtime_module_delete(module);wasm_engine_delete(engine);
 }
 #endif
 int main(int argc,char** argv) {
-   if(argc!=5) {std::fprintf(stderr,"Usage: call-boundary jit1|jit2|llvm|cranelift-checked|cranelift-cached calls.wasm none|gas check|bench\n");return 2;}
+   if(argc!=5) {std::fprintf(stderr,"Usage: call-boundary jit1|jit2|llvm|cranelift-checked|cranelift-cached calls.wasm none|gas|timeout check|bench\n");return 2;}
    try {
       std::ifstream file(argv[2],std::ios::binary);require(bool(file),"cannot read Wasm");
       psizam::wasm_code code{std::istreambuf_iterator<char>(file),{}};
-      std::string mode=argv[1],policy=argv[3];require(policy=="none"||policy=="gas","invalid policy");
-      const bool gas=policy=="gas",checks=std::string(argv[4])=="check";
-      if(mode=="jit1")run<psizam::jit>(code,gas,checks);
-      else if(mode=="jit2")run<psizam::jit2>(code,gas,checks);
-      else if(mode=="llvm-aot")run<saved_llvm>(code,gas,checks);
+      std::string mode=argv[1],policy=argv[3];require(policy=="none"||policy=="gas"||policy=="timeout","invalid policy");
+      const bool timeout=policy=="timeout",gas=policy=="gas",checks=std::string(argv[4])=="check";
+      if(mode=="jit1")run<psizam::jit>(code,gas,checks,timeout);
+      else if(mode=="jit2")run<psizam::jit2>(code,gas,checks,timeout);
+      else if(mode=="llvm-aot")run<saved_llvm>(code,gas,checks,timeout);
 #ifdef PSIZAM_ENABLE_LLVM_BACKEND
-      else if(mode=="llvm") {psizam::detail::set_llvm_opt_level(2);run<psizam::jit_llvm>(code,gas,checks);}
+      else if(mode=="llvm") {psizam::detail::set_llvm_opt_level(2);run<psizam::jit_llvm>(code,gas,checks,timeout);}
 #endif
 #ifdef HAVE_WASMTIME
-      else if(mode=="cranelift-checked"||mode=="cranelift-cached")run_wasmtime(code,gas,checks,mode=="cranelift-checked");
+      else if(mode=="cranelift-checked"||mode=="cranelift-cached")run_wasmtime(code,gas,checks,mode=="cranelift-checked",timeout);
 #endif
       else throw std::runtime_error("unknown or disabled engine");
    }catch(const std::exception& e){count_allocations=false;std::fprintf(stderr,"%s\n",e.what());return 1;}

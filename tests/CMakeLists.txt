@@ -479,7 +479,7 @@ if(PSIZAM_ENABLE_LLVM)
    list(APPEND _call_modes llvm)
 endif()
 foreach(_mode IN LISTS _call_modes)
-   foreach(_policy none gas)
+   foreach(_policy none gas timeout)
       add_test(NAME calls.${_mode}.${_policy} COMMAND psizam_call_boundary_tests
          ${_mode} "${CMAKE_CURRENT_BINARY_DIR}/call-boundary.wasm" ${_policy} check)
       set_tests_properties(calls.${_mode}.${_policy} PROPERTIES LABELS "execution;quick;calls" TIMEOUT 60)

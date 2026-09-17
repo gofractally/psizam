@@ -80,3 +80,12 @@ remain confined to their executing thread. The runtime benchmark reads the
 backend's actual gas counter. Logical WIT schema compatibility and dynamic
 non-scalar marshalling are separate from validation of the lowered Wasm
 signature; this scalar benchmark does not certify either.
+
+The natural-signature runner covers no CPU limits, gas/fuel and timeout
+interruption. Timeout cases first force an interruption and verify recovery,
+then arm a long deadline around the timed calls. psizam protects executable
+pages; Wasmtime enables epoch interruption. Every nested instance is covered.
+Enable `PSIZAM_ENABLE_TOOLS=ON` in the standalone build to produce fresh LLVM
+O2 PZAM fixtures through `pzam-compile`. Pass `--aot-dir build/calls` to `run.py`
+to include those saved artifacts in the measured matrix. CTest also executes
+all three resource modes through the saved LLVM O2 code.
