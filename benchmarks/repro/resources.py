@@ -75,13 +75,29 @@ def freeze_source(r):
         root=Path(r.config[repo]['path'])
         if (root/'.git').exists():
             files=subprocess.check_output(['git','-C',root,'ls-files','--cached','--others','--exclude-standard','-z']).decode().split('\0')
+            # Gitlinks are directories, not files. Retain their actual source
+            # contents so an extracted kit can rebuild the specification tests.
+            pending=[Path('.')]
+            while pending:
+                prefix=pending.pop()
+                entries=subprocess.check_output(['git','-C',root/prefix,'ls-files','--stage','-z']).decode().split('\0')
+                for entry in entries:
+                    if not entry.startswith('160000 '):continue
+                    child=prefix/entry.split('\t',1)[1]
+                    if not (root/child/'.git').exists():
+                        raise RuntimeError('Initialize source submodule before freezing: '+str(root/child))
+                    nested=subprocess.check_output(['git','-C',root/child,'ls-files','--cached','--others','--exclude-standard','-z']).decode().split('\0')
+                    files.extend(str(child/name) for name in nested if name)
+                    pending.append(child)
         else:
             files=[str(p.relative_to(root)) for p in root.rglob('*') if p.is_file()]
         dest=r.work/'source'/repo
         manifests[repo]={}
         for name in sorted(set(files)):
             source=root/name
-            if not name or not source.is_file() or '__pycache__' in source.parts:continue
+            # This descriptor is generated below. Hashing its incoming copy and
+            # then replacing it would invalidate re-frozen archive manifests.
+            if not name or name=='BENCHMARK_SOURCE_REVISION.json' or not source.is_file() or '__pycache__' in source.parts:continue
             target=dest/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,target)
             manifests[repo][name]=sha(target)
         save(dest/'BENCHMARK_SOURCE_REVISION.json',{'commit':r.config[repo]['commit'],

@@ -45,12 +45,13 @@ WORKLOAD_TEXT = {
 }
 
 
-def generate(s,out):
+def generate(s,out,extension=None):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from matplotlib.ticker import PercentFormatter
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Image, Table, TableStyle
+    from reportlab.platypus.tableofcontents import TableOfContents
     from reportlab.lib.styles import getSampleStyleSheet,ParagraphStyle
     from reportlab.lib import colors
     from reportlab.lib.utils import ImageReader
@@ -103,17 +104,23 @@ def generate(s,out):
     styles=getSampleStyleSheet();styles['BodyText'].fontSize=10;styles['BodyText'].leading=14;styles['BodyText'].spaceAfter=10
     styles['Heading1'].fontSize=23;styles['Heading1'].leading=28;styles['Heading1'].textColor=colors.HexColor('#19364B')
     styles.add(ParagraphStyle(name='Small',fontName='Helvetica',fontSize=8,leading=11,spaceAfter=8,textColor=colors.HexColor('#526577')))
-    story=[];web=[];page=0
+    comprehensive = 'extended' in s or extension is not None
+    story=[];web=[];headings=[];page=0
     def para(text,style='BodyText'):
         story.append(Paragraph(text,styles[style]));web.append('<'+('h1' if style=='Heading1' else 'p')+'>'+text+'</'+('h1' if style=='Heading1' else 'p')+'>')
     def title(text):
         nonlocal page
         if page:story.append(PageBreak());web.append('</section>')
-        page+=1;web.append('<section>');para('PSIZAM / CRANELIFT - WORK BUDGETS AND TIMEOUTS','Small');para(text,'Heading1')
+        page+=1;headings.append(text.replace('<br/>',' '));web.append(f'<section id="section-{page}">');para('PSIZAM / CRANELIFT - '+('COMPLETED BENCHMARK RESULTS' if extension else 'PERFORMANCE AND RELEASE READINESS' if 'extended' in s else 'WORK BUDGETS AND TIMEOUTS'),'Small');para(text,'Heading1');story[-1].toc_title=text.replace('<br/>',' / ')
     def picture(name,maxheight=360):
         width,height=ImageReader(str(out/name)).getSize();ratio=min(504/width,maxheight/height)
         story.append(Image(str(out/name),width=width*ratio,height=height*ratio));story.append(Spacer(1,10))
         web.append(f'<img src="{name}" alt="{name[:-4].replace("-"," ")}">')
+    if extension is not None:
+        extension(s,out,title,para,picture,charts,'overview')
+    if 'extended' in s:
+        from extended_report import render
+        render(s,out,title,para,picture,charts,'overview')
     title('Added compute time from execution limits')
     para('WebAssembly (Wasm) engines can stop runaway programs by counting work or enforcing a time deadline. These bars measure the cost of enabling those limits while completing the same computation.')
     para('<b>No CPU limits:</b> no work counting or timer. <b>Work budget:</b> counts executed work, called gas in psizam and fuel in Cranelift. <b>Time limit:</b> interrupts when an elapsed-time deadline expires. All measured runs have enough budget and time to finish. Memory and call-stack protection remain enabled.','Small')
@@ -128,7 +135,7 @@ def generate(s,out):
     fastest=speed[ranked[0]]
     para('<b>What this means for applications:</b> This measures the compute portion of CPU-heavy Wasm jobs, such as numerical simulation, matrix multiplication and stencil processing. '+label(ranked[0])+f' leads this aggregate at {fastest:.2f}x the reference speed. If an application\'s compute achieved that same speedup, that portion would take {100*(1-1/fastest):.0f}% less time. If it accounted for half of request latency, total latency would fall about {50*(1-1/fastest):.0f}%, with all other work unchanged. This is an illustration, not a measured application result; I/O, host calls, startup and compilation need separate measurements.')
     para('<b>Terms:</b> JIT compiles code when a module is loaded; AOT prepares code ahead of execution. PZAM is psizam\'s saved-code format; O2 names a compiler optimization level. Scalar Wasm expresses arithmetic on one value at a time; SIMD instructions operate on several values at once, within the same execution thread.','Small')
-    para('All engine profiles request canonical floating-point behavior. JIT1/JIT2 ARM floating-point SIMD uses helper routines; LLVM and Cranelift can use hardware vectors. Memory and call-stack safety checks remain enabled in all profiles.','Small')
+    para('All compute profiles request canonical floating-point behavior. JIT1/JIT2 ARM floating-point SIMD uses helper routines; LLVM and Cranelift can use hardware vectors. Memory and call-stack safety checks remain enabled in all profiles.','Small')
     for name in names:
         description=WORKLOAD_TEXT[name]
         title(description['title']+'<br/>Cost of work limits and timeouts')
@@ -148,21 +155,51 @@ def generate(s,out):
         picture('artifact-creation.png',390)
         para('Full command time includes process startup, compilation and writing the saved file. Each value is the median of per-test medians. Raw trials, file hashes and sizes are retained in resources.json. Requested workers are a budget; small modules may not use all workers.')
         para('LLVM O2 uses per-function compilation with one worker and batched compilation with multiple workers. That comparison includes batching and scheduling effects. No heavy compilation runs concurrently with execution timing.','Small')
+    if 'extended' in s:
+        render(s,out,title,para,picture,charts,'details')
+    if extension is not None:
+        extension(s,out,title,para,picture,charts,'details')
     title('How the tests were run and what they cover')
     config=s['config'];hardware=config.get('hardware',{}).get('machdep.cpu.brand_string',config['machine'])
     para(html.escape(hardware+' | '+config['platform']+' | '+config['date_utc']))
+    if comprehensive:
+        para('Build toolchain: '+html.escape(config['wasi_compiler'].splitlines()[0])+' (WASI SDK); '+html.escape(config['native_compiler'].splitlines()[0])+'. Workloads come from the pinned LLVM test suite and EEMBC CoreMark sources. Revisions, file hashes, build commands and local instrumentation are retained with the benchmark evidence.','Small')
     para(f'<b>Limits:</b> gas budget {s["gas_budget"]:,}; wall deadline {s["timeout_ms"]/1000:g} seconds, armed for every timeout trial. psizam uses code-page interruption for JIT1, JIT2, LLVM JIT and saved PZAM. Wasmtime uses epoch interruption. None of these is a process-CPU-time quota.')
     para('Gas/fuel units differ between engines and are not equivalent amounts of work. Performance budgets are deliberately non-exhausting. Both instrumented execution and actual exhaustion are tested. Timeout profiles omit gas accounting; the no-check profile omits both resource mechanisms.')
     para(f'<b>Correctness:</b> {s["enforcement_checks"]} resource checks pass, including finite completion, infinite loops and nonterminating module initialization. psizam must report its exact gas/timeout exception; Wasmtime must report its fuel/interrupt trap. The outer {s["outer_watchdog_s"]}-second process watchdog is distinct and never counts as successful enforcement.')
     para(f'{s["validation_checks"]} output comparisons pass against native output where applicable. PolyBench compares its printed arrays; this is not bitwise floating-point equality. CoreMark, if included, requires both CRC seed sets and at least ten seconds per accepted run.')
-    para('Measurements run serially in fixed-seed randomized order, after one excluded warmup. Filesystem caches are warm. The machine remains a desktop environment; CPU placement, frequency and temperature are not fixed. Medians and observed minima/maxima are in summary.json; raw commands and output remain in the work directory. No statistical significance claim is made.','Small')
+    para('Execution trials run serially in fixed-seed randomized order, after one excluded warmup per cell. Artifact creation uses '+str(s['compile_samples'])+' measured fresh-process trials with no excluded warmup; small-module builds follow the fixed matrix order, while Clang builds are randomized when included. Filesystem caches are warm. The machine remains a desktop environment; CPU placement, frequency and temperature are not fixed. Medians and observed minima/maxima are in summary.json; raw commands and output remain in the work directory. No statistical significance claim is made.','Small')
     runtime_workers=sorted({int(v.split('/j')[1]) for v in profiles})
     selection='the one-worker build' if runtime_workers==[1] else 'the lowest compiler worker count available for each engine'
-    para('Runtime charts and tables show one entry per engine, using '+selection+' consistently across tests and limit settings. Build parallelism is compared on the compilation page. Measurements from all compiler configurations remain in the raw data; they are not pooled into runtime results.','Small')
-    para('This report covers only the workloads listed in its charts. It does not measure a complete Clang bootstrap, host-call microbenchmarks, cold-cache deployment, concurrent instances, or blocked host calls. Page interruption is exercised with one execution owning its module.','Small')
-    para('Source commit: '+config['psizam']['commit']+'<br/>Source manifest SHA-256: '+s['source_manifest_sha256']+'<br/>'+html.escape(config['wasmtime']),'Small')
+    para('Compute runtime charts and tables show one entry per engine, using '+selection+' consistently across tests and limit settings. Build parallelism is compared on the compilation page. Measurements from all compiler configurations remain in the raw data; they are not pooled into runtime results.','Small')
+    para(s.get('scope_text') or ('This report covers eight compute workloads, sustained CoreMark, Clang artifact creation and two C++ jobs, and scalar host-call microbenchmarks. It does not measure a complete Clang bootstrap, cold-cache deployment, concurrent instances, or blocked host calls. ' if 'extended' in s else 'This report covers only the workloads listed in its charts. It does not measure a complete Clang bootstrap, host-call microbenchmarks, cold-cache deployment, concurrent instances, or blocked host calls. ')+'Page interruption is exercised with one execution owning its module.','Small')
+    if 'extended' in s:
+        title('Source identities and reproducibility')
+        para('Compute, CoreMark and compiler jobs use the same frozen CLI binaries. The supplementary scalar-boundary runner matches that source; the natural-signature service and canonical-proxy experiments use their independently archived public-runtime build. CoreMark has three measured trials for each seed set; C++ jobs and host calls have five; artifact creation has three. Clang runtime uses the 18-worker saved builds; compute runtime uses the one-worker saved builds. The reproduction kit records each experiment separately and retains all commands and outputs. Compiler-worker counts are never pooled or shown as extra runtime engines.','Small')
+    if 'extended' in s:
+        e=s['extended']; writer=e['artifact_sizes']['jit1_provenance']
+        para('Service-call source commit: '+e['service_cohort']['commit']+'; manifest: '+e['service_cohort']['source_manifest_sha256']+'.<br/>JIT1 saved-file writer / release source commit: '+writer['config']['psizam']['commit']+'; manifest: '+writer['source_manifest_sha256']+'. Each experiment retains its own source archive, compiler hash and inputs. No different builds are pooled within a timing cell.','Small')
+        for source in e['workload_references']:
+            url='https://github.com/'+source['repository']+'/tree/'+source['revision']
+            para('<b>Workload source:</b> <a href="'+html.escape(url)+'" color="#267CA4">'+html.escape(source['repository'])+'</a>, revision '+source['revision']+'. Individual file hashes and local benchmark instrumentation are retained in the reproduction kit.','Small')
+    para('Source base commit: '+config['psizam']['commit']+'. The measured state includes the captured working-tree changes; the frozen source manifest identifies the complete snapshot.<br/>Source manifest SHA-256: '+s['source_manifest_sha256']+'<br/>'+html.escape(config['wasmtime']),'Small')
     def footer(canvas,doc):
-        canvas.setFont('Helvetica',8);canvas.setFillColor(colors.HexColor('#617586'));canvas.drawString(54,29,'PSIZAM / CRANELIFT | Work budgets and timeouts');canvas.drawRightString(558,29,str(doc.page))
-    SimpleDocTemplate(str(out/'psizam-cranelift-report.pdf'),pagesize=(612,792),rightMargin=54,leftMargin=54,topMargin=43,bottomMargin=48,title='psizam and Cranelift: compute speed, work budgets and timeouts').build(story,onFirstPage=footer,onLaterPages=footer)
-    (out/'report.html').write_text('<!doctype html><meta charset="utf-8"><title>Compute speed, work budgets and timeouts</title><style>body{font:16px/1.5 system-ui;color:#19364b;background:#edf2f5;margin:0}section{max-width:980px;background:white;margin:24px auto;padding:40px}img{width:100%}table{border-collapse:collapse;width:100%}td{padding:6px;border-bottom:1px solid #ddd}</style>'+''.join(web)+'</section>')
+        canvas.setFont('Helvetica',8);canvas.setFillColor(colors.HexColor('#617586'));canvas.drawString(54,29,'PSIZAM / CRANELIFT | '+('Interim benchmark report' if extension else 'Comprehensive performance report' if 'extended' in s else 'Work budgets and timeouts'));canvas.drawRightString(558,29,str(doc.page))
+    class ReportDocument(SimpleDocTemplate):
+        def afterFlowable(self,flowable):
+            if isinstance(flowable,Paragraph) and flowable.style.name=='Heading1':
+                heading=getattr(flowable,'toc_title',flowable.getPlainText());key='section-'+str(self.page)
+                self.canv.bookmarkPage(key);self.canv.addOutlineEntry(heading,key,level=0)
+                if heading!='Contents':self.notify('TOCEntry',(0,heading,self.page,key))
+    doc=ReportDocument(str(out/'psizam-cranelift-report.pdf'),pagesize=(612,792),rightMargin=54,leftMargin=54,topMargin=43,bottomMargin=48,title='psizam and Cranelift: '+('completed benchmark results' if extension else 'comprehensive performance and release readiness' if 'extended' in s else 'compute speed, work budgets and timeouts'))
+    if comprehensive:
+        toc=TableOfContents();toc.levelStyles=[ParagraphStyle(name='ContentsEntry',fontName='Helvetica',fontSize=8.5,leading=10.5,spaceBefore=0,textColor=colors.HexColor('#19364B'))]
+        toc.tableStyle.add('TOPPADDING',(0,0),(-1,-1),0)
+        toc.tableStyle.add('BOTTOMPADDING',(0,0),(-1,-1),0)
+        first_break=next(i for i,f in enumerate(story) if isinstance(f,PageBreak))
+        story[first_break:first_break]=[PageBreak(),Paragraph('Contents',styles['Heading1']),Spacer(1,8),toc]
+        doc.multiBuild(story,onFirstPage=footer,onLaterPages=footer)
+    else:doc.build(story,onFirstPage=footer,onLaterPages=footer)
+    navigation='<details><summary>Report contents</summary><ol>'+''.join(f'<li><a href="#section-{i}">{html.escape(h)}</a></li>' for i,h in enumerate(headings,1))+'</ol></details>'
+    (out/'report.html').write_text('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>psizam and Cranelift: performance report</title><style>body{font:16px/1.5 system-ui;color:#19364b;background:#edf2f5;margin:0}section,details{max-width:980px;background:white;margin:24px auto;padding:40px}details{padding:20px 40px}summary{cursor:pointer;font-weight:600}a{color:#267ca4}img{width:100%}table{border-collapse:collapse;width:100%}td{padding:6px;border-bottom:1px solid #ddd}</style>'+navigation+''.join(web)+'</section>')
     (out/'charts.json').write_text(json.dumps(charts,indent=2)+'\n')

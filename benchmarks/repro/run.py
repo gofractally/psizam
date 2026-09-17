@@ -71,6 +71,11 @@ class Run:
         for name in ['CPATH','C_INCLUDE_PATH','CPLUS_INCLUDE_PATH','LIBRARY_PATH','DYLD_LIBRARY_PATH',
                      'WASMTIME_BACKTRACE_DETAILS','PZAM_RUN_PROFILE']:
             self.env.pop(name,None)
+        # Developer diagnostics and pass overrides must not silently alter a
+        # reproducible measurement. Opt levels are explicit runner/CLI settings.
+        for name in list(self.env):
+            if name.startswith(('PSIZAM_LLVM_','PSIZAM_DUMP_')) or name=='PSIZAM_TRACE_WASI':
+                self.env.pop(name,None)
         self.env.update(LC_ALL='C',TZ='UTC',RAYON_NUM_THREADS='1',OMP_NUM_THREADS='1')
         self.config=json.loads((self.work/'config.json').read_text()) if (self.work/'config.json').exists() else {}
     def command(self,label,cmd,timeout=180,check=False):

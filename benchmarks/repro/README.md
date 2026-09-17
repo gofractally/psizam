@@ -8,12 +8,13 @@ baseline. Memory protection and call-stack limits stay enabled.
 ## Build and run
 
 Build the standalone engine and runner with `build.sh`; it accepts the psizam
-checkout, psio checkout, build directory, LLVM prefix and Wasmtime C API directory.
+checkout, psio checkout, build directory, LLVM prefix, Wasmtime C API directory,
+and WASI SDK directory.
 The C API runner is for the separate boundary experiment. The resource matrix
 uses the pinned Wasmtime 48.0.2 CLI and LLVM O2.
 
 ```sh
-benchmarks/repro/build.sh "$PWD" ../psio /tmp/resource-build /opt/homebrew/opt/llvm /path/to/wasmtime-c-api
+benchmarks/repro/build.sh "$PWD" ../psio /tmp/resource-build /opt/homebrew/opt/llvm /path/to/wasmtime-c-api /path/to/wasi-sdk
 python3 benchmarks/repro/run.py prepare --work build/resource-run \
   --wasi-sdk /path/to/wasi-sdk --native-cc /path/to/clang \
   --engine-bin /tmp/resource-build/engine/bin \
@@ -91,3 +92,11 @@ Runtime samples from different build configurations are not pooled.
 new artifacts and reruns enforcement, correctness and timing. Compiler jobs,
 full bootstrap and host boundaries are separate experiments; they are not
 inferred from this resource-policy report.
+
+For the complete report with CoreMark, Clang preparation and C++ jobs,
+memory/startup charts, host calls, saved-file sizes and release priorities, follow
+[COMPREHENSIVE.md](COMPREHENSIVE.md). `report.py --comprehensive` requires every
+experiment to be complete and checks each experiment's recorded engine identity.
+Separate source snapshots identify the compute/compiler build, public service-call
+build and JIT1 saved-file writer; timing cells never mix builds. Native CoreMark
+provides a separately labeled context view.

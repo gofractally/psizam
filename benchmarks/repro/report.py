@@ -33,6 +33,8 @@ def summarize(data):
             if min(values)<=0: raise ValueError('Nonpositive timing')
             cells[name][variant]={'median_s':stats.median(values),'min_s':min(values),'max_s':max(values),
                                   'wall_s':stats.median(r['wall_s'] for r in rows),'samples':len(rows)}
+            cells[name][variant]['peak_rss_mib']=stats.median(r['peak_rss_bytes']/2**20 for r in rows)
+            cells[name][variant]['outside_kernel_ms']=stats.median(1000*(r['wall_s']-r['execution_s']) for r in rows)
         for variant,cell in cells[name].items():
             base=variant.rsplit('/',1)[0]+'/none'
             cell['relative_time']=cell['median_s']/cells[name][base]['median_s']
@@ -48,7 +50,7 @@ def summarize(data):
     overhead={v:{p:gm([cells[n][v+'/'+p]['relative_time'] for n in data['workloads']])
                  for p in data['profiles']} for v in profiles}
     return {'config':data['config'],'source_manifest_sha256':data['source_manifest_sha256'],
-            'workloads':data['workloads'],'samples':data['samples'],'profiles':profiles,
+            'workloads':data['workloads'],'samples':data['samples'],'compile_samples':data['compile_samples'],'profiles':profiles,
             'runtime_profiles':list(runtime_by_engine.values()),
             'cells':cells,'relative_time':overhead,'gas_budget':data['gas_budget'],'timeout_ms':data['timeout_ms'],
             'enforcement_checks':len(data['enforcement']),'validation_checks':len(data['validation']),
@@ -58,12 +60,30 @@ def summarize(data):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--work',type=Path,required=True);p.add_argument('--out',type=Path,required=True)
+    p.add_argument('--comprehensive',action='store_true')
     a=p.parse_args();data=json.loads((a.work/'resources.json').read_text());s=summarize(data)
+    if a.comprehensive:
+        from extended_report import summarize_experiments
+        s['extended']=summarize_experiments(a.work,data)
     a.out.mkdir(parents=True,exist_ok=True)
     (a.out/'summary.json').write_text(json.dumps(s,indent=2)+'\n')
-    rows=data['measurements'];fields=sorted(set().union(*(r.keys() for r in rows)))
-    with (a.out/'samples.csv').open('w') as f:
-        writer=csv.DictWriter(f,fieldnames=fields);writer.writeheader();writer.writerows(rows)
+    def write_csv(name,rows):
+        fields=sorted(set().union(*(r.keys() for r in rows)))
+        with (a.out/name).open('w') as f:
+            writer=csv.DictWriter(f,fieldnames=fields);writer.writeheader();writer.writerows(rows)
+    write_csv('samples.csv',data['measurements'])
+    if a.comprehensive:
+        def read(name):return json.loads((a.work/name).read_text())
+        write_csv('coremark-samples.csv',read('coremark/resources.json')['measurements']+
+                  [dict(r,mode='native',profile='none') for r in read('coremark/native-coremark.json')['measurements']])
+        write_csv('compiler-preparation.csv',data['compilation']+
+                  [dict(r,workload='clang') for r in read('clang-resource-compilation.json')])
+        write_csv('compiler-jobs.csv',read('clang-resource-measurements.json'))
+        write_csv('host-calls.csv',read('boundary.json'))
+        directory=s['extended']['service_cohort']['directory']
+        write_csv('service-calls.csv',read(directory+'/service-calls/measurements.json'))
+        write_csv('runtime-calls.csv',read(directory+'/runtime-calls/measurements.json'))
+        write_csv('artifact-sizes.csv',s['extended']['artifact_sizes']['rows'])
     from visual_report import generate
     generate(s,a.out)
 
