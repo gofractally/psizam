@@ -90,7 +90,7 @@ jobs:
             -DPSIZAM_ENABLE_COMPILER_TESTS=ON \
             -DPSIZAM_COMPILER_TEST_DATA="$RUNNER_TEMP/compiler-fixtures"
       - name: Build validation executables
-        run: cmake --build build/validation --target psizam_execution_driver psizam_regalloc_tests pzam-compile pzam-run --parallel 2
+        run: cmake --build build/validation --parallel 2
       - name: Require correct execution
         run: ctest --test-dir build/validation -L execution --output-on-failure --no-tests=error --output-junit execution-results.xml
       - name: Preserve failures and commands

@@ -114,7 +114,7 @@ ctest --preset execution-validation
 The profile enables `PSIZAM_ENABLE_COMPILER_TESTS` and LLVM. Configuration fails
 without the fixture directory; CTest fails on missing or altered contents.
 Compiler tests use both LLVM translation units with JIT1/JIT2 fast and softfloat,
-JIT2 CLI/API artifacts, and LLVM O2 CLI artifacts. Correct object hashes are
+JIT1/JIT2 CLI/API artifacts, and LLVM O2 CLI artifacts. Correct object hashes are
 required; `--version` alone does not establish compiler functionality.
 
 CTest setup fixtures compile artifacts afresh before dependent jobs. Identity
@@ -138,6 +138,13 @@ No URL or wrong content fails CI; it does not silently select a smaller suite.
 The archive currently exists locally in the benchmark outputs; this checkout
 has no published remote or hosted fixture URL yet. Remote CI cannot be claimed
 as verified until those are available and the jobs actually run.
+
+The quick gate includes 32 deterministic saved-JIT1 compile/execute combinations
+per architecture, with gas and backtrace on/off, plus malformed-input rejection.
+The full saved scalar/SIMD suites are a separate acceptance run: build with
+`PSIZAM_ENABLE_SPEC_TESTS=ON` and `PSIZAM_ENABLE_AOT_SPEC_TESTS=ON`, then use
+`scripts/run-aot-spec.py`. It runs LLVM O2 and JIT1 by default, retaining the
+unsupported multiple-memory failure. See [aot-spec-tests.md](aot-spec-tests.md).
 
 Runner labels follow the [GitHub runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 WASI SDK 32 downloads and hashes come from the
