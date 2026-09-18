@@ -5,6 +5,53 @@ no CPU limits, a finite gas/fuel budget, and an armed wall-clock timeout. These
 are separate compiled profiles: an unlimited gas budget is not an uninstrumented
 baseline. Memory protection and call-stack limits stay enabled.
 
+## PZAM loading diagnostic
+
+`pzam_loading.py` measures loading separately from the complete Clang job. It
+requires a completed `compiler_jobs.py` cohort, including its frozen engine and
+psio source snapshots, compiler tools, artifacts, inputs and expected object
+hashes. It does not rebuild Clang or the engine.
+
+```sh
+python3 benchmarks/repro/pzam_loading.py prepare \
+  --parent build/resource-run --work build/pzam-loading \
+  --cxx /path/to/clang++ --samples 5 --probe-samples 10
+# On Homebrew, also pass --boost-include /opt/homebrew/include.
+python3 build/pzam-loading/measurement-source/pzam_loading.py measure \
+  --parent build/resource-run --work build/pzam-loading
+python3 benchmarks/repro/pzam_loading_report.py \
+  --arm /path/to/completed-arm-cohort --x86 /path/to/completed-x86-cohort \
+  --out outputs/pzam-loading
+```
+
+Use a new output directory. Preparation compiles a small standalone probe using
+the frozen headers. Complete all preparation before timing, and keep each host
+free of concurrent builds or benchmarks. Compiler jobs run serially with the
+original binaries, warm filesystem cache, and no CPU checking. They reuse the
+parent CPU affinity and artifact selection. Every output must match the parent
+raw and normalized object SHA-256.
+
+`PZAM_RUN_PROFILE=1` splits pre-guest startup into phases. Default `--trust=none`
+validates twice; the paired `--trust=full` path still validates inside
+`pzam_load`, but omits the redundant outer pass. The remaining process wall time
+includes guest execution, launch before the profiler, and teardown; it is not a
+pure guest timer. Wasmtime AOT runs provide a fresh whole-job reference without
+claiming an independently measured Wasmtime startup time.
+
+The container probe compares owned decoding and borrowed PSSZ views, each with
+one or two validation passes. Both copy the selected native code into generic
+anonymous writable pages. Byte comparison and checksum happen after timing;
+RSS is the complete probe process high-water mark. The probe excludes module
+restoration, relocations, executable permissions and guest execution, so its
+savings must not be presented as an integrated loader speedup. Data must be
+validated before constructing views, and the mapping must outlive all views.
+
+Each cell has an excluded warmup; subsequent fresh processes are shuffled.
+Results include all raw profiles, commands, individual samples, exact harness,
+header hashes and tool/artifact identities. `COMPLETE` is written only after
+correctness and final identity checks pass. The report generator requires
+Matplotlib and ReportLab and emits PDF, Markdown, CSV summaries and JSON.
+
 ## Build and run
 
 Build the standalone engine and runner with `build.sh`; it accepts the psizam
