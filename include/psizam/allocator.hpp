@@ -5,6 +5,7 @@
 #include <psizam/detail/span.hpp>
 
 #include <cassert>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -13,6 +14,8 @@
 #include <memory>
 #include <mutex>
 #include <span>
+#include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -384,6 +387,23 @@ namespace psizam {
 #endif // !PSIZAM_COMPILE_ONLY
 
    class growable_allocator {
+#if !defined(PSIZAM_COMPILE_ONLY) || defined(__LP64__)
+      static char* map_sparse_memory(size_t size, const char* failure_message) {
+         int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#if defined(__linux__) && defined(MAP_NORESERVE)
+         // Reserve sparse arena address space without committing its full capacity.
+         flags |= MAP_NORESERVE;
+#endif
+         void* mapping = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, flags, -1, 0);
+         if (mapping == MAP_FAILED) {
+            const int error = errno;
+            PSIZAM_THROW(wasm_bad_alloc, std::string(failure_message) + " bytes=" +
+               std::to_string(size) + ", errno=" + std::to_string(error) + " (" +
+               std::system_category().message(error) + ")");
+         }
+         return static_cast<char*>(mapping);
+      }
+#endif
     public:
       static constexpr size_t max_memory_size = sizeof(size_t) >= 8
          ? size_t(16) * 1024 * 1024 * 1024   // 16GB on 64-bit
@@ -421,8 +441,7 @@ namespace psizam {
          _capacity = alloc_size;
 #else
          // 64-bit (native or COMPILE_ONLY): mmap demand-paged virtual memory
-         _base = (char*)mmap(NULL, max_memory_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-         PSIZAM_ASSERT(_base != MAP_FAILED, wasm_bad_alloc, "failed to mmap for default memory.");
+         _base = map_sparse_memory(max_memory_size, "failed to mmap for default memory.");
          _capacity = max_memory_size;
 #endif
       }
@@ -437,8 +456,7 @@ namespace psizam {
          PSIZAM_ASSERT(_base != nullptr, wasm_bad_alloc, "malloc in use_fixed_memory failed.");
 #else
          // 64-bit (native or COMPILE_ONLY): mmap demand-paged
-         _base = (char*)mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-         PSIZAM_ASSERT(_base != MAP_FAILED, wasm_bad_alloc, "mmap in use_fixed_memory failed.");
+         _base = map_sparse_memory(size, "mmap in use_fixed_memory failed.");
 #endif
          _capacity = size;
       }

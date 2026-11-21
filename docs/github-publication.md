@@ -41,6 +41,19 @@ The `Standalone library` workflow performs these checks on fresh Linux x86-64
 and macOS ARM64 runners. Its run results, rather than this local record, establish
 remote CI outcomes for a particular commit.
 
+## Linux sparse arena allocation
+
+Native Linux x86-64 qualification with Clang 20.1.8 passed 324 unit cases,
+52 runtime-parity cases, 77 compliance cases, all 173 quick CTest checks,
+both consumer examples and the installed-runtime gate. The fresh build and
+the allocator follow-up were run in an isolated workspace on the Linux builder.
+
+Hosted Linux validation exposed a failure mapping the default 16 GiB module/IR
+arena. Linux growable arenas now use `MAP_NORESERVE` for their sparse mappings,
+with allocation diagnostics that report requested bytes and errno. The arena
+capacity and guest linear-memory guards are preserved. CI records the memory
+policy and checks a source consumer before starting the full test build.
+
 ## Remaining release qualification
 
 Publishing the source and passing package checks do not establish a stable

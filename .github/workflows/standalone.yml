@@ -64,6 +64,35 @@ jobs:
           PYTHON
           tar -xzf "$RUNNER_TEMP/wasi-sdk.tar.gz" -C "$RUNNER_TEMP"
           echo "WASI_SDK=$RUNNER_TEMP/$SDK_NAME" >> "$GITHUB_ENV"
+      - name: Record Linux memory policy
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python3 - <<'PYTHON' > "$RUNNER_TEMP/linux-memory-environment.log"
+          from pathlib import Path
+          for name in ['/proc/sys/vm/overcommit_memory', '/proc/self/limits',
+                       '/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory.current']:
+              path = Path(name)
+              if path.is_file():
+                  print(name)
+                  print(path.read_text())
+          print('/proc/meminfo commitment')
+          for line in Path('/proc/meminfo').read_text().splitlines():
+              if line.startswith(('MemTotal:', 'MemAvailable:', 'CommitLimit:', 'Committed_AS:')):
+                  print(line)
+          PYTHON
+          cat "$RUNNER_TEMP/linux-memory-environment.log"
+          "$CC" -D_GNU_SOURCE scripts/probe-linux-memory.c -o "$RUNNER_TEMP/linux-memory-probe"
+          "$RUNNER_TEMP/linux-memory-probe" | tee "$RUNNER_TEMP/linux-memory-probe.log"
+      - name: Preserve Linux memory probe
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-policy-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/linux-memory-environment.log
+            ${{ runner.temp }}/linux-memory-probe.log
+          if-no-files-found: error
       - name: Build and install pinned psio
         shell: bash
         run: |
@@ -71,6 +100,14 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/psio-install"
           cmake --build "$RUNNER_TEMP/psio-build" --parallel 2
           cmake --install "$RUNNER_TEMP/psio-build"
+      - name: Check source consumer before the full build
+        shell: bash
+        run: |
+          cmake -S examples/consumer -B "$RUNNER_TEMP/psizam-check/source-consumer" -G Ninja \
+            -DPSIZAM_SOURCE_DIR="$GITHUB_WORKSPACE" -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/psio-install"
+          cmake --build "$RUNNER_TEMP/psizam-check/source-consumer" --parallel 2
+          ctest --test-dir "$RUNNER_TEMP/psizam-check/source-consumer" \
+            --output-on-failure --no-tests=error
       - name: Verify standalone library and consumers
         shell: bash
         env:
