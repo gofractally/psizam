@@ -3120,95 +3120,38 @@ namespace psizam::detail {
                   }
                } break;
                case opcodes::atomic_prefix: {
-                  auto sub = parse_varuint32(code);
-                  auto asub = static_cast<atomic_sub>(sub);
+                  const auto sub = parse_varuint32(code);
+                  PSIZAM_ASSERT(sub <= 3 || (sub >= 0x10 && sub <= 0x4e),
+                                wasm_parse_exception, "Illegal atomic instruction");
+                  const auto asub = static_cast<atomic_sub>(sub);
                   if (asub == atomic_sub::atomic_fence) {
                      check_in_bounds();
-                     PSIZAM_ASSERT(*code == 0, wasm_parse_exception, "atomic.fence must have 0x00 byte");
-                     code++;
+                     PSIZAM_ASSERT(*code++ == 0, wasm_parse_exception, "atomic.fence must have 0x00 byte");
                      code_writer.emit_atomic_op(asub, 0, 0);
-                  } else if (asub == atomic_sub::memory_atomic_notify) {
-                     check_in_bounds();
-                     auto align = parse_varuint32(code);
-                     auto offset = parse_memarg_offset(code);
-                     op_stack.pop(types::i32); // count
-                     op_stack.pop(mem_addr_type()); // addr
-                     op_stack.push(types::i32); // result
-                     code_writer.emit_atomic_op(asub, align, offset);
-                  } else if (asub == atomic_sub::memory_atomic_wait32) {
-                     check_in_bounds();
-                     auto align = parse_varuint32(code);
-                     auto offset = parse_memarg_offset(code);
-                     op_stack.pop(types::i64); // timeout
-                     op_stack.pop(types::i32); // expected
-                     op_stack.pop(mem_addr_type()); // addr
-                     op_stack.push(types::i32); // result
-                     code_writer.emit_atomic_op(asub, align, offset);
-                  } else if (asub == atomic_sub::memory_atomic_wait64) {
-                     check_in_bounds();
-                     auto align = parse_varuint32(code);
-                     auto offset = parse_memarg_offset(code);
-                     op_stack.pop(types::i64); // timeout
-                     op_stack.pop(types::i64); // expected
-                     op_stack.pop(mem_addr_type()); // addr
-                     op_stack.push(types::i32); // result
-                     code_writer.emit_atomic_op(asub, align, offset);
-                  } else if (sub >= 0x10 && sub <= 0x16) {
-                     // Atomic loads
-                     check_in_bounds();
-                     auto align = parse_varuint32(code);
-                     auto offset = parse_memarg_offset(code);
-                     op_stack.pop(mem_addr_type()); // addr
-                     if (sub <= 0x13) // i32 loads
-                        op_stack.push(types::i32);
-                     else // i64 loads
-                        op_stack.push(types::i64);
-                     code_writer.emit_atomic_op(asub, align, offset);
-                  } else if (sub >= 0x17 && sub <= 0x1D) {
-                     // Atomic stores
-                     check_in_bounds();
-                     auto align = parse_varuint32(code);
-                     auto offset = parse_memarg_offset(code);
-                     if (sub <= 0x1A) { // i32 stores
-                        op_stack.pop(types::i32); // value
-                     } else { // i64 stores
-                        op_stack.pop(types::i64); // value
-                     }
-                     op_stack.pop(mem_addr_type()); // addr
-                     code_writer.emit_atomic_op(asub, align, offset);
-                  } else if (sub >= 0x1E && sub <= 0x4E) {
-                     // Atomic RMW + cmpxchg
-                     check_in_bounds();
-                     auto align = parse_varuint32(code);
-                     auto offset = parse_memarg_offset(code);
-                     // Determine if i32 or i64 op by sub-opcode pattern
-                     bool is_cmpxchg = (sub >= 0x48);
-                     bool is_i64 = false;
-                     if (is_cmpxchg) {
-                        is_i64 = (sub == 0x49 || sub >= 0x4C);
-                     } else {
-                        // RMW ops: 7-op groups (full,full,8,16,8,16,32)
-                        // i64 variants are at odd offsets from group start + 1
-                        uint8_t in_group = (sub - 0x1E) % 7;
-                        is_i64 = (in_group == 1 || in_group >= 4);
-                     }
-                     if (is_cmpxchg) {
-                        if (is_i64) {
-                           op_stack.pop(types::i64); // replacement
-                           op_stack.pop(types::i64); // expected
-                        } else {
-                           op_stack.pop(types::i32);
-                           op_stack.pop(types::i32);
-                        }
-                     } else {
-                        op_stack.pop(is_i64 ? types::i64 : types::i32); // value
-                     }
-                     op_stack.pop(mem_addr_type()); // addr
-                     op_stack.push(is_i64 ? types::i64 : types::i32); // old value
-                     code_writer.emit_atomic_op(asub, align, offset);
-                  } else {
-                     PSIZAM_ASSERT(false, wasm_parse_exception, "Illegal atomic instruction");
+                     break;
                   }
+                  PSIZAM_ASSERT(!_mod->memories.empty(), wasm_parse_exception,
+                                "atomic instruction requires memory");
+                  const auto align = parse_varuint32(code);
+                  const auto offset = parse_memarg_offset(code);
+                  const auto width = atomic_access_size(asub);
+                  PSIZAM_ASSERT(align < 4 && (uint32_t{1} << align) == width,
+                                wasm_parse_exception, "atomic alignment must equal access size");
+                  const auto value_type = atomic_value_is_i64(asub) ? types::i64 : types::i32;
+                  if (asub == atomic_sub::memory_atomic_notify) {
+                     op_stack.pop(types::i32); // count
+                  } else if (asub == atomic_sub::memory_atomic_wait32 ||
+                             asub == atomic_sub::memory_atomic_wait64) {
+                     op_stack.pop(types::i64); // timeout
+                     op_stack.pop(value_type); // expected
+                  } else if (sub >= 0x17) {
+                     if (sub >= 0x48) op_stack.pop(value_type); // replacement
+                     op_stack.pop(value_type); // stored/RMW value, or expected
+                  }
+                  op_stack.pop(mem_addr_type());
+                  if (sub <= 2) op_stack.push(types::i32);
+                  else if (!(sub >= 0x17 && sub <= 0x1d)) op_stack.push(value_type);
+                  code_writer.emit_atomic_op(asub, align, offset);
                } break;
                default: PSIZAM_ASSERT(false, wasm_parse_exception, "Illegal instruction");
             }

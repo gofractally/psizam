@@ -885,7 +885,7 @@ namespace psizam::detail {
             // Checked mode: validate watermark before early return
             emit_validate_watermark();
             if (inst.rr.src1 != ir_vreg_none) {
-               if (inst.type == types::v128) {
+               if (inst.value_type() == types::v128) {
                   // v128 return: load into xmm0 for caller
                   this->emit_vmovdqu(*rsp, xmm0);
                } else {
@@ -909,7 +909,7 @@ namespace psizam::detail {
             // v128 values occupy two native-stack slots (low on top, high below),
             // matching const_v128's push order.
             int32_t offset = multi_return_offset + inst.ri.imm;
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                this->emit_pop_raw(rax); // low
                this->emit_mov(rax, *(rdi + offset));
                this->emit_pop_raw(rax); // high
@@ -925,7 +925,7 @@ namespace psizam::detail {
          case ir_op::multi_return_load: {
             // Load value from ctx->_multi_return[offset] after a multi-value call.
             int32_t offset = multi_return_offset + inst.ri.imm;
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                this->emit_mov(*(rdi + offset + 8), rax); // high
                this->emit_push_raw(rax);
                this->emit_mov(*(rdi + offset), rax);     // low on top
@@ -1001,7 +1001,7 @@ namespace psizam::detail {
                   this->emit_pop_raw(rax); // discard index
                   for (uint32_t i = 0; i < eh_count; ++i)
                      emit_eh_runtime_call(reinterpret_cast<void*>(&__psizam_eh_leave));
-                  emit_branch_to_block(func, inst.br.target, dc, inst.type);
+                  emit_branch_to_block(func, inst.br.target, dc, inst.value_type());
                   _in_br_table = false;
                } else {
                   // Numbered case: compare index at (%rsp) without popping
@@ -1013,14 +1013,14 @@ namespace psizam::detail {
                   this->emit_pop_raw(rax); // pop index
                   for (uint32_t i = 0; i < eh_count; ++i)
                      emit_eh_runtime_call(reinterpret_cast<void*>(&__psizam_eh_leave));
-                  emit_branch_to_block(func, inst.br.target, dc, inst.type);
+                  emit_branch_to_block(func, inst.br.target, dc, inst.value_type());
                   base::fix_branch(skip, code);
                   _br_table_case++;
                }
             } else {
                for (uint32_t i = 0; i < eh_count; ++i)
                   emit_eh_runtime_call(reinterpret_cast<void*>(&__psizam_eh_leave));
-               emit_branch_to_block(func, inst.br.target, dc, inst.type);
+               emit_branch_to_block(func, inst.br.target, dc, inst.value_type());
             }
             break;
          }
@@ -1035,10 +1035,10 @@ namespace psizam::detail {
                void* skip = this->emit_branchcc32(base::JZ);
                for (uint32_t i = 0; i < eh_count; ++i)
                   emit_eh_runtime_call(reinterpret_cast<void*>(&__psizam_eh_leave));
-               emit_branch_to_block(func, inst.br.target, dc, inst.type);
+               emit_branch_to_block(func, inst.br.target, dc, inst.value_type());
                base::fix_branch(skip, code);
             } else {
-               emit_cond_branch_to_block(func, inst.br.target, dc, inst.type);
+               emit_cond_branch_to_block(func, inst.br.target, dc, inst.value_type());
             }
             break;
          }
@@ -1140,7 +1140,7 @@ namespace psizam::detail {
          // ── Local/global access ──
          case ir_op::local_get: {
             int32_t offset = get_frame_offset(func, inst.local.index);
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                // Load 16-byte v128 from frame and push to x86 stack
                auto addr = *(rbp + offset);
                this->emit_vmovdqu(addr, xmm0);
@@ -1154,7 +1154,7 @@ namespace psizam::detail {
          }
          case ir_op::local_set: {
             int32_t offset = get_frame_offset(func, inst.local.index);
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                // Pop 16-byte v128 from x86 stack and store to frame
                this->emit_vmovdqu(*rsp, xmm0);
                this->emit_add(16, rsp);
@@ -1168,7 +1168,7 @@ namespace psizam::detail {
          }
          case ir_op::local_tee: {
             int32_t offset = get_frame_offset(func, inst.local.index);
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                // Copy TOS v128 (16 bytes) to frame without popping
                this->emit_vmovdqu(*rsp, xmm0);
                auto addr = *(rbp + offset);
@@ -1183,7 +1183,7 @@ namespace psizam::detail {
          case ir_op::global_get: {
             uint32_t gi = inst.local.index;
             auto loc = emit_global_loc(gi);
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                this->emit_vmovdqu(loc, xmm0);
                this->emit_sub(16, rsp);
                this->emit_vmovdqu(xmm0, *rsp);
@@ -1195,7 +1195,7 @@ namespace psizam::detail {
          }
          case ir_op::global_set: {
             uint32_t gi = inst.local.index;
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                this->emit_vmovdqu(*rsp, xmm0);
                this->emit_add(16, rsp);
                auto loc = emit_global_loc(gi);
@@ -1277,7 +1277,7 @@ namespace psizam::detail {
 
          // ── Select/drop ──
          case ir_op::drop:
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                this->emit_add(16, rsp);
             } else {
                this->emit_pop_raw(rax);
@@ -1285,7 +1285,7 @@ namespace psizam::detail {
             break;
 
          case ir_op::select:
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                // select for v128: condition (8), val2 (16), val1 (16) on stack
                this->emit_pop_raw(rax);  // condition
                this->emit(base::TEST, eax, eax);
@@ -1993,89 +1993,9 @@ namespace psizam::detail {
             break;
          }
 
-         case ir_op::atomic_op: {
-            uint8_t asub = inst.simd.lane;
-            auto sub = static_cast<atomic_sub>(asub);
-            // Fence: no-op
-            if (sub == atomic_sub::atomic_fence) break;
-            // Notify: push 0
-            if (sub == atomic_sub::memory_atomic_notify) {
-               this->emit_mov(uint32_t(0), eax);
-               this->emit_push_raw(rax);
-               break;
-            }
-            // Wait: push 1
-            if (sub == atomic_sub::memory_atomic_wait32 || sub == atomic_sub::memory_atomic_wait64) {
-               this->emit_mov(uint32_t(1), eax);
-               this->emit_push_raw(rax);
-               break;
-            }
-            // Loads: load from memory, push result
-            if (asub >= 0x10 && asub <= 0x16) {
-               // addr from stack
-               this->emit_pop_raw(rax);
-               this->emit_add(rsi, rax); // rsi = membase
-               this->emit_add(inst.simd.offset, rax);
-               switch(sub) {
-               case atomic_sub::i32_atomic_load:    this->emit_mov(*rax, eax); break;
-               case atomic_sub::i64_atomic_load:    this->emit_mov(*rax, rax); break;
-               case atomic_sub::i32_atomic_load8_u: this->emit_bytes(0x0f, 0xb6, 0x00); break; // movzx eax, byte [rax]
-               case atomic_sub::i32_atomic_load16_u:this->emit_bytes(0x0f, 0xb7, 0x00); break; // movzx eax, word [rax]
-               case atomic_sub::i64_atomic_load8_u: this->emit_bytes(0x48, 0x0f, 0xb6, 0x00); break; // movzx rax, byte [rax]
-               case atomic_sub::i64_atomic_load16_u:this->emit_bytes(0x48, 0x0f, 0xb7, 0x00); break; // movzx rax, word [rax]
-               case atomic_sub::i64_atomic_load32_u:this->emit_mov(*rax, eax); break; // mov eax, [rax] (zero-extends)
-               default: break;
-               }
-               this->emit_push_raw(rax);
-               break;
-            }
-            // Stores: pop value and addr, store
-            if (asub >= 0x17 && asub <= 0x1D) {
-               this->emit_pop_raw(rcx); // value
-               this->emit_pop_raw(rax); // addr
-               this->emit_add(rsi, rax);
-               this->emit_add(inst.simd.offset, rax);
-               switch(sub) {
-               case atomic_sub::i32_atomic_store:   this->emit_mov(ecx, *rax); break;
-               case atomic_sub::i64_atomic_store:   this->emit_mov(rcx, *rax); break;
-               case atomic_sub::i32_atomic_store8:  this->emit_bytes(0x88, 0x08); break; // mov [rax], cl
-               case atomic_sub::i32_atomic_store16: this->emit_bytes(0x66, 0x89, 0x08); break; // mov [rax], cx
-               case atomic_sub::i64_atomic_store8:  this->emit_bytes(0x88, 0x08); break;
-               case atomic_sub::i64_atomic_store16: this->emit_bytes(0x66, 0x89, 0x08); break;
-               case atomic_sub::i64_atomic_store32: this->emit_mov(ecx, *rax); break;
-               default: break;
-               }
-               break;
-            }
-            // RMW + cmpxchg: call __psizam_atomic_rmw(ctx, sub, addr, offset, val1, val2)
-            {
-               bool is_cmpxchg = (asub >= 0x48);
-               if (is_cmpxchg) {
-                  this->emit_pop_raw(r9);  // replacement -> val2
-                  this->emit_pop_raw(r8);  // expected -> val1
-               } else {
-                  this->emit_pop_raw(r8);  // value -> val1
-                  this->emit_mov(uint64_t(0), r9);
-               }
-               this->emit_pop_raw(rdx); // addr
-               this->emit_push_raw(rdi);
-               this->emit_push_raw(rsi);
-               this->emit_mov(inst.simd.offset, ecx); // offset
-               this->emit_mov(uint32_t(asub), esi); // sub-opcode
-               this->emit_mov(rsp, rax);
-               this->emit_bytes(0x48, 0x83, 0xe4, 0xf0); // align stack
-               this->emit_push_raw(rax);
-               this->emit_push_raw(rax); // preserve 16-byte call alignment
-               this->emit_bytes(0x48, 0xb8);
-               this->emit_operand_ptr(reinterpret_cast<const void*>(&__psizam_atomic_rmw));
-               this->emit_bytes(0xff, 0xd0); // call rax
-               this->emit_pop_raw(rsp);
-               this->emit_pop_raw(rsi);
-               this->emit_pop_raw(rdi);
-               this->emit_push_raw(rax); // push old value
-            }
+         case ir_op::atomic_op:
+            emit_atomic_helper(inst, false);
             break;
-         }
 
          // ── Exception handling ──
          case ir_op::eh_enter: {
@@ -2419,6 +2339,53 @@ namespace psizam::detail {
          return true;
       }
 
+      void emit_atomic_helper(const ir_inst& inst, bool vregs) {
+         const auto sub = inst.atomic_subcode();
+         const auto asub = static_cast<uint8_t>(sub);
+         if (sub == atomic_sub::atomic_fence) return;
+         if (vregs) {
+            // Marshal every source before overwriting ABI registers: a later
+            // source may itself reside in r8 or r9.
+            for (auto id : {inst.atomic.addr, inst.atomic.value1, inst.atomic.value2}) {
+               if (id == ir_vreg_none) this->emit_mov(uint64_t(0), rax);
+               else load_vreg_rax(id);
+               this->emit_push_raw(rax);
+            }
+            this->emit_pop_raw(r9);
+            this->emit_pop_raw(r8);
+            this->emit_pop_raw(rdx);
+         } else {
+            this->emit_mov(uint64_t(0), r8);
+            this->emit_mov(uint64_t(0), r9);
+            if (asub == 1 || asub == 2 || asub >= 0x48) {
+               this->emit_pop_raw(r9);
+               this->emit_pop_raw(r8);
+            } else if (asub == 0 || asub >= 0x17) {
+               this->emit_pop_raw(r8);
+            }
+            this->emit_pop_raw(rdx);
+         }
+         this->emit_push_raw(rdi);
+         this->emit_push_raw(rsi);
+         this->emit_mov(inst.atomic.offset, ecx);
+         this->emit_mov(uint32_t(asub), esi);
+         this->emit_mov(rsp, rax);
+         this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
+         this->emit_push_raw(rax);
+         this->emit_push_raw(rax);
+         this->emit_bytes(0x48, 0xb8);
+         emit_reloc(reloc_symbol::llvm_atomic_rmw);
+         this->emit_operand_ptr(reinterpret_cast<const void*>(&__psizam_atomic_rmw));
+         this->emit_bytes(0xff, 0xd0);
+         this->emit_pop_raw(rsp);
+         this->emit_pop_raw(rsi);
+         this->emit_pop_raw(rdi);
+         if (inst.dest != ir_vreg_none) {
+            if (vregs) store_rax_vreg(inst.dest);
+            else this->emit_push_raw(rax);
+         }
+      }
+
       // ──────── Register-based IR emission ────────
       // Uses physical registers for vreg values instead of push/pop.
       // rax and rcx are temporaries. Vregs in physical registers are
@@ -2430,7 +2397,7 @@ namespace psizam::detail {
          switch (inst.opcode) {
          case ir_op::nop:
             // v128 nop with dest: pop shuffle result from x86 stack to XMM/spill
-            if (inst.type == types::v128 && inst.dest != ir_vreg_none) {
+            if (inst.value_type() == types::v128 && inst.dest != ir_vreg_none) {
                this->emit_vmovdqu(*rsp, xmm0);
                this->emit_add(16, rsp);
                store_xmm_to_v128(xmm0, inst.dest);
@@ -2441,7 +2408,7 @@ namespace psizam::detail {
             return true;
          case ir_op::drop:
             // v128 on x86 stack (no XMM, no spill): adjust rsp
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                // Check if the dropped vreg is on the x86 stack (not in XMM/spill)
                uint32_t vreg = inst.rr.src1;
                if (vreg != ir_vreg_none && vreg < _num_vregs &&
@@ -2460,7 +2427,7 @@ namespace psizam::detail {
 
          // Mov (phi-node merge): dest = src1
          case ir_op::mov: {
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                // v128 mov: copy between XMM registers or spill slots
                int8_t xr_src = get_xmm(inst.rr.src1);
                int8_t xr_dest = get_xmm(inst.dest);
@@ -2479,12 +2446,12 @@ namespace psizam::detail {
                return true;
             }
             // f32/f64 mov between XMM registers
-            if (inst.type == types::f32 || inst.type == types::f64) {
+            if (inst.value_type() == types::f32 || inst.value_type() == types::f64) {
                int8_t xr_src = get_xmm(inst.rr.src1);
                int8_t xr_dest = get_xmm(inst.dest);
                if (xr_src >= 0 || xr_dest >= 0) {
-                  load_float_to_xmm(inst.rr.src1, xmm0, inst.type == types::f64);
-                  store_xmm_to_float(xmm0, inst.dest, inst.type == types::f64);
+                  load_float_to_xmm(inst.rr.src1, xmm0, inst.value_type() == types::f64);
+                  store_xmm_to_float(xmm0, inst.dest, inst.value_type() == types::f64);
                   return true;
                }
             }
@@ -2605,7 +2572,7 @@ namespace psizam::detail {
          case ir_op::arg: {
             uint32_t src = inst.rr.src1;
             // v128 arg: push from XMM/spill to x86 stack, or no-op if already there
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                if (load_v128_to_xmm(src, xmm0)) {
                   this->emit_sub(16, rsp);
                   this->emit_vmovdqu(xmm0, *rsp);
@@ -2735,7 +2702,7 @@ namespace psizam::detail {
          // Global access
          case ir_op::global_get: {
             auto loc = emit_global_loc(inst.local.index);
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                this->emit_vmovdqu(loc, xmm0);
                store_xmm_to_v128(xmm0, inst.dest);
             } else {
@@ -2745,7 +2712,7 @@ namespace psizam::detail {
             return true;
          }
          case ir_op::global_set: {
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                load_v128_to_xmm(inst.local.src1, xmm0);
                auto loc = emit_global_loc(inst.local.index);
                this->emit_vmovdqu(xmm0, loc);
@@ -2880,7 +2847,7 @@ namespace psizam::detail {
          // Local access
          case ir_op::local_get: {
             int32_t offset = get_frame_offset(func, inst.local.index);
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                int8_t xr = get_xmm(inst.dest);
                if (xr >= 0) {
                   this->emit_vmovdqu(*(rbp + offset), static_cast<typename base::xmm_register>(xr));
@@ -2892,9 +2859,9 @@ namespace psizam::detail {
                   this->emit_sub(16, rsp);
                   this->emit_vmovdqu(xmm0, *rsp);
                }
-            } else if ((inst.type == types::f32 || inst.type == types::f64) && get_xmm(inst.dest) >= 0) {
+            } else if ((inst.value_type() == types::f32 || inst.value_type() == types::f64) && get_xmm(inst.dest) >= 0) {
                auto xr = static_cast<typename base::xmm_register>(get_xmm(inst.dest));
-               if (inst.type == types::f64) {
+               if (inst.value_type() == types::f64) {
                   // f64: load directly from frame to XMM (1 instruction)
                   this->emit(base::VMOVQ_A, *(rbp + offset), xr);
                } else {
@@ -2915,12 +2882,12 @@ namespace psizam::detail {
          }
          case ir_op::local_set: {
             int32_t offset = get_frame_offset(func, inst.local.index);
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                load_v128_to_xmm(inst.local.src1, xmm0);
                this->emit_vmovdqu(xmm0, *(rbp + offset));
-            } else if ((inst.type == types::f32 || inst.type == types::f64) && get_xmm(inst.local.src1) >= 0) {
+            } else if ((inst.value_type() == types::f32 || inst.value_type() == types::f64) && get_xmm(inst.local.src1) >= 0) {
                auto xr = static_cast<typename base::xmm_register>(get_xmm(inst.local.src1));
-               if (inst.type == types::f64) {
+               if (inst.value_type() == types::f64) {
                   // f64: store directly from XMM to frame (1 instruction)
                   this->emit(base::VMOVQ_B, *(rbp + offset), xr);
                } else {
@@ -2941,12 +2908,12 @@ namespace psizam::detail {
          }
          case ir_op::local_tee: {
             int32_t offset = get_frame_offset(func, inst.local.index);
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                load_v128_to_xmm(inst.local.src1, xmm0);
                this->emit_vmovdqu(xmm0, *(rbp + offset));
-            } else if ((inst.type == types::f32 || inst.type == types::f64) && get_xmm(inst.local.src1) >= 0) {
+            } else if ((inst.value_type() == types::f32 || inst.value_type() == types::f64) && get_xmm(inst.local.src1) >= 0) {
                auto xr = static_cast<typename base::xmm_register>(get_xmm(inst.local.src1));
-               if (inst.type == types::f64) {
+               if (inst.value_type() == types::f64) {
                   this->emit(base::VMOVQ_B, *(rbp + offset), xr);
                } else {
                   this->emit(base::VMOVQ_B, rax, xr);
@@ -2975,7 +2942,7 @@ namespace psizam::detail {
          // Multi-value return store (register mode)
          case ir_op::multi_return_store: {
             int32_t offset = multi_return_offset + inst.ri.imm;
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                load_v128_to_xmm(inst.ri.src1, xmm0);
                this->emit_vmovdqu(xmm0, *(rdi + offset));
             } else {
@@ -2988,7 +2955,7 @@ namespace psizam::detail {
          // Multi-value call return load (register mode)
          case ir_op::multi_return_load: {
             int32_t offset = multi_return_offset + inst.ri.imm;
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                this->emit_vmovdqu(*(rdi + offset), xmm0);
                store_xmm_to_v128(xmm0, inst.dest);
             } else {
@@ -3003,7 +2970,7 @@ namespace psizam::detail {
             // Checked mode: validate watermark before early return
             emit_validate_watermark();
             if (inst.rr.src1 != ir_vreg_none) {
-               if (inst.type == types::v128) {
+               if (inst.value_type() == types::v128) {
                   load_v128_to_xmm(inst.rr.src1, xmm0);
                } else {
                   load_vreg_rax(inst.rr.src1);
@@ -3157,7 +3124,7 @@ namespace psizam::detail {
 
          // Select: dest = cond ? val1 : val2  (3 source vregs packed in sel union)
          case ir_op::select: {
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                // v128 select: pick val1 (cond != 0) or val2 (cond == 0)
                // Load both to XMM first to avoid spill-slot aliasing with dest
                load_v128_to_xmm(inst.sel.val1, xmm0);
@@ -3359,8 +3326,11 @@ namespace psizam::detail {
          case ir_op::table_get:
          case ir_op::table_set:
          case ir_op::table_fill:
-         case ir_op::atomic_op:
             return false; // use stack-mode emit_ir_inst
+
+         case ir_op::atomic_op:
+            emit_atomic_helper(inst, true);
+            return true;
 
          // table.size: call helper, store result to dest vreg
          case ir_op::table_size:

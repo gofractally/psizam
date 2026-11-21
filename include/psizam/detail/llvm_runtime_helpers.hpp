@@ -68,8 +68,9 @@ extern "C" {
    const void* __psizam_resolve_indirect(void* ctx, uint32_t type_idx,
                                           uint32_t table_idx, uint32_t elem_idx);
 
-   // Atomic RMW helper for single-threaded mode
-   uint64_t __psizam_atomic_rmw(void* ctx, uint8_t sub, uint32_t addr, uint32_t offset,
+   // Checked private-memory atomics shared by all native engine tiers.
+   // The legacy symbol name is retained for generated-code relocations.
+   uint64_t __psizam_atomic_rmw(void* ctx, uint8_t sub, uint64_t addr, uint32_t offset,
                                  uint64_t val1, uint64_t val2);
 
    // Call depth tracking

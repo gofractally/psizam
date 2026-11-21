@@ -1023,16 +1023,16 @@ namespace psizam::detail {
             // (depth-change for br/br_if, result_count for multi-value return_,
             // simd_sub enum for v128_op, etc.). If we don't skip them, a numeric
             // collision with a real vreg index wrongly imprints the op's
-            // inst.type onto an unrelated vreg (observed: br with rt=f32 and
+            // inst.value_type() onto an unrelated vreg (observed: br with rt=f32 and
             // dc=9 typing v9 as f32, triggering `trunc float to i32` verify
             // failures downstream).
             if (inst.dest != ir_vreg_none && inst.dest < func.next_vreg &&
                 inst.opcode != ir_op::block_start && inst.opcode != ir_op::block_end &&
                 inst.opcode != ir_op::br_table && inst.opcode != ir_op::br &&
                 inst.opcode != ir_op::br_if && inst.opcode != ir_op::return_) {
-               if (inst.type != types::pseudo && inst.type != types::ret_void &&
-                   inst.type != types::v128 && vreg_types[inst.dest] == 0) {
-                  vreg_types[inst.dest] = inst.type;
+               if (inst.value_type() != types::pseudo && inst.value_type() != types::ret_void &&
+                   inst.value_type() != types::v128 && vreg_types[inst.dest] == 0) {
+                  vreg_types[inst.dest] = inst.value_type();
                }
             }
             // Also infer type from src usage (for mov/select with pseudo type)
@@ -1211,7 +1211,7 @@ namespace psizam::detail {
             for (uint32_t i = 0; i < func.inst_count; i++) {
                const auto& inst = func.insts[i];
                if (inst.opcode == ir_op::arg) {
-                  pending_call_args += inst.type == types::v128 ? 2 : 1;
+                  pending_call_args += inst.value_type() == types::v128 ? 2 : 1;
                } else if (inst.opcode == ir_op::call) {
                   update_for_call(inst.call.index < num_imports, inst.call.index, false);
                   pending_call_args = 0;
@@ -1824,7 +1824,7 @@ namespace psizam::detail {
                      llvm::Value* ret_val;
                      // Check if returning a v128 value
                      if (fn->getReturnType() == v128_ty &&
-                         (inst.type == types::v128 ||
+                         (inst.value_type() == types::v128 ||
                           (inst.rr.src1 < v128_slots.size() && v128_slots[inst.rr.src1]))) {
                         ret_val = load_v128(static_cast<uint16_t>(inst.rr.src1), v128_ty);
                      } else {
@@ -1892,7 +1892,7 @@ namespace psizam::detail {
                   if (li < locals.size() && locals[li]) {
                      llvm::Value* val = builder.CreateLoad(
                         locals[li]->getAllocatedType(), locals[li]);
-                     if (inst.type == types::v128 && inst.dest != ir_vreg_none) {
+                     if (inst.value_type() == types::v128 && inst.dest != ir_vreg_none) {
                         store_v128(static_cast<uint16_t>(inst.dest), val);
                      } else {
                         store_vreg(inst.dest, val);
@@ -1904,7 +1904,7 @@ namespace psizam::detail {
                case ir_op::local_set: {
                   uint32_t li = inst.local.index;
                   if (li < locals.size() && locals[li]) {
-                     if (inst.type == types::v128) {
+                     if (inst.value_type() == types::v128) {
                         auto* val = load_v128(static_cast<uint16_t>(inst.local.src1), v128_ty);
                         builder.CreateStore(val, locals[li]);
                      } else {
@@ -1932,7 +1932,7 @@ namespace psizam::detail {
                   // Same as local_set but value stays on stack (already handled by ir_writer)
                   uint32_t li = inst.local.index;
                   if (li < locals.size() && locals[li]) {
-                     if (inst.type == types::v128) {
+                     if (inst.value_type() == types::v128) {
                         auto* val = load_v128(static_cast<uint16_t>(inst.local.src1), v128_ty);
                         builder.CreateStore(val, locals[li]);
                      } else {
@@ -1958,7 +1958,7 @@ namespace psizam::detail {
 
                case ir_op::global_get: {
                   uint32_t gidx = inst.local.index;
-                  if (inst.type == types::v128) {
+                  if (inst.value_type() == types::v128) {
                      // v128 global: use pointer-based helper
                      auto* tmp = alloca_builder.CreateAlloca(v128_ty);
                      builder.CreateCall(rt_global_get_v128,
@@ -1969,7 +1969,7 @@ namespace psizam::detail {
                      llvm::Value* raw = builder.CreateCall(rt_global_get,
                         {ctx_ptr, builder.getInt32(gidx)});
                      // Truncate/bitcast to the expected type
-                     llvm::Type* target_ty = ir_type_to_llvm(inst.type);
+                     llvm::Type* target_ty = ir_type_to_llvm(inst.value_type());
                      llvm::Value* result;
                      if (target_ty == i32_ty) {
                         result = builder.CreateTrunc(raw, i32_ty);
@@ -1987,7 +1987,7 @@ namespace psizam::detail {
 
                case ir_op::global_set: {
                   uint32_t gidx = inst.local.index;
-                  if (inst.type == types::v128) {
+                  if (inst.value_type() == types::v128) {
                      // v128 global: use pointer-based helper
                      auto* val = load_v128(static_cast<uint16_t>(inst.local.src1), v128_ty);
                      auto* tmp = alloca_builder.CreateAlloca(v128_ty);
@@ -2023,7 +2023,7 @@ namespace psizam::detail {
                   // WASM select's condition is i32. Use load_vreg_as so a
                   // dead-path cond with float type doesn't break CreateICmpNE.
                   llvm::Value* cond = load_vreg_as(inst.sel.cond, i32_ty);
-                  if (inst.type == types::v128) {
+                  if (inst.value_type() == types::v128) {
                      auto* v128_ty_local = llvm::FixedVectorType::get(builder.getInt64Ty(), 2);
                      llvm::Value* val1 = load_v128(inst.sel.val1, v128_ty_local);
                      llvm::Value* val2 = load_v128(inst.sel.val2, v128_ty_local);
@@ -2053,7 +2053,7 @@ namespace psizam::detail {
                // ──── Call argument pseudo-instruction ────
                case ir_op::arg: {
                   llvm::Value* val;
-                  if (inst.type == types::v128 ||
+                  if (inst.value_type() == types::v128 ||
                       (inst.rr.src1 < is_v128.size() && is_v128[inst.rr.src1])) {
                      // v128 arg — load from v128 storage
                      val = load_v128(static_cast<uint16_t>(inst.rr.src1), v128_ty);
@@ -2101,7 +2101,7 @@ namespace psizam::detail {
                      emit_backtrace_clear_top(builder, ctx_ptr);
 
                      if (inst.dest != ir_vreg_none) {
-                        llvm::Type* target_ty = ir_type_to_llvm(inst.type);
+                        llvm::Type* target_ty = ir_type_to_llvm(inst.value_type());
                         llvm::Value* result;
                         if (target_ty == i32_ty)
                            result = builder.CreateTrunc(raw, i32_ty);
@@ -2156,7 +2156,7 @@ namespace psizam::detail {
                         emit_backtrace_clear_top(builder, ctx_ptr);
 
                         if (inst.dest != ir_vreg_none) {
-                           llvm::Type* target_ty = ir_type_to_llvm(inst.type);
+                           llvm::Type* target_ty = ir_type_to_llvm(inst.value_type());
                            llvm::Value* result;
                            if (target_ty == i32_ty)
                               result = builder.CreateTrunc(raw, i32_ty);
@@ -2204,7 +2204,7 @@ namespace psizam::detail {
                            auto* result = builder.CreateCall(callee, args);
                            emit_backtrace_clear_top(builder, ctx_ptr);
                            if (inst.dest != ir_vreg_none && !result->getType()->isVoidTy()) {
-                              if (inst.type == types::v128) {
+                              if (inst.value_type() == types::v128) {
                                  store_v128(static_cast<uint16_t>(inst.dest), result);
                               } else {
                                  store_vreg(inst.dest, result);
@@ -2280,13 +2280,13 @@ namespace psizam::detail {
                      }
                   }
 
-                  if (inst.dest != ir_vreg_none && inst.type == types::v128) {
+                  if (inst.dest != ir_vreg_none && inst.value_type() == types::v128) {
                      // The entry wrapper returns the low word in the register
                      // and writes the complete vector back to the argument buffer.
                      auto* vec = builder.CreateAlignedLoad(v128_ty, host_args_alloca, llvm::Align(8));
                      store_v128(static_cast<uint16_t>(inst.dest), vec);
                   } else if (inst.dest != ir_vreg_none) {
-                     llvm::Type* target_ty = ir_type_to_llvm(inst.type);
+                     llvm::Type* target_ty = ir_type_to_llvm(inst.value_type());
                      llvm::Value* result;
                      if (target_ty == i32_ty)
                         result = builder.CreateTrunc(raw, i32_ty);
@@ -3726,7 +3726,7 @@ namespace psizam::detail {
                // ──── Multi-value return store ────
                case ir_op::multi_return_store: {
                   int32_t offset = 24 + inst.ri.imm; // multi_return_offset = 24
-                  if (inst.type == types::v128) {
+                  if (inst.value_type() == types::v128) {
                      // Load v128 from separate slot, split into low/high i64s,
                      // store packed: low at offset, high at offset+8.
                      auto* vec = load_v128(static_cast<uint16_t>(inst.ri.src1),
@@ -3778,7 +3778,7 @@ namespace psizam::detail {
                // ──── Multi-value call return load ────
                case ir_op::multi_return_load: {
                   int32_t offset = 24 + inst.ri.imm; // multi_return_offset = 24
-                  if (inst.type == types::v128) {
+                  if (inst.value_type() == types::v128) {
                      // Load packed low/high i64s from offset and offset+8, combine
                      // into v128 vector, store to v128 slot.
                      auto* lo_ptr = builder.CreateGEP(builder.getInt8Ty(), ctx_ptr,
@@ -5122,152 +5122,26 @@ namespace psizam::detail {
 
                // ──── Atomic operations ────
                case ir_op::atomic_op: {
-                  uint8_t asub = inst.simd.lane;
-                  auto sub = static_cast<atomic_sub>(asub);
+                  const auto sub = inst.atomic_subcode();
                   if (sub == atomic_sub::atomic_fence) break;
-                  if (sub == atomic_sub::memory_atomic_notify) {
-                     store_vreg(inst.dest, builder.getInt64(0));
-                     break;
-                  }
-                  if (sub == atomic_sub::memory_atomic_wait32 || sub == atomic_sub::memory_atomic_wait64) {
-                     store_vreg(inst.dest, builder.getInt64(1));
-                     break;
-                  }
-                  // Loads
-                  if (asub >= 0x10 && asub <= 0x16) {
-                     auto* addr = load_vreg(inst.simd.addr);
-                     auto* addr32 = builder.CreateTrunc(addr, builder.getInt32Ty());
-                     auto* offset = builder.getInt32(inst.simd.offset);
-                     auto* eff = builder.CreateAdd(addr32, offset);
-                     auto* eff64 = builder.CreateZExt(eff, builder.getInt64Ty());
-                     // Checked mode: watermark for atomic loads
-                     {
-                        uint32_t asz = 4;
-                        switch (sub) {
-                           case atomic_sub::i32_atomic_load8_u:
-                           case atomic_sub::i64_atomic_load8_u: asz = 1; break;
-                           case atomic_sub::i32_atomic_load16_u:
-                           case atomic_sub::i64_atomic_load16_u: asz = 2; break;
-                           case atomic_sub::i32_atomic_load: asz = 4; break;
-                           case atomic_sub::i64_atomic_load32_u: asz = 4; break;
-                           case atomic_sub::i64_atomic_load: asz = 8; break;
-                           default: break;
-                        }
-                        if (opts.checked_kind == checked_mode::immediate)
-                           emit_read_bounds_check(builder, ctx_ptr, load_mem_ptr(), eff64, asz, mem_size_cache);
-                        else
-                           emit_read_watermark_update(builder, eff64, asz, watermark_alloca);
-                     }
-                     auto* ptr = builder.CreateGEP(builder.getInt8Ty(), load_mem_ptr(), eff64);
-                     llvm::Value* val = nullptr;
-                     switch(sub) {
-                     case atomic_sub::i32_atomic_load: {
-                        auto* tp = builder.CreateBitCast(ptr, llvm::PointerType::getUnqual(builder.getInt32Ty()));
-                        val = builder.CreateZExt(builder.CreateLoad(builder.getInt32Ty(), tp), builder.getInt64Ty());
-                        break;
-                     }
-                     case atomic_sub::i64_atomic_load: {
-                        auto* tp = builder.CreateBitCast(ptr, llvm::PointerType::getUnqual(builder.getInt64Ty()));
-                        val = builder.CreateLoad(builder.getInt64Ty(), tp);
-                        break;
-                     }
-                     case atomic_sub::i32_atomic_load8_u:
-                     case atomic_sub::i64_atomic_load8_u:
-                        val = builder.CreateZExt(builder.CreateLoad(builder.getInt8Ty(), ptr), builder.getInt64Ty());
-                        break;
-                     case atomic_sub::i32_atomic_load16_u:
-                     case atomic_sub::i64_atomic_load16_u: {
-                        auto* tp = builder.CreateBitCast(ptr, llvm::PointerType::getUnqual(builder.getInt16Ty()));
-                        val = builder.CreateZExt(builder.CreateLoad(builder.getInt16Ty(), tp), builder.getInt64Ty());
-                        break;
-                     }
-                     case atomic_sub::i64_atomic_load32_u: {
-                        auto* tp = builder.CreateBitCast(ptr, llvm::PointerType::getUnqual(builder.getInt32Ty()));
-                        val = builder.CreateZExt(builder.CreateLoad(builder.getInt32Ty(), tp), builder.getInt64Ty());
-                        break;
-                     }
-                     default: val = builder.getInt64(0); break;
-                     }
-                     store_vreg(inst.dest, val);
-                     break;
-                  }
-                  // Stores
-                  if (asub >= 0x17 && asub <= 0x1D) {
-                     auto* val = load_vreg(inst.simd.v_src1);
-                     auto* addr = load_vreg(inst.simd.addr);
-                     auto* addr32 = builder.CreateTrunc(addr, builder.getInt32Ty());
-                     auto* offset = builder.getInt32(inst.simd.offset);
-                     auto* eff = builder.CreateAdd(addr32, offset);
-                     auto* eff64 = builder.CreateZExt(eff, builder.getInt64Ty());
-                     // Checked mode: immediate bounds check for atomic stores
-                     {
-                        uint32_t asz = 4;
-                        switch (sub) {
-                           case atomic_sub::i32_atomic_store8:
-                           case atomic_sub::i64_atomic_store8: asz = 1; break;
-                           case atomic_sub::i32_atomic_store16:
-                           case atomic_sub::i64_atomic_store16: asz = 2; break;
-                           case atomic_sub::i32_atomic_store: asz = 4; break;
-                           case atomic_sub::i64_atomic_store32: asz = 4; break;
-                           case atomic_sub::i64_atomic_store: asz = 8; break;
-                           default: break;
-                        }
-                        emit_write_bounds_check(builder, ctx_ptr, load_mem_ptr(), eff64, asz, mem_size_cache);
-                     }
-                     auto* ptr = builder.CreateGEP(builder.getInt8Ty(), load_mem_ptr(), eff64);
-                     switch(sub) {
-                     case atomic_sub::i32_atomic_store: {
-                        auto* tp = builder.CreateBitCast(ptr, llvm::PointerType::getUnqual(builder.getInt32Ty()));
-                        builder.CreateStore(builder.CreateTrunc(val, builder.getInt32Ty()), tp);
-                        break;
-                     }
-                     case atomic_sub::i64_atomic_store: {
-                        auto* tp = builder.CreateBitCast(ptr, llvm::PointerType::getUnqual(builder.getInt64Ty()));
-                        builder.CreateStore(val, tp);
-                        break;
-                     }
-                     case atomic_sub::i32_atomic_store8:
-                     case atomic_sub::i64_atomic_store8:
-                        builder.CreateStore(builder.CreateTrunc(val, builder.getInt8Ty()), ptr);
-                        break;
-                     case atomic_sub::i32_atomic_store16:
-                     case atomic_sub::i64_atomic_store16: {
-                        auto* tp = builder.CreateBitCast(ptr, llvm::PointerType::getUnqual(builder.getInt16Ty()));
-                        builder.CreateStore(builder.CreateTrunc(val, builder.getInt16Ty()), tp);
-                        break;
-                     }
-                     case atomic_sub::i64_atomic_store32: {
-                        auto* tp = builder.CreateBitCast(ptr, llvm::PointerType::getUnqual(builder.getInt32Ty()));
-                        builder.CreateStore(builder.CreateTrunc(val, builder.getInt32Ty()), tp);
-                        break;
-                     }
-                     default: break;
-                     }
-                     break;
-                  }
-                  // RMW + cmpxchg: call __psizam_atomic_rmw
-                  {
-                     auto* rmw_fn_ty = llvm::FunctionType::get(builder.getInt64Ty(),
-                        {builder.getPtrTy(), builder.getInt8Ty(), builder.getInt32Ty(),
-                         builder.getInt32Ty(), builder.getInt64Ty(), builder.getInt64Ty()}, false);
-                     auto rmw_fn = llvm_mod->getOrInsertFunction("__psizam_atomic_rmw", rmw_fn_ty);
-                     bool is_cmpxchg = (asub >= 0x48);
-                     llvm::Value* val1 = nullptr;
-                     llvm::Value* val2 = nullptr;
-                     if (is_cmpxchg) {
-                        val1 = load_vreg(inst.simd.v_src1); // expected
-                        val2 = load_vreg(inst.simd.v_src2); // replacement
-                     } else {
-                        val1 = load_vreg(inst.simd.v_src1);
-                        val2 = builder.getInt64(0);
-                     }
-                     auto* addr = load_vreg(inst.simd.addr);
-                     auto* addr32 = builder.CreateTrunc(addr, builder.getInt32Ty());
-                     auto* result = builder.CreateCall(rmw_fn, {
-                        ctx_ptr, builder.getInt8(asub), addr32,
-                        builder.getInt32(inst.simd.offset), val1, val2});
-                     store_vreg(inst.dest, result);
-                  }
+                  // The common helper checks the wide effective address and
+                  // natural alignment before touching private linear memory.
+                  auto* i64 = builder.getInt64Ty();
+                  auto* fn_ty = llvm::FunctionType::get(i64,
+                     {builder.getPtrTy(), builder.getInt8Ty(), i64,
+                      builder.getInt32Ty(), i64, i64}, false);
+                  auto helper = llvm_mod->getOrInsertFunction("__psizam_atomic_rmw", fn_ty);
+                  auto operand = [&](uint32_t id) -> llvm::Value* {
+                     if (id == ir_vreg_none) return builder.getInt64(0);
+                     auto* value = load_vreg(id);
+                     if (!value) throw std::runtime_error("missing atomic operand");
+                     return builder.CreateZExtOrTrunc(value, i64);
+                  };
+                  auto* result = builder.CreateCall(helper,
+                     {ctx_ptr, builder.getInt8(static_cast<uint8_t>(sub)),
+                      operand(inst.atomic.addr), builder.getInt32(inst.atomic.offset),
+                      operand(inst.atomic.value1), operand(inst.atomic.value2)});
+                  if (inst.dest != ir_vreg_none) store_vreg(inst.dest, result);
                   break;
                }
 

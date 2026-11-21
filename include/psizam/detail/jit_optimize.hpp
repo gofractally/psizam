@@ -71,7 +71,7 @@ namespace psizam::detail {
                 is_const[inst.rr.src1] && is_const[inst.rr.src2]) {
                int64_t result;
                if (fold_binop(inst.opcode, const_val[inst.rr.src1], const_val[inst.rr.src2], result)) {
-                  bool is32 = (inst.type == types::i32);
+                  bool is32 = (inst.value_type() == types::i32);
                   inst.opcode = is32 ? ir_op::const_i32 : ir_op::const_i64;
                   inst.imm64 = result;
                   if (inst.dest < num_vregs) {
@@ -86,7 +86,7 @@ namespace psizam::detail {
             if (inst.rr.src1 < num_vregs && is_const[inst.rr.src1]) {
                int64_t result;
                if (fold_unop(inst.opcode, const_val[inst.rr.src1], result)) {
-                  bool is32 = (inst.type == types::i32);
+                  bool is32 = (inst.value_type() == types::i32);
                   inst.opcode = is32 ? ir_op::const_i32 : ir_op::const_i64;
                   inst.imm64 = result;
                   if (inst.dest < num_vregs) {
@@ -308,6 +308,11 @@ namespace psizam::detail {
                   count_use(inst.simd.offset);
                break;
             }
+            case ir_op::atomic_op:
+               count_use(inst.atomic.addr);
+               count_use(inst.atomic.value1);
+               count_use(inst.atomic.value2);
+               break;
             default:
                // All opcode categories with vreg sources are handled above.
                // Unhandled opcodes (memory_fill, memory_copy, table ops, etc.)
@@ -633,6 +638,11 @@ namespace psizam::detail {
          // multi_return_store: ri.src1 = value vreg
          case ir_op::multi_return_store:
             try_replace(inst.ri.src1);
+            break;
+         case ir_op::atomic_op:
+            try_replace(inst.atomic.addr);
+            try_replace(inst.atomic.value1);
+            try_replace(inst.atomic.value2);
             break;
          default:
             break;

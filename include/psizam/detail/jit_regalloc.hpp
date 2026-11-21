@@ -108,7 +108,7 @@ namespace psizam::detail {
                // Don't downgrade v128 type once set (prevents conflict between
                // const_v128 type and nop marker type for the same vreg)
                if (iv.type != types::v128)
-                  iv.type = inst.type;
+                  iv.type = inst.value_type();
             }
             // Scalar-producing v128_ops store their result vreg in simd.addr
             if (is_v128_op && simd_produces_scalar(static_cast<simd_sub>(inst.dest))) {
@@ -303,6 +303,12 @@ namespace psizam::detail {
 
             // Multi-value return load: dest = loaded vreg (no source vregs)
             case ir_op::multi_return_load:
+               break;
+
+            case ir_op::atomic_op:
+               use_vreg(inst.atomic.addr);
+               use_vreg(inst.atomic.value1);
+               use_vreg(inst.atomic.value2);
                break;
 
             // No source vregs

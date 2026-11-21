@@ -198,6 +198,28 @@ namespace psizam::detail {
       i64_atomic_rmw32_cmpxchg_u = 0x4E,
    };
 
+   inline constexpr bool atomic_value_is_i64(atomic_sub sub) {
+      const auto op = static_cast<uint8_t>(sub);
+      if (op <= 3) return sub == atomic_sub::memory_atomic_wait64;
+      if (op >= 0x10 && op <= 0x16) return op == 0x11 || op >= 0x14;
+      if (op >= 0x17 && op <= 0x1d) return op == 0x18 || op >= 0x1b;
+      if (op >= 0x1e && op <= 0x4e) {
+         const auto kind = (op - 0x1e) % 7;
+         return kind == 1 || kind >= 4;
+      }
+      return false;
+   }
+
+   inline constexpr uint32_t atomic_access_size(atomic_sub sub) {
+      const auto op = static_cast<uint8_t>(sub);
+      if (op <= 2) return op == 2 ? 8 : 4;
+      constexpr uint8_t sizes[] = {4, 8, 1, 2, 1, 2, 4};
+      if (op >= 0x10 && op <= 0x16) return sizes[op - 0x10];
+      if (op >= 0x17 && op <= 0x1d) return sizes[op - 0x17];
+      if (op >= 0x1e && op <= 0x4e) return sizes[(op - 0x1e) % 7];
+      return 0;
+   }
+
    struct atomic_op_t {
       atomic_sub sub;
       uint32_t   flags_align;

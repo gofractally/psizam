@@ -409,7 +409,18 @@ namespace psizam::detail {
          // v_dest: v128 result vreg (for XMM register store)
          struct { uint32_t offset; uint32_t addr; uint8_t lane; uint8_t _pad2;
                   uint16_t v_src1; uint16_t v_src2; uint16_t v_dest; } simd;
+         // Atomic operands need full vreg IDs. For atomic_op only, `type`
+         // stores atomic_sub; use value_type() for the result's WASM type.
+         struct { uint32_t addr; uint32_t value1; uint32_t value2; uint32_t offset; } atomic;
       };
+      atomic_sub atomic_subcode() const { return static_cast<atomic_sub>(type); }
+      uint8_t value_type() const {
+         if (opcode != ir_op::atomic_op) return type;
+         const auto sub = static_cast<uint8_t>(atomic_subcode());
+         if (sub == 3 || (sub >= 0x17 && sub <= 0x1d)) return types::pseudo;
+         if (sub <= 2) return types::i32;
+         return atomic_value_is_i64(atomic_subcode()) ? types::i64 : types::i32;
+      }
    };
    static_assert(std::is_trivially_copyable_v<ir_inst>);
    static_assert(std::is_trivially_destructible_v<ir_inst>);

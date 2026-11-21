@@ -260,6 +260,7 @@ namespace psizam {
                break;
             case Memory:
                pie.memory_type.limits = detail::to_pzam(ie.type.mem_t.limits);
+               if (ie.type.mem_t.is_memory64) pie.memory_type.is_memory64 = true;
                break;
             case Global:
                pie.global_type.content_type = ie.type.global_t.content_type;
@@ -288,6 +289,7 @@ namespace psizam {
       for (const auto& m : mod.memories) {
          pzam_memory_type pm;
          pm.limits = detail::to_pzam(m.limits);
+         if (m.is_memory64) pm.is_memory64 = true;
          meta.memories.push_back(std::move(pm));
       }
 
@@ -401,6 +403,7 @@ namespace psizam {
                break;
             case Memory:
                ie.type.mem_t.limits = detail::from_pzam(pie.memory_type.limits);
+               ie.type.mem_t.is_memory64 = pie.memory_type.is_memory64.value_or(false);
                break;
             case Global:
                ie.type.global_t.content_type = pie.global_type.content_type;
@@ -429,6 +432,7 @@ namespace psizam {
       for (const auto& pm : meta.memories) {
          memory_type mt;
          mt.limits = detail::from_pzam(pm.limits);
+         mt.is_memory64 = pm.is_memory64.value_or(false);
          mod.memories.push_back(mt);
       }
 

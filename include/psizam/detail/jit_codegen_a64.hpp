@@ -1725,7 +1725,7 @@ namespace psizam::detail {
          case ir_op::loop:
             break;
          case ir_op::drop:
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                emit_add_imm(SP, SP, 32);
                _v128_sp_bytes -= 32;
             }
@@ -1854,7 +1854,7 @@ namespace psizam::detail {
 
          // ── Mov ──
          case ir_op::mov: {
-            if (inst.type == types::v128) break; // v128 lives on native stack; no register copy needed
+            if (inst.value_type() == types::v128) break; // v128 lives on native stack; no register copy needed
             int8_t pr_d = get_phys(inst.dest);
             int8_t pr_s = get_phys(inst.rr.src1);
             if (pr_d >= 0 && pr_s >= 0) emit_mov_reg(phys_to_reg(pr_d), phys_to_reg(pr_s));
@@ -1967,7 +1967,7 @@ namespace psizam::detail {
 
          // ── Select ──
          case ir_op::select: {
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                // v128 select: val1 (deeper) and val2 (TOS) are on the execution stack.
                // Each v128 = 32 bytes (two 16-byte-aligned slots).
                // Stack: SP+0=val2_low, SP+16=val2_high, SP+32=val1_low, SP+48=val1_high
@@ -2073,7 +2073,7 @@ namespace psizam::detail {
          }
          case ir_op::br: {
             uint32_t eh_count = inst.dest >> 16;
-            uint32_t br_v128 = (inst.type == types::v128) ? 32 : 0;
+            uint32_t br_v128 = (inst.value_type() == types::v128) ? 32 : 0;
             auto emit_eh_leaves = [&]() {
                for (uint32_t i = 0; i < eh_count; ++i) {
                   emit_mov_reg(X0, X19);
@@ -2108,7 +2108,7 @@ namespace psizam::detail {
          }
          case ir_op::br_if: {
             uint32_t eh_count = inst.dest >> 16;
-            uint32_t br_v128 = (inst.type == types::v128) ? 32 : 0;
+            uint32_t br_v128 = (inst.value_type() == types::v128) ? 32 : 0;
             load_vreg_x0(inst.br.src1);
             emit_cmp_imm32(X0, 0);
             uint32_t target_depth = 0;
@@ -2152,7 +2152,7 @@ namespace psizam::detail {
          // ── Multi-value return store ──
          case ir_op::multi_return_store: {
             int32_t offset = multi_return_offset + inst.ri.imm;
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                emit_ldr_offset(X0, SP, 0);
                emit_str_offset(X0, X19, offset);
                emit_ldr_offset(X0, SP, 16);
@@ -2169,7 +2169,7 @@ namespace psizam::detail {
          // ── Multi-value call return load ──
          case ir_op::multi_return_load: {
             int32_t offset = multi_return_offset + inst.ri.imm;
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                emit_sub_imm(SP, SP, 32);
                _v128_sp_bytes += 32;
                emit_ldr_offset(X0, X19, offset);
@@ -2186,7 +2186,7 @@ namespace psizam::detail {
          // ── Return ──
          case ir_op::return_: {
             if (inst.rr.src1 != ir_vreg_none) {
-               if (inst.type == types::v128) {
+               if (inst.value_type() == types::v128) {
                   // v128 return: load from native stack into X0:X1 (AAPCS64 16-byte return)
                   emit_ldr_offset(X0, SP, 0);   // low qword
                   emit_ldr_offset(X1, SP, 16);  // high qword
@@ -2422,7 +2422,7 @@ namespace psizam::detail {
 
          // ── Local access ──
          case ir_op::local_get: {
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                int32_t offset = get_frame_offset(func, inst.local.index);
                bool is_param = inst.local.index < func.type->param_types.size();
                int32_t high_stride = is_param ? 16 : 8;  // params: 16-byte stride, body locals: contiguous
@@ -2440,7 +2440,7 @@ namespace psizam::detail {
             break;
          }
          case ir_op::local_set: {
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                int32_t offset = get_frame_offset(func, inst.local.index);
                bool is_param = inst.local.index < func.type->param_types.size();
                int32_t high_stride = is_param ? 16 : 8;
@@ -2459,7 +2459,7 @@ namespace psizam::detail {
             break;
          }
          case ir_op::local_tee: {
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                int32_t offset = get_frame_offset(func, inst.local.index);
                bool is_param = inst.local.index < func.type->param_types.size();
                int32_t high_stride = is_param ? 16 : 8;
@@ -2476,7 +2476,7 @@ namespace psizam::detail {
 
          // ── Global access ──
          case ir_op::global_get: {
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                auto offset = _mod.get_global_offset(inst.local.index);
                emit_ldr_offset(X16, X20, wasm_allocator::globals_end() - 8);
                emit_add_signed_imm(X16, X16, static_cast<int32_t>(offset));
@@ -2486,13 +2486,13 @@ namespace psizam::detail {
                emit_push(X0);  // low on top
                _v128_sp_bytes += 32;
             } else {
-               emit_global_load(inst.local.index, X0, inst.type);
+               emit_global_load(inst.local.index, X0, inst.value_type());
                store_x0_vreg(inst.dest);
             }
             break;
          }
          case ir_op::global_set: {
-            if (inst.type == types::v128) {
+            if (inst.value_type() == types::v128) {
                emit_ldr_offset(X0, SP, 0);    // low qword (TOS)
                emit_ldr_offset(X1, SP, 16);   // high qword
                emit_add_imm(SP, SP, 32);
@@ -2504,7 +2504,7 @@ namespace psizam::detail {
                emit_str_offset(X1, X16, 8);   // store high
             } else {
                load_vreg_x0(inst.local.src1);
-               emit_global_store(inst.local.index, X0, inst.type);
+               emit_global_store(inst.local.index, X0, inst.value_type());
             }
             break;
          }
@@ -3031,93 +3031,27 @@ namespace psizam::detail {
          }
 
          case ir_op::atomic_op: {
-            uint8_t asub = inst.simd.lane;
-            auto sub = static_cast<atomic_sub>(asub);
-            // Fence: no-op
+            const auto sub = inst.atomic_subcode();
             if (sub == atomic_sub::atomic_fence) break;
-            // Notify: push 0
-            if (sub == atomic_sub::memory_atomic_notify) {
-               emit_mov_imm32(X0, 0);
+            // X2-X15 can hold source vregs. Capture all operands before
+            // assigning the helper's ABI argument registers.
+            for (auto id : {inst.atomic.addr, inst.atomic.value1, inst.atomic.value2}) {
+               if (id == ir_vreg_none) emit_mov_imm64(X0, 0);
+               else load_vreg_to(X0, id);
                emit_push(X0);
-               break;
             }
-            // Wait: push 1
-            if (sub == atomic_sub::memory_atomic_wait32 || sub == atomic_sub::memory_atomic_wait64) {
-               emit_mov_imm32(X0, 1);
-               emit_push(X0);
-               break;
-            }
-            // Loads: addr from stack, load from memory
-            if (asub >= 0x10 && asub <= 0x16) {
-               emit_pop(X0); // addr
-               emit32(0x8B000000 | (X0 << 16) | (X20 << 5) | X0); // ADD X0, X20, X0 (membase+addr)
-               if (inst.simd.offset) emit_add_imm(X0, X0, inst.simd.offset);
-               // Checked mode: track read watermark for atomic loads
-               {
-                  // atomic access size: 0x10/0x16=4, 0x11=8, 0x12/0x14=1, 0x13/0x15=2
-                  static constexpr uint32_t atomic_load_sizes[] = {4,8,1,2,1,2,4};
-                  uint32_t asz = atomic_load_sizes[asub - 0x10];
-                  emit_read_watermark(X0, asz);
-               }
-               switch(sub) {
-               case atomic_sub::i32_atomic_load:    emit32(0xB9400000); break; // LDR W0, [X0]
-               case atomic_sub::i64_atomic_load:    emit32(0xF9400000); break; // LDR X0, [X0]
-               case atomic_sub::i32_atomic_load8_u: emit32(0x39400000); break; // LDRB W0, [X0]
-               case atomic_sub::i32_atomic_load16_u:emit32(0x79400000); break; // LDRH W0, [X0]
-               case atomic_sub::i64_atomic_load8_u: emit32(0x39400000); break; // LDRB W0, [X0]
-               case atomic_sub::i64_atomic_load16_u:emit32(0x79400000); break; // LDRH W0, [X0]
-               case atomic_sub::i64_atomic_load32_u:emit32(0xB9400000); break; // LDR W0, [X0]
-               default: break;
-               }
-               emit_push(X0);
-               break;
-            }
-            // Stores: pop value and addr, store
-            if (asub >= 0x17 && asub <= 0x1D) {
-               emit_pop(X1); // value
-               emit_pop(X0); // addr
-               emit32(0x8B000000 | (X0 << 16) | (X20 << 5) | X0); // ADD X0, X20, X0 (membase+addr)
-               if (inst.simd.offset) emit_add_imm(X0, X0, inst.simd.offset);
-               // Checked mode: immediate bounds check for atomic stores
-               {
-                  // atomic access size: 0x17/0x1D=4, 0x18=8, 0x19/0x1B=1, 0x1A/0x1C=2
-                  static constexpr uint32_t atomic_store_sizes[] = {4,8,1,2,1,2,4};
-                  uint32_t asz = atomic_store_sizes[asub - 0x17];
-                  emit_write_bounds_check(X0, asz);
-               }
-               switch(sub) {
-               case atomic_sub::i32_atomic_store:   emit32(0xB9000001); break; // STR W1, [X0]
-               case atomic_sub::i64_atomic_store:   emit32(0xF9000001); break; // STR X1, [X0]
-               case atomic_sub::i32_atomic_store8:  emit32(0x39000001); break; // STRB W1, [X0]
-               case atomic_sub::i32_atomic_store16: emit32(0x79000001); break; // STRH W1, [X0]
-               case atomic_sub::i64_atomic_store8:  emit32(0x39000001); break; // STRB W1, [X0]
-               case atomic_sub::i64_atomic_store16: emit32(0x79000001); break; // STRH W1, [X0]
-               case atomic_sub::i64_atomic_store32: emit32(0xB9000001); break; // STR W1, [X0]
-               default: break;
-               }
-               break;
-            }
-            // RMW + cmpxchg: call __psizam_atomic_rmw(ctx, sub, addr, offset, val1, val2)
-            {
-               bool is_cmpxchg = (asub >= 0x48);
-               if (is_cmpxchg) {
-                  emit_pop(X5); // replacement
-                  emit_pop(X4); // expected
-               } else {
-                  emit_pop(X4); // value
-                  emit_mov_imm64(X5, 0);
-               }
-               emit_pop(X2); // addr
-               emit_push(X19); emit_push(X20);
-               emit_mov_reg(X0, X19); // ctx
-               emit_mov_imm32(X1, asub); // sub
-               emit_mov_imm32(X3, inst.simd.offset); // offset
-               emit_reloc_mov_imm64(X8, reloc_symbol::llvm_atomic_rmw,
-               reinterpret_cast<uint64_t>(&__psizam_atomic_rmw));
-               emit32(0xD63F0100); // BLR X8
-               emit_pop(X20); emit_pop(X19);
-               emit_push(X0); // push old value
-            }
+            emit_pop(X5);
+            emit_pop(X4);
+            emit_pop(X2);
+            emit_push(X19); emit_push(X20);
+            emit_mov_reg(X0, X19);
+            emit_mov_imm32(X1, static_cast<uint8_t>(sub));
+            emit_mov_imm32(X3, inst.atomic.offset);
+            emit_reloc_mov_imm64(X8, reloc_symbol::llvm_atomic_rmw,
+                                reinterpret_cast<uint64_t>(&__psizam_atomic_rmw));
+            emit32(0xD63F0100); // BLR X8
+            emit_pop(X20); emit_pop(X19);
+            if (inst.dest != ir_vreg_none) store_x0_vreg(inst.dest);
             break;
          }
 
@@ -3233,14 +3167,14 @@ namespace psizam::detail {
 #ifdef PSIZAM_V128_DEBUG
          if (inst.opcode == ir_op::br || inst.opcode == ir_op::br_if)
             fprintf(stderr, "  [%u] op=%d dest=%d target=%u type=%d v128_sp: %u -> %u\n", idx, (int)inst.opcode,
-                    inst.dest, inst.br.target, inst.type, _v128_pre, _v128_sp_bytes);
+                    inst.dest, inst.br.target, inst.value_type(), _v128_pre, _v128_sp_bytes);
          else if (inst.opcode == ir_op::multi_return_store || inst.opcode == ir_op::multi_return_load)
             fprintf(stderr, "  [%u] op=%d src=%u imm=%d type=%d v128_sp: %u -> %u\n", idx, (int)inst.opcode,
-                    inst.ri.src1, inst.ri.imm, inst.type, _v128_pre, _v128_sp_bytes);
+                    inst.ri.src1, inst.ri.imm, inst.value_type(), _v128_pre, _v128_sp_bytes);
          else
             fprintf(stderr, "  [%u] op=%d sub=%d type=%d v128_sp: %u -> %u\n", idx, (int)inst.opcode,
                     (inst.opcode == ir_op::v128_op) ? (int)static_cast<simd_sub>(inst.dest) : inst.dest,
-                    inst.type, _v128_pre, _v128_sp_bytes);
+                    inst.value_type(), _v128_pre, _v128_sp_bytes);
 #endif
       }
 

@@ -89,8 +89,10 @@ namespace psizam {
 
    struct pzam_memory_type {
       pzam_resizable_limits limits;
+      // Appended metadata must remain optional; old artifacts mean memory32.
+      std::optional<bool> is_memory64;
    };
-   PSIO_REFLECT(pzam_memory_type, limits)
+   PSIO_REFLECT(pzam_memory_type, limits, is_memory64)
 
    struct pzam_global_type {
       uint8_t content_type = 0;

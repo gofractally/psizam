@@ -38,7 +38,7 @@ void __psizam_table_fill(void*, uint32_t, uint32_t, uint32_t, uint32_t) {
    __builtin_trap();
 }
 
-uint64_t __psizam_atomic_rmw(void*, uint8_t, uint32_t, uint32_t, uint64_t, uint64_t) {
+uint64_t __psizam_atomic_rmw(void*, uint8_t, uint64_t, uint32_t, uint64_t, uint64_t) {
    __builtin_trap();
 }
 

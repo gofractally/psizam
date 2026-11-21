@@ -634,3 +634,20 @@ target_compile_definitions(psizam_byte_stack_tests PRIVATE CATCH_CONFIG_NO_POSIX
    BYTE_STACK_EH_WASM="${CMAKE_CURRENT_BINARY_DIR}/byte-stack-eh.wasm")
 add_test(NAME execution.byte-stack COMMAND psizam_byte_stack_tests)
 set_tests_properties(execution.byte-stack PROPERTIES LABELS "execution;quick;resource" TIMEOUT 120)
+if(PSIZAM_ENABLE_LLVM)
+   foreach(bits 32 64)
+      add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/private-atomics-${bits}.wasm"
+         COMMAND "${PSIZAM_WAT2WASM}" --enable-threads "${CMAKE_CURRENT_SOURCE_DIR}/private-atomics-${bits}.wat"
+            -o "${CMAKE_CURRENT_BINARY_DIR}/private-atomics-${bits}.wasm"
+         DEPENDS "private-atomics-${bits}.wat" VERBATIM)
+   endforeach()
+   add_executable(psizam_private_atomic_tests main.cpp private_atomic_tests.cpp
+      "${CMAKE_CURRENT_BINARY_DIR}/private-atomics-32.wasm"
+      "${CMAKE_CURRENT_BINARY_DIR}/private-atomics-64.wasm")
+   target_link_libraries(psizam_private_atomic_tests PRIVATE psizam psizam-exec psizam-llvm-aot Catch2::Catch2)
+   target_compile_definitions(psizam_private_atomic_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
+      PRIVATE_ATOMICS_32_WASM="${CMAKE_CURRENT_BINARY_DIR}/private-atomics-32.wasm"
+      PRIVATE_ATOMICS_64_WASM="${CMAKE_CURRENT_BINARY_DIR}/private-atomics-64.wasm")
+   add_test(NAME execution.private-atomics COMMAND psizam_private_atomic_tests)
+   set_tests_properties(execution.private-atomics PROPERTIES LABELS "execution;quick;resource" TIMEOUT 120)
+endif()
