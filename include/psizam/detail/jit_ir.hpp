@@ -526,6 +526,7 @@ namespace psizam::detail {
       uint32_t        num_params  = 0;
       uint32_t        num_locals  = 0;
       uint32_t        func_index  = 0;
+      uint32_t        byte_stack_usage = 0; // parser high-water plus the shared 16-byte frame overhead
       const func_type* type       = nullptr;
       uint32_t        num_spill_slots = 0;
       uint32_t        callee_saved_used = 0;  // bitmask of callee-saved regs assigned by regalloc

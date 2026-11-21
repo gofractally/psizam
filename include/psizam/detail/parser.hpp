@@ -396,6 +396,9 @@ namespace psizam::detail {
       void parse_module(wasm_code_ptr& code_ptr, size_t sz, module& mod, DebugInfo& debug) {
          _mod = &mod;
          mod.gas_metering = get_gas_metering(_options);
+         // LLVM translation may run while the writer is still parsing. Publish
+         // the mode before constructing or finalizing any function writer.
+         mod.stack_limit_is_bytes = has_max_stack_bytes<Options>;
          PSIZAM_ASSERT(parse_magic(code_ptr) == constants::magic, wasm_parse_exception, "magic number did not match");
          PSIZAM_ASSERT(parse_version(code_ptr) == constants::version, wasm_parse_exception,
                        "version number did not match");

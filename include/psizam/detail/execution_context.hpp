@@ -1277,6 +1277,7 @@ namespace psizam::detail {
          jmp_buf  jmpbuf;
          uint32_t catch_count;
          uint32_t first_catch_idx;  // index into _jit_eh_catches
+         uint32_t remaining_stack;
       };
 
       struct jit_eh_catch {
@@ -1300,7 +1301,7 @@ namespace psizam::detail {
                static_cast<uint32_t>(packed & 0xFFFFFFFF)
             });
          }
-         _jit_eh_stack.push_back(jit_eh_frame{{}, catch_count, first});
+         _jit_eh_stack.push_back(jit_eh_frame{{}, catch_count, first, this->_remaining_call_depth});
          return &_jit_eh_stack.back().jmpbuf;
       }
 

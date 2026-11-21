@@ -484,7 +484,12 @@ namespace psizam::detail {
       // null_debug_info ignores them and addresses are set during Pass 2.
       const void* get_addr() const { return nullptr; }
       const void* get_base_addr() const { return nullptr; }
-      void set_stack_usage(std::uint64_t /*u*/) { }
+      void set_stack_usage(std::uint64_t usage) {
+         if (_stack_limit_is_bytes) {
+            PSIZAM_ASSERT(usage < 0x7fffffff - 16, wasm_parse_exception, "function stack usage exceeds byte limit");
+            _func->byte_stack_usage = static_cast<uint32_t>(usage + 16);
+         }
+      }
 
       // ──── Control flow ────
       void emit_unreachable() {

@@ -588,3 +588,22 @@ target_compile_definitions(psizam_table_limit_tests PRIVATE CATCH_CONFIG_NO_POSI
    TABLE_UNBOUNDED_WASM="${CMAKE_CURRENT_BINARY_DIR}/table-growth-unbounded.wasm")
 add_test(NAME execution.table-growth-policy COMMAND psizam_table_limit_tests)
 set_tests_properties(execution.table-growth-policy PROPERTIES LABELS "execution;quick;resource" TIMEOUT 30)
+
+foreach(fixture byte-stack byte-stack-eh)
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${fixture}.wasm"
+   COMMAND "${PSIZAM_WAT2WASM}" ${PSIZAM_WAT2WASM_FEATURE_FLAGS} --enable-exceptions
+      "${CMAKE_CURRENT_SOURCE_DIR}/${fixture}.wat" -o "${CMAKE_CURRENT_BINARY_DIR}/${fixture}.wasm"
+   DEPENDS ${fixture}.wat VERBATIM)
+endforeach()
+add_executable(psizam_byte_stack_tests main.cpp byte_stack_tests.cpp
+   "${CMAKE_CURRENT_BINARY_DIR}/byte-stack.wasm"
+   "${CMAKE_CURRENT_BINARY_DIR}/byte-stack-eh.wasm")
+target_link_libraries(psizam_byte_stack_tests PRIVATE psizam psizam-exec Catch2::Catch2)
+if(PSIZAM_ENABLE_LLVM)
+   target_link_libraries(psizam_byte_stack_tests PRIVATE psizam-llvm-aot)
+endif()
+target_compile_definitions(psizam_byte_stack_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
+   BYTE_STACK_WASM="${CMAKE_CURRENT_BINARY_DIR}/byte-stack.wasm"
+   BYTE_STACK_EH_WASM="${CMAKE_CURRENT_BINARY_DIR}/byte-stack-eh.wasm")
+add_test(NAME execution.byte-stack COMMAND psizam_byte_stack_tests)
+set_tests_properties(execution.byte-stack PROPERTIES LABELS "execution;quick;resource" TIMEOUT 120)

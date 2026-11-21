@@ -237,6 +237,23 @@ namespace psizam::detail {
          }
       }
 
+      void emit_byte_stack_enter(const ir_function& func) {
+         if (!_stack_limit_is_bytes) return;
+         this->emit_mov(*(rdi + call_depth_offset()), ecx);
+         this->emit_bytes(0x81, 0xe9); // SUB ECX, frame byte cost
+         this->emit_operand32(func.byte_stack_usage);
+         base::fix_branch(this->emit_branchcc32(base::JB), stack_overflow_handler);
+         this->emit_mov(ecx, *(rdi + call_depth_offset()));
+      }
+
+      void emit_byte_stack_leave(const ir_function& func) {
+         if (!_stack_limit_is_bytes) return;
+         this->emit_mov(*(rdi + call_depth_offset()), ecx);
+         this->emit_bytes(0x81, 0xc1); // ADD ECX, frame byte cost
+         this->emit_operand32(func.byte_stack_usage);
+         this->emit_mov(ecx, *(rdi + call_depth_offset()));
+      }
+
       // Emit the SysV ABI entry point (same as machine_code_writer)
       void emit_entry_and_error_handlers() {
          // Allocate generous buffers — no reclaim to avoid LIFO issues.
@@ -654,6 +671,7 @@ namespace psizam::detail {
       }
 
       void emit_function_prologue(ir_function& func) {
+         emit_byte_stack_enter(func);
          this->emit_push_raw(rbp);
          this->emit_mov(rsp, rbp);
          // Gas metering (Phase 4): per-function cost = body size in bytes
@@ -2174,6 +2192,7 @@ namespace psizam::detail {
       }
 
       void emit_function_epilogue(ir_function& func) {
+         emit_byte_stack_leave(func);
          // Checked mode: validate watermark before return, catching any
          // deferred reads since the last gas charge point.
          emit_validate_watermark();
@@ -7037,6 +7056,7 @@ namespace psizam::detail {
             this->emit_operand32(static_cast<uint32_t>(rel));
          } else if (callee_arg_bytes <= cur_param_bytes) {
             // ── Cross-function tail call, K ≤ M (by byte size) ──
+            emit_byte_stack_leave(func);
             // Copy new args to param slots
             emit_copy_args_to_params(callee_ft);
             // Pop args from x86 stack
@@ -7052,6 +7072,7 @@ namespace psizam::detail {
             register_call(branch, funcnum);
          } else {
             // ── Fallback: K > M — can't fit extra params, use CALL+RET ──
+            emit_byte_stack_leave(func);
             // Skip call depth tracking (tail call semantics: no depth change)
             void* branch = this->emit_call32();
             register_call(branch, funcnum);
@@ -7065,6 +7086,7 @@ namespace psizam::detail {
       }
 
       void emit_tail_call_indirect(ir_function& func, const ir_inst& inst) {
+         emit_byte_stack_leave(func);
          uint32_t packed_fti = inst.call.index;
          uint32_t fti = packed_fti & 0xFFFF;
          uint32_t table_idx = packed_fti >> 16;

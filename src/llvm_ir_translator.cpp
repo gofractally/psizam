@@ -13,6 +13,7 @@
 
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/MDBuilder.h>
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <llvm/IR/Intrinsics.h>
@@ -927,6 +928,47 @@ namespace psizam::detail {
          llvm::Value* mem_arg = &*arg_it++;
          mem_arg->setName("mem");
 
+         const bool byte_stack = wasm_mod.stack_limit_is_bytes;
+         PSIZAM_ASSERT(!byte_stack || func.byte_stack_usage >= 16,
+                       wasm_parse_exception, "LLVM function has no byte-stack accounting metadata");
+         std::vector<llvm::BasicBlock*> released_byte_blocks;
+         auto emit_byte_stack_leave = [&](llvm::IRBuilder<>& b) {
+            if (!byte_stack) return;
+            auto* ptr = b.CreateConstGEP1_64(i8_ty, ctx_ptr,
+               offsetof(frame_info_holder<false>, _remaining_call_depth));
+            auto* remaining = b.CreateLoad(i32_ty, ptr, "stack.remaining");
+            b.CreateStore(b.CreateAdd(remaining, b.getInt32(func.byte_stack_usage)), ptr);
+         };
+         auto restore_byte_stack_returns = [&] {
+            if (!byte_stack) return;
+            for (auto& bb : *fn) {
+               auto* ret = llvm::dyn_cast_or_null<llvm::ReturnInst>(bb.getTerminator());
+               if (ret && std::find(released_byte_blocks.begin(), released_byte_blocks.end(), &bb)
+                              == released_byte_blocks.end()) {
+                  llvm::IRBuilder<> b(ret);
+                  emit_byte_stack_leave(b);
+               }
+            }
+         };
+         auto release_tail_byte_stack = [&] {
+            if (!byte_stack) return;
+            emit_byte_stack_leave(builder);
+         };
+         if (byte_stack) {
+            auto* ptr = builder.CreateConstGEP1_64(i8_ty, ctx_ptr,
+               offsetof(frame_info_holder<false>, _remaining_call_depth));
+            auto* remaining = builder.CreateLoad(i32_ty, ptr, "stack.remaining");
+            auto* enough = builder.CreateICmpUGE(remaining, builder.getInt32(func.byte_stack_usage));
+            auto* body = llvm::BasicBlock::Create(*ctx, "stack.available", fn);
+            auto* exhausted = llvm::BasicBlock::Create(*ctx, "stack.exhausted", fn);
+            builder.CreateCondBr(enough, body, exhausted);
+            builder.SetInsertPoint(exhausted);
+            builder.CreateCall(rt_trap, {ctx_ptr, builder.getInt32(6)});
+            builder.CreateUnreachable();
+            builder.SetInsertPoint(body);
+            builder.CreateStore(builder.CreateSub(remaining, builder.getInt32(func.byte_stack_usage)), ptr);
+         }
+
          // Gas metering (Phase 4): three-way branch at function entry
          // with cost = body byte size + prepay_extra (heavy-op weights
          // the parser accumulated for opcodes outside any loop). Since
@@ -1263,6 +1305,7 @@ namespace psizam::detail {
                builder.CreateRetVoid();
             else
                builder.CreateRet(llvm::Constant::getNullValue(fn->getReturnType()));
+            restore_byte_stack_returns();
             return;
          }
 
@@ -2080,7 +2123,7 @@ namespace psizam::detail {
                      // Standard path: separate call_depth tracking
                      // Checked mode: validate read watermark before call
                      emit_watermark_validate(builder, ctx_ptr, load_mem_ptr(), watermark_alloca, mem_size_cache);
-                     builder.CreateCall(rt_call_depth_dec, {ctx_ptr});
+                     if (!byte_stack) builder.CreateCall(rt_call_depth_dec, {ctx_ptr});
 
                      if (funcnum < num_imports) {
                         // Host function call — go through runtime helper
@@ -2176,7 +2219,7 @@ namespace psizam::detail {
                         }
                      }
                      // Restore call depth after either host or WASM call
-                     builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
+                     if (!byte_stack) builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
                   }
                   break;
                }
@@ -2210,7 +2253,7 @@ namespace psizam::detail {
 
                   // Checked mode: validate read watermark before indirect call
                   emit_watermark_validate(builder, ctx_ptr, load_mem_ptr(), watermark_alloca, mem_size_cache);
-                  builder.CreateCall(rt_call_depth_dec, {ctx_ptr});
+                  if (!byte_stack) builder.CreateCall(rt_call_depth_dec, {ctx_ptr});
                   emit_backtrace_set_top(builder, ctx_ptr);
                   emit_backtrace_set_bottom(builder, ctx_ptr);
 
@@ -2220,7 +2263,7 @@ namespace psizam::detail {
 
                   emit_backtrace_clear_bottom(builder, ctx_ptr);
                   emit_backtrace_clear_top(builder, ctx_ptr);
-                  builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
+                  if (!byte_stack) builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
 
                   // Reload mem_ptr after call_indirect (callee may grow memory)
                   {
@@ -2257,12 +2300,13 @@ namespace psizam::detail {
 
                // ──── Tail calls (emit as call + return) ────
                case ir_op::tail_call: {
+                  release_tail_byte_stack();
                   uint32_t funcnum = inst.call.index;
                   uint32_t num_imports = wasm_mod.get_imported_functions_size();
 
                   // Checked mode: validate read watermark before tail call
                   emit_watermark_validate(builder, ctx_ptr, load_mem_ptr(), watermark_alloca, mem_size_cache);
-                  builder.CreateCall(rt_call_depth_dec, {ctx_ptr});
+                  if (!byte_stack) builder.CreateCall(rt_call_depth_dec, {ctx_ptr});
 
                   if (funcnum < num_imports) {
                      // Host function tail call
@@ -2282,7 +2326,7 @@ namespace psizam::detail {
                         {ctx_ptr, builder.getInt32(funcnum), host_args_alloca, builder.getInt32(nargs)});
                      emit_backtrace_clear_bottom(builder, ctx_ptr);
                      emit_backtrace_clear_top(builder, ctx_ptr);
-                     builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
+                     if (!byte_stack) builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
                      builder.CreateStore(builder.CreateCall(rt_get_memory, {ctx_ptr}), mem_ptr_alloca);
                      // Return the result
                      if (fn->getReturnType()->isVoidTy()) {
@@ -2322,7 +2366,7 @@ namespace psizam::detail {
                         auto* result = builder.CreateCall(callee, args);
                         result->setTailCallKind(llvm::CallInst::TCK_Tail);
                         emit_backtrace_clear_top(builder, ctx_ptr);
-                        builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
+                        if (!byte_stack) builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
                         if (fn->getReturnType()->isVoidTy()) {
                            builder.CreateRetVoid();
                         } else if (!result->getType()->isVoidTy()) {
@@ -2331,10 +2375,14 @@ namespace psizam::detail {
                            builder.CreateRetVoid();
                         }
                      } else {
-                        builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
+                        if (!byte_stack) builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
                         builder.CreateRetVoid();
                      }
                   }
+                  // Watermark validation can split the block. Mark the actual
+                  // return block after all emission, so the generic return
+                  // pass does not refund an already released tail frame twice.
+                  if (byte_stack) released_byte_blocks.push_back(builder.GetInsertBlock());
                   break;
                }
                case ir_op::tail_call_indirect: {
@@ -2345,6 +2393,7 @@ namespace psizam::detail {
                      call_args.pop_back();
                   }
                   if (!table_elem) { call_args.clear(); break; }
+                  release_tail_byte_stack();
                   uint32_t nargs = static_cast<uint32_t>(call_args.size());
                   pack_indirect_args();
                   // See ir_op::call_indirect above for why convert_type.
@@ -2352,7 +2401,7 @@ namespace psizam::detail {
                      table_elem = convert_type(table_elem, i32_ty);
                   // Checked mode: validate read watermark before tail call indirect
                   emit_watermark_validate(builder, ctx_ptr, load_mem_ptr(), watermark_alloca, mem_size_cache);
-                  builder.CreateCall(rt_call_depth_dec, {ctx_ptr});
+                  if (!byte_stack) builder.CreateCall(rt_call_depth_dec, {ctx_ptr});
                   emit_backtrace_set_top(builder, ctx_ptr);
                   emit_backtrace_set_bottom(builder, ctx_ptr);
                   llvm::Value* raw = builder.CreateCall(rt_call_indirect,
@@ -2360,7 +2409,7 @@ namespace psizam::detail {
                       table_elem, host_args_alloca, builder.getInt32(nargs)});
                   emit_backtrace_clear_bottom(builder, ctx_ptr);
                   emit_backtrace_clear_top(builder, ctx_ptr);
-                  builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
+                  if (!byte_stack) builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
                   builder.CreateStore(builder.CreateCall(rt_get_memory, {ctx_ptr}), mem_ptr_alloca);
                   // Return
                   if (fn->getReturnType()->isVoidTy()) {
@@ -2374,6 +2423,10 @@ namespace psizam::detail {
                   } else {
                      builder.CreateRet(convert_type(raw, fn->getReturnType()));
                   }
+                  // Watermark validation can split the block. Mark the actual
+                  // return block after all emission, so the generic return
+                  // pass does not refund an already released tail frame twice.
+                  if (byte_stack) released_byte_blocks.push_back(builder.GetInsertBlock());
                   break;
                }
 
@@ -5366,6 +5419,7 @@ namespace psizam::detail {
                }
             }
          }
+         restore_byte_stack_returns();
       }
 
       // Generate entry wrappers for all translated functions.

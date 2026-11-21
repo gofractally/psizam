@@ -137,10 +137,13 @@ int64_t __psizam_call_host_full(void* ctx, uint32_t func_idx,
    auto* args = static_cast<native_value*>(args_buf);
 
    // Inline call_depth_dec
-   uint32_t depth = c.get_remaining_call_depth();
-   if (depth <= 1)
-      escape_or_throw<wasm_interpreter_exception>("stack overflow");
-   c.set_max_call_depth(depth - 1);
+   const bool count_mode = !c.get_module().stack_limit_is_bytes;
+   if (count_mode) {
+      uint32_t depth = c.get_remaining_call_depth();
+      if (depth <= 1)
+         escape_or_throw<wasm_interpreter_exception>("stack overflow");
+      c.set_max_call_depth(depth - 1);
+   }
 
    // Catch and finish C++ exception cleanup before escaping generated frames.
    // This is required for both LLVM AOT and JIT, without relying on unwind info.
@@ -159,7 +162,7 @@ int64_t __psizam_call_host_full(void* ctx, uint32_t func_idx,
    });
 
    // Inline call_depth_inc
-   c.set_max_call_depth(c.get_remaining_call_depth() + 1);
+   if (count_mode) c.set_max_call_depth(c.get_remaining_call_depth() + 1);
 
    // Inline get_memory
    *mem_out = c.linear_memory();
@@ -305,6 +308,7 @@ int64_t __psizam_call_indirect_nothrow(void* ctx, void* mem, uint32_t type_idx,
 
 void __psizam_call_depth_dec(void* ctx) {
    auto& c = as_ctx(ctx);
+   if (c.get_module().stack_limit_is_bytes) return;
    uint32_t depth = c.get_remaining_call_depth();
    if (depth == 0) {
       escape_or_throw<wasm_interpreter_exception>("stack overflow");
@@ -318,6 +322,7 @@ void __psizam_call_depth_dec(void* ctx) {
 
 void __psizam_call_depth_inc(void* ctx) {
    auto& c = as_ctx(ctx);
+   if (c.get_module().stack_limit_is_bytes) return;
    c.set_max_call_depth(c.get_remaining_call_depth() + 1);
 }
 
@@ -331,6 +336,7 @@ void __psizam_trap(void* ctx, uint32_t trap_code) {
       case 4:  msg = "undefined element"; break;
       case 5:  // memory OOB — use wasm_memory_exception
          escape_or_throw<wasm_memory_exception>("out of bounds memory access");
+      case 6:  msg = "stack overflow"; break;
       default: msg = "unknown trap"; break;
    }
    escape_or_throw<wasm_interpreter_exception>(msg);

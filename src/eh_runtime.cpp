@@ -68,6 +68,8 @@ namespace {
                // bytes copied from the jmpbuf's sigset padding).
                static thread_local jmp_buf dest;
                std::memcpy(&dest, &frame.jmpbuf, sizeof(jmp_buf));
+               if (c.get_module().stack_limit_is_bytes)
+                  c.set_max_call_depth(frame.remaining_stack);
 
                // Pop this frame and all its catch entries
                catches.resize(frame.first_catch_idx);

@@ -328,6 +328,7 @@ namespace psizam::detail {
       void* last_loop_gas_handle() const { return _last_loop_gas_imm_ptr; }
 
       void emit_prologue(const func_type& /*ft*/, const std::vector<local_entry>& locals, uint32_t funcnum) {
+         _tail_stack_immediates.clear();
          _ft = &_mod.types[_mod.functions[funcnum]];
          _params = function_parameters{_ft};
          _locals = function_locals{locals};
@@ -755,7 +756,9 @@ namespace psizam::detail {
              && ft.param_types.empty()
              && !_stack_limit_is_bytes;
          if (!tco_ok) {
+            emit_tail_byte_adjust(false);
             emit_call(ft, funcnum);
+            emit_tail_byte_adjust(true);
             return;
          }
          // Restore caller's frame — matches emit_epilogue's teardown.
@@ -777,7 +780,9 @@ namespace psizam::detail {
              && !_stack_limit_is_bytes
              && table_idx == 0;
          if (!tco_ok) {
+            emit_tail_byte_adjust(false);
             emit_call_indirect(ft, functypeidx, table_idx);
+            emit_tail_byte_adjust(true);
             return;
          }
          COUNT_INSTR();
@@ -5304,10 +5309,19 @@ namespace psizam::detail {
             stack_usage = usage;
             static_assert(sizeof(stack_usage) == 4);
             std::memcpy(stack_limit_entry, &stack_usage, 4);
+            for (auto* immediate : _tail_stack_immediates)
+               std::memcpy(immediate, &stack_usage, 4);
          }
       }
 
     private:
+      void emit_tail_byte_adjust(bool subtract) {
+         if (!_stack_limit_is_bytes) return;
+         // The function charge is known only after parsing its entire body.
+         emit_bytes(0x81, subtract ? 0xeb : 0xc3); // SUB/ADD EBX, imm32
+         _tail_stack_immediates.push_back(code);
+         emit_bytes(0, 0, 0, 0);
+      }
 
       enum class imm8 : uint8_t {};
       enum class imm32 : uint32_t {};
@@ -6351,6 +6365,7 @@ namespace psizam::detail {
       void* _last_loop_gas_imm_ptr = nullptr;
 
       std::uint32_t stack_usage;
+      std::vector<void*> _tail_stack_immediates;
       void* stack_limit_entry = nullptr;
 
       struct get_local_op {

@@ -792,6 +792,21 @@ namespace psizam::detail {
          }
       }
 
+      void emit_byte_stack_enter(const ir_function& func) {
+         if (!_stack_limit_is_bytes) return;
+         emit_mov_imm32(X16, func.byte_stack_usage);
+         emit32(0x6B000000 | (X16 << 16) | (X21 << 5) | X21); // SUBS W21, W21, W16
+         emit_branch_to_handler(COND_LO, stack_overflow_handler);
+         emit32(0xB9001275); // STR W21, [X19, #16]: publish bytes for host calls and EH
+      }
+
+      void emit_byte_stack_leave(const ir_function& func) {
+         if (!_stack_limit_is_bytes) return;
+         emit_mov_imm32(X16, func.byte_stack_usage);
+         emit32(0x0B000000 | (X16 << 16) | (X21 << 5) | X21); // ADD W21, W21, W16
+         emit32(0xB9001275); // STR W21, [X19, #16]
+      }
+
       // ──────── Gas metering ────────
 
       // gas_state redesign — universal memory-deadline shape mirroring
@@ -860,6 +875,7 @@ namespace psizam::detail {
       // ──────── Function prologue/epilogue ────────
 
       void emit_function_prologue(ir_function& func) {
+         emit_byte_stack_enter(func);
          // STP X29, X30, [SP, #-16]!
          emit32(0xA9BF7BFD);
          // MOV X29, SP
@@ -946,7 +962,8 @@ namespace psizam::detail {
       // skip_return_fetch=true is used by tail_call paths, where X0 (and X1
       // for v128) already hold the callee's return value from BL — the epilogue
       // must not reload them from the vstack/stack or it will clobber the result.
-      void emit_function_epilogue(ir_function& func, bool skip_return_fetch = false) {
+      void emit_function_epilogue(ir_function& func, bool skip_return_fetch = false, bool release_bytes = true) {
+         if (release_bytes) emit_byte_stack_leave(func);
          if (func.type->return_count > 1) {
             // Multi-value return: values already stored to _multi_return by
             // multi_return_store IR ops (emitted in emit_end/emit_return).
@@ -2319,6 +2336,7 @@ namespace psizam::detail {
 
          // ── Tail calls (fallback: call + return) ──
          case ir_op::tail_call: {
+            emit_byte_stack_leave(func);
             uint32_t funcnum = inst.call.index;
             const func_type& ft = _mod.get_function_type(funcnum);
             // Fallback: emit as regular call then return
@@ -2333,10 +2351,11 @@ namespace psizam::detail {
             // Callee returned with X0 (and X1 for v128) holding the result.
             // Skip the epilogue's return-value fetch so it doesn't clobber
             // X0/X1 by reloading from a stale vreg or empty stack.
-            emit_function_epilogue(func, /*skip_return_fetch=*/true);
+            emit_function_epilogue(func, /*skip_return_fetch=*/true, /*release_bytes=*/false);
             break;
          }
          case ir_op::tail_call_indirect: {
+            emit_byte_stack_leave(func);
             // Fallback: emit as call_indirect + return
             uint32_t fti_packed = inst.call.index;
             uint32_t fti = fti_packed & 0xFFFF;
@@ -2397,7 +2416,7 @@ namespace psizam::detail {
             if (arg_bytes > 0) emit_add_imm(SP, SP, arg_bytes);
             emit_call_depth_inc();
             // See ir_op::tail_call for the explanation of skip_return_fetch.
-            emit_function_epilogue(func, /*skip_return_fetch=*/true);
+            emit_function_epilogue(func, /*skip_return_fetch=*/true, /*release_bytes=*/false);
             break;
          }
 

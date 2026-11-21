@@ -352,6 +352,7 @@ namespace psizam::detail {
       static constexpr std::size_t max_epilogue_size = 80;  // includes 3-instruction stack limit restore + debug check
 
       void emit_prologue(const func_type& /*ft*/, const std::vector<local_entry>& locals, uint32_t funcnum) {
+         _tail_stack_adjustments.clear();
          // Insert veneer island if enough code has been emitted
          maybe_insert_veneer_island();
 
@@ -833,7 +834,9 @@ namespace psizam::detail {
              && ft.param_types.empty()
              && !_stack_limit_is_bytes;
          if (!tco_ok) {
+            emit_tail_byte_adjust(false);
             emit_call(ft, funcnum);
+            emit_tail_byte_adjust(true);
             return;
          }
          invalidate_recent_ops();
@@ -857,7 +860,9 @@ namespace psizam::detail {
              && !_stack_limit_is_bytes
              && table_idx == 0;
          if (!tco_ok) {
+            emit_tail_byte_adjust(false);
             emit_call_indirect(ft, functypeidx, table_idx);
+            emit_tail_byte_adjust(true);
             return;
          }
          invalidate_recent_ops();
@@ -4299,6 +4304,8 @@ namespace psizam::detail {
                unimplemented();
             }
             stack_usage = static_cast<uint32_t>(usage);
+            for (auto [slots, subtract] : _tail_stack_adjustments)
+               patch_stack_limit_slots(slots, stack_usage, subtract);
             if (stack_limit_entry) {
                // Patch the prologue stack limit check (3 instruction slots).
                // Layout: [slot0][slot1][SUBS] where SUBS is either imm or reg form.
@@ -5968,6 +5975,15 @@ namespace psizam::detail {
       uint32_t _pending_result_count = 0;
 
       std::uint32_t stack_usage = 0;
+      std::vector<std::pair<void*, bool>> _tail_stack_adjustments;
+      void emit_tail_byte_adjust(bool subtract) {
+         if (!_stack_limit_is_bytes) return;
+         invalidate_recent_ops();
+         _tail_stack_adjustments.emplace_back(code, subtract);
+         emit32(0xD503201F);
+         emit32(0xD503201F);
+         emit32(0xD503201F);
+      }
       void* stack_limit_entry = nullptr;
       void* stack_limit_restore = nullptr;
 
