@@ -542,3 +542,20 @@ add_custom_target(psizam_jit1_backtrace_fixture DEPENDS "${CMAKE_CURRENT_BINARY_
 add_dependencies(psizam_jit1_backtrace_tests psizam_jit1_backtrace_fixture)
 add_test(NAME execution.jit1-backtrace COMMAND psizam_jit1_backtrace_tests)
 set_tests_properties(execution.jit1-backtrace PROPERTIES LABELS "execution;quick" TIMEOUT 30)
+
+# Optional embedder growth policy must be applied before table storage is chosen.
+foreach(fixture table-growth-limit table-growth-unbounded)
+   add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${fixture}.wasm"
+      COMMAND "${PSIZAM_WAT2WASM}" "${CMAKE_CURRENT_SOURCE_DIR}/${fixture}.wat"
+         -o "${CMAKE_CURRENT_BINARY_DIR}/${fixture}.wasm"
+      DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${fixture}.wat" VERBATIM)
+endforeach()
+add_executable(psizam_table_limit_tests main.cpp table_growth_limit_tests.cpp
+   "${CMAKE_CURRENT_BINARY_DIR}/table-growth-limit.wasm"
+   "${CMAKE_CURRENT_BINARY_DIR}/table-growth-unbounded.wasm")
+target_link_libraries(psizam_table_limit_tests PRIVATE psizam psizam-exec Catch2::Catch2)
+target_compile_definitions(psizam_table_limit_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
+   TABLE_LIMIT_WASM="${CMAKE_CURRENT_BINARY_DIR}/table-growth-limit.wasm"
+   TABLE_UNBOUNDED_WASM="${CMAKE_CURRENT_BINARY_DIR}/table-growth-unbounded.wasm")
+add_test(NAME execution.table-growth-policy COMMAND psizam_table_limit_tests)
+set_tests_properties(execution.table-growth-policy PROPERTIES LABELS "execution;quick;resource" TIMEOUT 30)

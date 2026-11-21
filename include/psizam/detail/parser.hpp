@@ -77,6 +77,9 @@ namespace psizam::detail {
    PARSER_OPTION(gas_metering, true, bool)
 
    MAX_ELEMENTS(max_table_elements, 0xFFFFFFFFu)
+   // Embedders can make the initial-size policy a lifetime growth cap. Apply
+   // this before code generation chooses inline versus indirect table storage.
+   PARSER_OPTION(limit_table_growth, false, bool)
    MAX_ELEMENTS(max_section_elements, 0xFFFFFFFFu)
 
    MAX_ELEMENTS(max_type_section_elements, get_max_section_elements(options))
@@ -647,6 +650,11 @@ namespace psizam::detail {
             PSIZAM_ASSERT(tt.limits.initial <= tt.limits.maximum, wasm_parse_exception, "table max size less than min size");
          }
          PSIZAM_ASSERT(tt.limits.initial <= get_max_table_elements(_options), wasm_parse_exception, "table size exceeds limit");
+         if (get_limit_table_growth(_options)) {
+            auto maximum      = get_max_table_elements(_options);
+            tt.limits.maximum = tt.limits.flags ? std::min(tt.limits.maximum, maximum) : maximum;
+            tt.limits.flags   = 1;
+         }
          if (has_init_expr) {
             init_expr ie;
             parse_init_expr(code, ie, tt.element_type, _mod->globals.size());
