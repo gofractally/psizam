@@ -825,6 +825,9 @@ namespace psizam::detail {
             ? llvm::Function::ExternalLinkage
             : llvm::Function::InternalLinkage;
          auto* fn = llvm::Function::Create(fn_ty, linkage, name, llvm_mod.get());
+         fn->addFnAttr("probe-stack", "inline-asm");
+         fn->addFnAttr("stack-probe-size", "4096");
+         fn->addFnAttr(llvm::Attribute::NoRedZone);
          if (opts.fp != fp_mode::fast)
             fn->addFnAttr(llvm::Attribute::StrictFP);
          if (opts.enable_backtrace)
@@ -1957,7 +1960,7 @@ namespace psizam::detail {
                   uint32_t gidx = inst.local.index;
                   if (inst.type == types::v128) {
                      // v128 global: use pointer-based helper
-                     auto* tmp = builder.CreateAlloca(v128_ty);
+                     auto* tmp = alloca_builder.CreateAlloca(v128_ty);
                      builder.CreateCall(rt_global_get_v128,
                         {ctx_ptr, builder.getInt32(gidx), tmp});
                      auto* val = builder.CreateLoad(v128_ty, tmp);
@@ -1987,7 +1990,7 @@ namespace psizam::detail {
                   if (inst.type == types::v128) {
                      // v128 global: use pointer-based helper
                      auto* val = load_v128(static_cast<uint16_t>(inst.local.src1), v128_ty);
-                     auto* tmp = builder.CreateAlloca(v128_ty);
+                     auto* tmp = alloca_builder.CreateAlloca(v128_ty);
                      builder.CreateStore(val, tmp);
                      builder.CreateCall(rt_global_set_v128,
                         {ctx_ptr, builder.getInt32(gidx), tmp});
@@ -2585,7 +2588,7 @@ namespace psizam::detail {
                   llvm::Value* pages = load_vreg_as(inst.rr.src1, i32_ty);
                   if (!pages) break;
                   // Allocate space on stack for the new memory pointer
-                  llvm::Value* mem_out = builder.CreateAlloca(ptr_ty);
+                  llvm::Value* mem_out = alloca_builder.CreateAlloca(ptr_ty);
                   llvm::Value* result = builder.CreateCall(rt_memory_grow,
                      {ctx_ptr, pages, mem_out});
                   // Update mem_ptr alloca — mem2reg will insert PHI nodes
@@ -4044,7 +4047,7 @@ namespace psizam::detail {
                      // Portable approach: element-by-element extraction
                      // Actually, we can use @llvm.experimental.vector.extract or build manually.
                      // Simplest portable: alloca, store, indexed load
-                     auto* arr = builder.CreateAlloca(v16xi8_ty, nullptr, "swiz_src");
+                     auto* arr = alloca_builder.CreateAlloca(v16xi8_ty, nullptr, "swiz_src");
                      builder.CreateStore(a, arr);
                      auto* arr_ptr = builder.CreateBitCast(arr, ptr_ty);
                      llvm::Value* result = llvm::Constant::getNullValue(v16xi8_ty);
@@ -5277,7 +5280,7 @@ namespace psizam::detail {
                   const auto& ehd = func.eh_data[eh_idx];
 
                   // Build catch_data array on stack: each entry = (kind << 32) | tag_index
-                  auto* catch_data = builder.CreateAlloca(i64_ty,
+                  auto* catch_data = alloca_builder.CreateAlloca(i64_ty,
                      builder.getInt32(catch_count));
                   for (uint32_t c = 0; c < catch_count; c++) {
                      uint64_t packed = (static_cast<uint64_t>(ehd.catches[c].kind) << 32)
@@ -5316,7 +5319,7 @@ namespace psizam::detail {
 
                   llvm::Value* payload_ptr;
                   if (payload_count > 0) {
-                     auto* payload = builder.CreateAlloca(i64_ty,
+                     auto* payload = alloca_builder.CreateAlloca(i64_ty,
                         builder.getInt32(payload_count));
                      for (uint32_t p = 0; p < payload_count; p++) {
                         llvm::Value* v = call_args[p];
@@ -5439,6 +5442,9 @@ namespace psizam::detail {
             std::string entry_name = "wasm_entry_" + std::to_string(i);
             auto* entry_fn = llvm::Function::Create(entry_ty, llvm::Function::ExternalLinkage,
                                                      entry_name, llvm_mod.get());
+            entry_fn->addFnAttr("probe-stack", "inline-asm");
+            entry_fn->addFnAttr("stack-probe-size", "4096");
+            entry_fn->addFnAttr(llvm::Attribute::NoRedZone);
 
             auto* bb = llvm::BasicBlock::Create(*ctx, "entry", entry_fn);
             llvm::IRBuilder<> b(bb);

@@ -27,6 +27,13 @@ namespace psizam::detail {
       std::vector<code_relocation> relocations;     // relocations against runtime symbols
       std::vector<std::pair<uint32_t, uint32_t>> function_offsets; // (offset, size) per entry wrapper
       std::vector<std::pair<uint32_t, uint32_t>> body_offsets;     // (offset, size) per function body
+      // Native prologue allocations, not logical WASM charges. Zero is a valid
+      // frame size; completeness is established separately from these values.
+      std::vector<uint64_t> entry_stack_sizes;
+      std::vector<uint64_t> body_stack_sizes;
+      uint32_t native_stack_probe_size = 0;
+      // Only emitted WASM bodies/wrappers, not external native runtime helpers.
+      bool native_stack_frames_complete = false;
       std::string error;                            // non-empty on failure
    };
 

@@ -8,10 +8,13 @@
 
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/Object/ELFObjectFile.h>
 #include <llvm/Object/ObjectFile.h>
 #include <llvm/Support/TargetSelect.h>
+#include <llvm/Support/DataExtractor.h>
+#include <llvm/Support/Error.h>
 
 // Initialize only the architectures linked into the shared AOT library.
 extern "C" {
@@ -33,10 +36,73 @@ extern "C" {
 
 #include <algorithm>
 #include <iostream>
+#include <map>
 #include <optional>
+#include <set>
 #include <unordered_map>
 
 namespace psizam::detail {
+
+   // ELF stack-size records use relocations to identify their function. A
+   // section symbol plus addend is common, so names alone are insufficient.
+   using native_function_key = std::pair<uint64_t, uint64_t>; // section, value
+   static llvm::Expected<std::map<native_function_key, uint64_t>>
+   read_native_stack_sizes(const llvm::object::ObjectFile& obj) {
+      std::map<native_function_key, uint64_t> frames;
+      if (!llvm::isa<llvm::object::ELFObjectFileBase>(obj) ||
+          obj.getBytesInAddress() != 8 || !obj.isLittleEndian())
+         return llvm::createStringError("native frame metadata requires little-endian ELF64");
+      for (const auto& section : obj.sections()) {
+         auto name = section.getName();
+         if (!name) return name.takeError();
+         if (*name != ".stack_sizes") continue;
+         auto contents = section.getContents();
+         if (!contents) return contents.takeError();
+         std::map<uint64_t, native_function_key> references;
+         for (const auto& relocation_section : obj.sections()) {
+            auto target = relocation_section.getRelocatedSection();
+            if (!target) return target.takeError();
+            if (*target == obj.section_end() || **target != section) continue;
+            for (const auto& relocation : relocation_section.relocations()) {
+               auto symbol = relocation.getSymbol();
+               if (symbol == obj.symbol_end())
+                  return llvm::createStringError("stack-size relocation has no symbol");
+               auto function_section = symbol->getSection();
+               if (!function_section) return function_section.takeError();
+               auto value = symbol->getValue();
+               if (!value) return value.takeError();
+               auto addend = llvm::object::ELFRelocationRef(relocation).getAddend();
+               if (!addend) return addend.takeError();
+               if (*function_section == obj.section_end() || *addend < 0 ||
+                   uint64_t(*addend) > UINT64_MAX - *value ||
+                   (relocation.getType() != 1 && relocation.getType() != 257))
+                  return llvm::createStringError("unsupported stack-size relocation");
+               if (!references.emplace(relocation.getOffset(), native_function_key{
+                       (*function_section)->getIndex(), *value + uint64_t(*addend)}).second)
+                  return llvm::createStringError("duplicate stack-size relocation");
+            }
+         }
+         llvm::DataExtractor data(*contents, true, 8);
+         uint64_t offset = 0;
+         size_t count = 0;
+         while (offset < contents->size()) {
+            auto reference = references.find(offset);
+            if (reference == references.end() || contents->size() - offset < 8)
+               return llvm::createStringError("missing stack-size function reference");
+            offset += 8;
+            llvm::Error error = llvm::Error::success();
+            const auto size = data.getULEB128(&offset, &error);
+            if (error) return std::move(error);
+            auto [it, inserted] = frames.emplace(reference->second, size);
+            if (!inserted && it->second != size)
+               return llvm::createStringError("conflicting native frame sizes");
+            ++count;
+         }
+         if (count != references.size())
+            return llvm::createStringError("unconsumed stack-size relocation");
+      }
+      return frames;
+   }
 
    static bool ensure_llvm_targets() {
       static bool done = [] {
@@ -187,6 +253,43 @@ namespace psizam::detail {
 
       llvm::Triple triple(target_triple);
       bool is_x86_64 = triple.getArch() == llvm::Triple::x86_64;
+      if (!is_x86_64 && triple.getArch() != llvm::Triple::aarch64)
+         return llvm_aot_result{.error = "native frame metadata requires X86-64 or AArch64"};
+      std::set<std::string> expected_functions;
+      std::vector<uint8_t> expected_presence(mod.code.size());
+      for (auto& function : *llvm_mod) {
+         if (function.isDeclaration()) continue;
+         if (!function.getName().starts_with("wasm_func_") &&
+             !function.getName().starts_with("wasm_entry_"))
+            return llvm_aot_result{.error = "unsupported AOT helper definition: " + function.getName().str()};
+         const bool entry = function.getName().starts_with("wasm_entry_");
+         uint32_t index = 0;
+         if (function.getName().drop_front(entry ? 11 : 10).getAsInteger(10, index) ||
+             index < mod.get_imported_functions_size() ||
+             uint64_t(index) - mod.get_imported_functions_size() >= mod.code.size())
+            return llvm_aot_result{.error = "invalid AOT function index: " + function.getName().str()};
+         expected_presence[index - mod.get_imported_functions_size()] |= entry ? 1 : 2;
+         if (function.hasFnAttribute("no-stack-arg-probe"))
+            return llvm_aot_result{.error = "conflicting native stack probe attribute"};
+         if (function.hasFnAttribute(llvm::Attribute::Naked) ||
+             (function.getFnStackAlign() && function.getFnStackAlign()->value() > 16))
+            return llvm_aot_result{.error = "unsupported native stack alignment or naked function"};
+         expected_functions.insert(function.getName().str());
+         function.addFnAttr("probe-stack", "inline-asm");
+         function.addFnAttr("stack-probe-size", "4096");
+         function.addFnAttr(llvm::Attribute::NoRedZone);
+         for (const auto& block : function)
+            for (const auto& instruction : block)
+               if (auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(&instruction)) {
+                  if (!alloca->isStaticAlloca())
+                     return llvm_aot_result{.error = "unbounded native stack allocation in " + function.getName().str()};
+                  if (alloca->getAlign().value() > 16)
+                     return llvm_aot_result{.error = "unsupported native stack alignment in " + function.getName().str()};
+               }
+      }
+      for (auto presence : expected_presence)
+         if (presence && presence != 3)
+            return llvm_aot_result{.error = "missing AOT body or entry wrapper"};
 
       // Look up the target
       std::string error;
@@ -203,6 +306,8 @@ namespace psizam::detail {
          return llvm_aot_result{.error = "LLVM optimization level must be 0 through 3"};
       const auto codegen_level = static_cast<llvm::CodeGenOptLevel>(opt_level);
       llvm::TargetOptions opts;
+      opts.EmitStackSizeSection = true;
+      opts.EnableMachineOutliner = false;
       auto rm = llvm::Reloc::Static;
       // aarch64: Small code model uses ADRP+ADD (8 bytes per reference, ±4GB
       // range) — our relocation system already handles adr_prel_pg_hi21 and
@@ -264,6 +369,9 @@ namespace psizam::detail {
          return llvm_aot_result{.error = "Failed to parse emitted object: " + msg};
       }
       auto& obj = **obj_or_err;
+      auto native_frames = read_native_stack_sizes(obj);
+      if (!native_frames)
+         return llvm_aot_result{.error = "native frame metadata: " + llvm::toString(native_frames.takeError())};
 
       // Find the .text section and merge any .rodata sections into the code blob.
       // LLVM may place jump tables and constant pools in .rodata, which must be
@@ -522,24 +630,57 @@ namespace psizam::detail {
       uint32_t num_imports = mod.get_imported_functions_size();
       result.function_offsets.resize(mod.code.size(), {0, 0});
       result.body_offsets.resize(mod.code.size(), {0, 0});
+      result.entry_stack_sizes.resize(mod.code.size());
+      result.body_stack_sizes.resize(mod.code.size());
+      std::set<std::string> covered_functions;
 
       for (const auto& sym : obj.symbols()) {
          auto name_or_err = sym.getName();
          if (!name_or_err) continue;
          std::string name = name_or_err->str();
 
+         uint64_t native_frame = 0;
+         uint64_t native_offset = 0, native_size = 0;
+         if (expected_functions.contains(name)) {
+            auto section = sym.getSection();
+            if (!section) return llvm_aot_result{.error = llvm::toString(section.takeError())};
+            auto value = sym.getValue();
+            if (!value) return llvm_aot_result{.error = llvm::toString(value.takeError())};
+            if (*section == obj.section_end()) continue;
+            if (**section != *text_section)
+               return llvm_aot_result{.error = "AOT function is outside retained code section: " + name};
+            const auto size = llvm::object::ELFSymbolRef(sym).getSize();
+            if (!size || *value > text_section->getSize() ||
+                size > text_section->getSize() - *value ||
+                *value > UINT32_MAX || size > UINT32_MAX)
+               return llvm_aot_result{.error = "invalid AOT native function range: " + name};
+            native_offset = *value;
+            native_size = size;
+            auto frame = native_frames->find({(*section)->getIndex(), *value});
+            if (frame == native_frames->end())
+               return llvm_aot_result{.error = "missing native frame size for " + name};
+            native_frame = frame->second;
+            covered_functions.insert(name);
+         } else {
+            auto type = sym.getType();
+            if (!type) return llvm_aot_result{.error = llvm::toString(type.takeError())};
+            if (*type == llvm::object::SymbolRef::ST_Function) {
+               auto section = sym.getSection();
+               if (!section) return llvm_aot_result{.error = llvm::toString(section.takeError())};
+               if (*section != obj.section_end())
+                  return llvm_aot_result{.error = "unsupported outlined native function: " + name};
+            }
+            continue;
+         }
+
          if (name.starts_with("wasm_entry_")) {
             uint32_t func_idx = std::stoul(name.substr(11));
             if (func_idx >= num_imports) {
                uint32_t code_idx = func_idx - num_imports;
                if (code_idx < result.function_offsets.size()) {
-                  auto addr_or_err = sym.getAddress();
-                  if (addr_or_err) {
-                     result.function_offsets[code_idx].first = static_cast<uint32_t>(*addr_or_err);
-                     auto size_or_err = llvm::object::ELFSymbolRef(sym).getSize();
-                     if (size_or_err)
-                        result.function_offsets[code_idx].second = static_cast<uint32_t>(size_or_err);
-                  }
+                  result.entry_stack_sizes[code_idx] = native_frame;
+                  result.function_offsets[code_idx] = {static_cast<uint32_t>(native_offset),
+                                                      static_cast<uint32_t>(native_size)};
                }
             }
          } else if (name.starts_with("wasm_func_")) {
@@ -547,17 +688,18 @@ namespace psizam::detail {
             if (func_idx >= num_imports) {
                uint32_t code_idx = func_idx - num_imports;
                if (code_idx < result.body_offsets.size()) {
-                  auto addr_or_err = sym.getAddress();
-                  if (addr_or_err) {
-                     result.body_offsets[code_idx].first = static_cast<uint32_t>(*addr_or_err);
-                     auto size_or_err = llvm::object::ELFSymbolRef(sym).getSize();
-                     if (size_or_err)
-                        result.body_offsets[code_idx].second = static_cast<uint32_t>(size_or_err);
-                  }
+                  result.body_stack_sizes[code_idx] = native_frame;
+                  result.body_offsets[code_idx] = {static_cast<uint32_t>(native_offset),
+                                                  static_cast<uint32_t>(native_size)};
                }
             }
          }
       }
+
+      if (covered_functions != expected_functions)
+         return llvm_aot_result{.error = "incomplete AOT native frame coverage"};
+      result.native_stack_probe_size = 4096;
+      result.native_stack_frames_complete = true;
 
       if (!is_x86_64) {
          // Keep every unresolved BL/B close to a batch-local trampoline.

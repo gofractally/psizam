@@ -463,6 +463,33 @@ target_compile_definitions(psizam_pzam_compile_tests PRIVATE CATCH_CONFIG_NO_POS
 add_test(NAME pzam_compile_api COMMAND psizam_pzam_compile_tests)
 set_tests_properties(pzam_compile_api PROPERTIES TIMEOUT 60 LABELS "execution;quick;resource")
 
+if(PSIZAM_ENABLE_LLVM)
+   set(_physical_batch_wat "(module (memory 1)\n")
+   foreach(_psizam_physical_function RANGE 1 1024)
+      string(APPEND _physical_batch_wat "(func)\n")
+   endforeach()
+   string(APPEND _physical_batch_wat "(func (result i32) i32.const 0 memory.grow))\n")
+   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/aot-physical-batch.wat" "${_physical_batch_wat}")
+   add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/aot-physical-batch.wasm"
+      COMMAND "${PSIZAM_WAT2WASM}" "${CMAKE_CURRENT_BINARY_DIR}/aot-physical-batch.wat"
+         -o "${CMAKE_CURRENT_BINARY_DIR}/aot-physical-batch.wasm"
+      DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/aot-physical-batch.wat" VERBATIM)
+   add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/aot-physical.wasm"
+      COMMAND "${PSIZAM_WAT2WASM}" "${CMAKE_CURRENT_SOURCE_DIR}/aot_physical.wat"
+         -o "${CMAKE_CURRENT_BINARY_DIR}/aot-physical.wasm"
+      DEPENDS aot_physical.wat VERBATIM)
+   add_executable(psizam_aot_physical_tests aot_physical_tests.cpp
+      "${CMAKE_CURRENT_BINARY_DIR}/aot-physical.wasm"
+      "${CMAKE_CURRENT_BINARY_DIR}/aot-physical-batch.wasm")
+   target_compile_definitions(psizam_aot_physical_tests PRIVATE
+      PSIZAM_AOT_PHYSICAL_WASM="${CMAKE_CURRENT_BINARY_DIR}/aot-physical.wasm"
+      PSIZAM_AOT_PHYSICAL_BATCH_WASM="${CMAKE_CURRENT_BINARY_DIR}/aot-physical-batch.wasm")
+   target_link_libraries(psizam_aot_physical_tests PRIVATE psizam psizam-exec psizam-llvm-aot Catch2::Catch2)
+   target_include_directories(psizam_aot_physical_tests PRIVATE ${LLVM_INCLUDE_DIRS})
+   add_test(NAME psizam_aot_physical_tests COMMAND psizam_aot_physical_tests)
+   set_tests_properties(psizam_aot_physical_tests PROPERTIES TIMEOUT 60 LABELS "execution;compiler;resource")
+endif()
+
 add_executable(psizam_pzam_format_tests pzam_format_tests.cpp)
 target_link_libraries(psizam_pzam_format_tests PRIVATE psizam Catch2::Catch2)
 target_compile_definitions(psizam_pzam_format_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS)

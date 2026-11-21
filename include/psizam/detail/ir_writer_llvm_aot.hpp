@@ -73,6 +73,8 @@ namespace psizam::detail {
 #endif
 
          resolve_cross_function_relocs();
+         finish_native_frames();
+         if (_had_error) return;
 
          _compile_result->relocs = std::move(_accumulated_relocs);
          _compile_result->code_blob = std::move(_accumulated_code);
@@ -81,6 +83,38 @@ namespace psizam::detail {
       }
 
     private:
+
+      void record_native_frames(const auto& result, uint32_t index) {
+         if (!result.native_stack_frames_complete || result.native_stack_probe_size != 4096 ||
+             result.entry_stack_sizes.size() != _num_functions ||
+             result.body_stack_sizes.size() != _num_functions || index >= _num_functions) {
+            _compile_result->error = "incomplete LLVM native frame result";
+            _had_error = true;
+            return;
+         }
+         _entry_stack_sizes.resize(_num_functions);
+         _body_stack_sizes.resize(_num_functions);
+         _native_frame_presence.resize(_num_functions);
+         _entry_stack_sizes[index] = result.entry_stack_sizes[index];
+         _body_stack_sizes[index] = result.body_stack_sizes[index];
+         _native_frame_presence[index] = 1;
+      }
+
+      void finish_native_frames() {
+         for (uint32_t index = 0; index < _num_functions; ++index) {
+            if (index >= _native_frame_presence.size() || !_native_frame_presence[index] ||
+                index >= _function_offsets.size() || !_function_offsets[index].second ||
+                index >= _func_body_offsets.size() || !_func_body_offsets[index].second) {
+               _compile_result->error = "incomplete module native frame coverage";
+               _had_error = true;
+               return;
+            }
+         }
+         _compile_result->entry_stack_sizes = std::move(_entry_stack_sizes);
+         _compile_result->body_stack_sizes = std::move(_body_stack_sizes);
+         _compile_result->native_stack_probe_size = 4096;
+         _compile_result->native_stack_frames_complete = true;
+      }
 
       void resolve_cross_function_relocs() {
          // Resolve pending cross-function relocations.
@@ -147,6 +181,10 @@ namespace psizam::detail {
             // are populated for this batch.
             std::vector<std::pair<uint32_t, uint32_t>> function_offsets;
             std::vector<std::pair<uint32_t, uint32_t>> body_offsets;
+            std::vector<uint64_t> entry_stack_sizes;
+            std::vector<uint64_t> body_stack_sizes;
+            uint32_t native_stack_probe_size = 0;
+            bool native_stack_frames_complete = false;
             uint32_t blob_offset = 0;  // set during between phase
          };
          auto batch_results = std::make_unique<batch_result_t[]>(num_batches);
@@ -245,6 +283,10 @@ namespace psizam::detail {
                   batch_results[batch_idx].relocations = std::move(result.relocations);
                   batch_results[batch_idx].function_offsets = std::move(result.function_offsets);
                   batch_results[batch_idx].body_offsets = std::move(result.body_offsets);
+                  batch_results[batch_idx].entry_stack_sizes = std::move(result.entry_stack_sizes);
+                  batch_results[batch_idx].body_stack_sizes = std::move(result.body_stack_sizes);
+                  batch_results[batch_idx].native_stack_probe_size = result.native_stack_probe_size;
+                  batch_results[batch_idx].native_stack_frames_complete = result.native_stack_frames_complete;
                };
 
 #ifdef __EXCEPTIONS
@@ -297,6 +339,7 @@ namespace psizam::detail {
                         auto [entry_off, entry_sz] = batch_results[b].function_offsets[f];
                         if (entry_sz != 0) {
                            _function_offsets[f] = {blob_offset + entry_off, entry_sz};
+                           record_native_frames(batch_results[b], f);
                         }
                      }
                      if (f < batch_results[b].body_offsets.size()) {
@@ -349,6 +392,8 @@ namespace psizam::detail {
 
          // Resolve cross-function relocations (negative-addend → final blob offset)
          resolve_cross_function_relocs();
+         finish_native_frames();
+         if (_had_error) return;
 
          _compile_result->relocs = std::move(_accumulated_relocs);
          _compile_result->code_blob = std::move(_accumulated_code);
@@ -430,6 +475,7 @@ namespace psizam::detail {
                auto [body_off, body_sz] = func_result.body_offsets[code_idx];
                _func_body_offsets[code_idx] = {blob_offset + body_off, body_sz};
             }
+            record_native_frames(func_result, code_idx);
          };
 
 #ifdef __EXCEPTIONS
@@ -451,6 +497,9 @@ namespace psizam::detail {
       std::vector<code_relocation> _accumulated_relocs;
       std::vector<std::pair<uint32_t, uint32_t>> _function_offsets;  // wasm_entry_N offsets
       std::vector<std::pair<uint32_t, uint32_t>> _func_body_offsets; // wasm_func_N offsets
+      std::vector<uint64_t> _entry_stack_sizes;
+      std::vector<uint64_t> _body_stack_sizes;
+      std::vector<uint8_t> _native_frame_presence;
       bool _had_error = false;
    };
 

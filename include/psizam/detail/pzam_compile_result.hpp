@@ -1,6 +1,7 @@
 #pragma once
 
 #include <psizam/detail/jit_reloc.hpp>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -13,6 +14,10 @@ namespace psizam::detail {
       std::vector<uint8_t>         code_blob;          // filled by LLVM AOT path
       std::vector<std::pair<uint32_t, uint32_t>> function_offsets; // entry wrapper (offset, size)
       std::vector<std::pair<uint32_t, uint32_t>> body_offsets;     // function body (offset, size) — LLVM only
+      std::vector<uint64_t>        entry_stack_sizes;  // native prologue bytes, LLVM only
+      std::vector<uint64_t>        body_stack_sizes;
+      uint32_t                    native_stack_probe_size = 0;
+      bool                        native_stack_frames_complete = false;
       std::string                  target_triple;       // set by caller for LLVM AOT
       std::string                  error;               // non-empty on failure (e.g. LLVM AOT)
       bool                         softfloat = false;   // use softfloat wrappers (runtime option)
