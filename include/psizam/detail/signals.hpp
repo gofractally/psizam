@@ -71,6 +71,33 @@ namespace psizam::detail {
    __attribute__((visibility("default")))
    inline thread_local std::atomic<bool> timed_run_has_timed_out{false};
 
+   // Embedders may collect diagnostics while generated frames are still live.
+   // Called only by explicit traps, never from the asynchronous signal handler.
+   // The observer must not throw; the caller owns its scoped TLS lifetime.
+   using trap_observer_t                                  = void (*)(const char*, void*) noexcept;
+   inline thread_local trap_observer_t trap_observer      = nullptr;
+   inline thread_local void*           trap_observer_data = nullptr;
+
+   // Observers run on the executing thread before the trap unwinds generated
+   // frames. Diagnostic failures must be caught by the noexcept callback so
+   // that the original trap remains authoritative. Not a signal callback.
+   class scoped_trap_observer {
+      trap_observer_t previous_observer = trap_observer;
+      void*           previous_data     = trap_observer_data;
+
+    public:
+      scoped_trap_observer(trap_observer_t observer, void* data) noexcept {
+         trap_observer_data = data;
+         trap_observer      = observer;
+      }
+      scoped_trap_observer(const scoped_trap_observer&)            = delete;
+      scoped_trap_observer& operator=(const scoped_trap_observer&) = delete;
+      ~scoped_trap_observer() {
+         trap_observer      = previous_observer;
+         trap_observer_data = previous_data;
+      }
+   };
+
 #if defined(PSIZAM_JIT_SIGNAL_DIAGNOSTICS)
    // Function table for crash diagnostics — set by ir_writer after finalize
    struct jit_func_range { uint32_t offset; uint32_t size; uint32_t func_index; };
@@ -299,6 +326,8 @@ namespace psizam::detail {
 
    template<typename E>
    [[noreturn]] inline void signal_throw(const char* msg) {
+      if (trap_observer)
+         trap_observer(msg, trap_observer_data);
       saved_exception = std::make_exception_ptr(E{msg});
       siglongjmp(*trap_jmp_ptr, -1);
    }

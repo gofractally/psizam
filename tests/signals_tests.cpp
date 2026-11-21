@@ -135,3 +135,79 @@ TEST_CASE("Trap entry restores nested state and interrupted signal masks", "[cal
       }
    }
 }
+
+TEST_CASE("Explicit trap observers restore nested scopes and executing-thread TLS",
+          "[signal_handler_throw][trap_observer]") {
+   using namespace psizam::detail;
+   REQUIRE(trap_observer == nullptr);
+   REQUIRE(trap_observer_data == nullptr);
+   unsigned outer   = 0;
+   unsigned inner   = 0;
+   auto     observe = +[](const char*, void* data) noexcept { ++*static_cast<unsigned*>(data); };
+   {
+      scoped_trap_observer first(observe, &outer);
+      REQUIRE(trap_observer_data == &outer);
+      {
+         scoped_trap_observer second(observe, &inner);
+         trap_observer("inner", trap_observer_data);
+      }
+      CHECK(trap_observer == observe);
+      CHECK(trap_observer_data == &outer);
+      bool        isolated = false;
+      std::thread worker([&] {
+         isolated = trap_observer == nullptr && trap_observer_data == nullptr;
+         scoped_trap_observer thread_scope(observe, &inner);
+         trap_observer("worker", trap_observer_data);
+      });
+      worker.join();
+      CHECK(isolated);
+      trap_observer("outer", trap_observer_data);
+   }
+   CHECK(outer == 1);
+   CHECK(inner == 2);
+   CHECK(trap_observer == nullptr);
+   CHECK(trap_observer_data == nullptr);
+}
+
+TEST_CASE("Explicit trap diagnostics preserve original errors and allocator ownership",
+          "[signal_handler_throw][trap_observer]") {
+   using namespace psizam::detail;
+   psizam::growable_allocator code;
+   psizam::wasm_allocator     memory;
+   struct observations {
+      unsigned                          calls             = 0;
+      bool                              allocator_matches = false;
+      const psizam::growable_allocator* expected;
+   } result{ 0, false, &code };
+   {
+      scoped_trap_observer observer(
+            +[](const char*, void* data) noexcept {
+               auto& value = *static_cast<observations*>(data);
+               ++value.calls;
+               value.allocator_matches = active_code_allocator == value.expected;
+               try {
+                  throw std::runtime_error("diagnostic failed");
+               } catch (...) {}
+            },
+            &result);
+      CHECK_THROWS_AS(
+            invoke_with_signal_handler([] { signal_throw<psizam::wasm_interpreter_exception>("original trap"); },
+                                       [](int) {}, code, &memory),
+            psizam::wasm_interpreter_exception);
+      CHECK(result.calls == 1);
+      CHECK(result.allocator_matches);
+      // The signal path must not call arbitrary diagnostic code.
+      CHECK_THROWS_AS(invoke_with_signal_handler(
+                            [&] {
+                               volatile auto ignored = *memory.get_base_ptr<unsigned char>();
+                               (void)ignored;
+                            },
+                            [](int) { throw test_exception{}; }, code, &memory),
+                      test_exception);
+      CHECK(result.calls == 1);
+   }
+   CHECK(trap_observer == nullptr);
+   CHECK(trap_observer_data == nullptr);
+   CHECK(active_code_allocator == nullptr);
+   CHECK_NOTHROW(invoke_with_signal_handler([] {}, [](int) {}, code, &memory));
+}
