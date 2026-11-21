@@ -324,7 +324,21 @@ if(PSIZAM_ENABLE_INSTALL)
       external/wasi/include/wasi DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
    install(DIRECTORY external/softfloat/source/include/
       DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/psizam/external/softfloat)
-   install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/psizam)
+   install(FILES LICENSE THIRD_PARTY_NOTICES.md
+      DESTINATION ${CMAKE_INSTALL_DATADIR}/psizam)
+   # Keep dependency notices with installed headers and static libraries.
+   install(FILES external/softfloat/COPYING.txt
+      DESTINATION ${CMAKE_INSTALL_DATADIR}/psizam/licenses
+      RENAME SoftFloat-COPYING.txt)
+   install(FILES external/ucc/LICENSE
+      DESTINATION ${CMAKE_INSTALL_DATADIR}/psizam/licenses
+      RENAME ucc-LICENSE.txt)
+   install(FILES external/Catch2/LICENSE.txt
+      DESTINATION ${CMAKE_INSTALL_DATADIR}/psizam/licenses
+      RENAME Catch2-LICENSE.txt)
+   install(FILES external/wasm3/LICENSE
+      DESTINATION ${CMAKE_INSTALL_DATADIR}/psizam/licenses
+      RENAME wasm3-LICENSE.txt)
    foreach(_tool pzam-compile pzam-run psizam-wasi)
       if(TARGET ${_tool})
          install(TARGETS ${_tool} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

@@ -1,6 +1,9 @@
 # Builds a downstream project using only the installed package and public API.
 function(checked)
-   execute_process(COMMAND ${ARGV} RESULT_VARIABLE result
+   # PARSE_ARGV preserves semicolons inside individual command arguments,
+   # including CMAKE_PREFIX_PATH lists passed to downstream configurations.
+   cmake_parse_arguments(PARSE_ARGV 0 command "" "" "")
+   execute_process(COMMAND ${command_UNPARSED_ARGUMENTS} RESULT_VARIABLE result
       OUTPUT_VARIABLE output ERROR_VARIABLE error)
    if(NOT result EQUAL 0)
       message(FATAL_ERROR "Command failed: ${ARGV}\n${output}\n${error}")
@@ -28,7 +31,8 @@ foreach(variant IN LISTS variants)
    set(consumer "${WORK}/consumer-${variant}")
    checked("${CMAKE_COMMAND}" -S "${SOURCE}/tests/installed-runtime" -B "${consumer}"
       -G Ninja "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_C_COMPILER=${CC}"
-      "-DCMAKE_CXX_COMPILER=${CXX}" "-DCMAKE_PREFIX_PATH=${WORK}/install"
+      "-DCMAKE_CXX_COMPILER=${CXX}"
+      "-DCMAKE_PREFIX_PATH=${WORK}/install;${PREFIX_PATH}" "-Dpsio_DIR=${PSIO_DIR}"
       "-DLLVM_DIR=${LLVM_DIR}" "-DTEST_LLVM=${variant}")
    checked("${CMAKE_COMMAND}" --build "${consumer}" -j 2)
    checked("${consumer}/runtime-consumer" "${WORK}/smoke.wasm" ${cached})

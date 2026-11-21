@@ -129,15 +129,21 @@ checks, not performance measurements.
 or allowed to pass after a crash. Repairs and measured results are documented in
 [jit-correctness.md](jit-correctness.md).
 
-The Actions workflow runs this complete execution gate on Linux x86-64 and
-macOS ARM64 for pull requests and pushes. Set the repository variable
+The **Standalone library** Actions workflow runs package/quick execution checks
+and both source and installed consumer checks on Linux x86-64 and macOS ARM64
+for pull requests and pushes. It does not enable compiler-fixture tests.
+
+The separate, manually dispatched **Compiler qualification** workflow runs the
+complete execution gate on both architectures. Set the repository variable
 `PSIZAM_COMPILER_FIXTURES_URL` to the retained reproduction archive's HTTPS
 location, or override it during manual dispatch. The extractor accepts only
 the three pinned files and verifies their content before configuration.
-No URL or wrong content fails CI; it does not silently select a smaller suite.
-The archive currently exists locally in the benchmark outputs; this checkout
-has no published remote or hosted fixture URL yet. Remote CI cannot be claimed
-as verified until those are available and the jobs actually run.
+No URL or wrong content fails compiler qualification; it does not silently
+select a smaller suite. The archive currently exists locally in the benchmark
+outputs and still needs an accessible hosted fixture URL. The standalone
+source is published at [gofractally/psizam](https://github.com/gofractally/psizam).
+A passing package job does not qualify the compiler, spec corpus or stable
+release; those gates require their own recorded passing runs.
 
 The quick gate includes 32 deterministic saved-JIT1 compile/execute combinations
 per architecture, with gas and backtrace on/off, plus malformed-input rejection.

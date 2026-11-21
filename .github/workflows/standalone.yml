@@ -1,0 +1,94 @@
+name: Standalone library
+
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: ${{ matrix.os }} / package and quick execution
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            sdk: wasi-sdk-32.0-x86_64-linux
+            sdk_sha256: 55fc523ebfbc98f69d1034fcfcb83d1ff5610cd9ab7eceef6cd097a30ba4ef93
+          - os: macos-15
+            sdk: wasi-sdk-32.0-arm64-macos
+            sdk_sha256: 383be7fe00ae04691e1859164fd99970a528c55d624b886ed59f7933898b933d
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout pinned psio
+        uses: actions/checkout@v4
+        with:
+          repository: gofractally/psio
+          ref: ff114b6a8c9265e6b5da5ffb85df1617b2b43514
+          path: validation-deps/psio
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libboost-dev libsimdjson-dev wabt python3
+          curl --fail --location --output "$RUNNER_TEMP/llvm.sh" https://apt.llvm.org/llvm.sh
+          sudo bash "$RUNNER_TEMP/llvm.sh" 22
+          echo "CC=/usr/lib/llvm-22/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=/usr/lib/llvm-22/bin/clang++" >> "$GITHUB_ENV"
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install cmake ninja boost simdjson llvm wabt python
+          echo "CC=$(brew --prefix llvm)/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=$(brew --prefix llvm)/bin/clang++" >> "$GITHUB_ENV"
+      - name: Install pinned WASI SDK
+        shell: bash
+        env:
+          SDK_NAME: ${{ matrix.sdk }}
+          SDK_SHA256: ${{ matrix.sdk_sha256 }}
+        run: |
+          curl --fail --location --output "$RUNNER_TEMP/wasi-sdk.tar.gz" "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-32/$SDK_NAME.tar.gz"
+          python3 - <<'PYTHON'
+          import hashlib, os, pathlib
+          archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'wasi-sdk.tar.gz'
+          with archive.open('rb') as stream:
+              assert hashlib.file_digest(stream, 'sha256').hexdigest() == os.environ['SDK_SHA256']
+          PYTHON
+          tar -xzf "$RUNNER_TEMP/wasi-sdk.tar.gz" -C "$RUNNER_TEMP"
+          echo "WASI_SDK=$RUNNER_TEMP/$SDK_NAME" >> "$GITHUB_ENV"
+      - name: Build and install pinned psio
+        shell: bash
+        run: |
+          cmake -S validation-deps/psio -B "$RUNNER_TEMP/psio-build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/psio-install"
+          cmake --build "$RUNNER_TEMP/psio-build" --parallel 2
+          cmake --install "$RUNNER_TEMP/psio-build"
+      - name: Verify standalone library and consumers
+        shell: bash
+        env:
+          PSIZAM_BUILD_JOBS: 2
+        run: |
+          bash scripts/verify-independent.sh "$RUNNER_TEMP/psizam-check" "$RUNNER_TEMP/psio-install" \
+            2>&1 | tee "$RUNNER_TEMP/psizam-standalone.log"
+      - name: Verify installed runtime
+        shell: bash
+        run: |
+          ctest --test-dir "$RUNNER_TEMP/psizam-check/build" \
+            --output-on-failure --no-tests=error -R '^execution\.installed-runtime$'
+      - name: Preserve validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: standalone-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/psizam-standalone.log
+            ${{ runner.temp }}/psizam-check/**/Testing/Temporary/
+          if-no-files-found: warn

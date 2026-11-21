@@ -1,12 +1,9 @@
-name: Execution validation
+name: Compiler qualification
 on:
-  pull_request:
-  push:
-    branches: [main, 'codex/**']
   workflow_dispatch:
     inputs:
       compiler_fixtures_url:
-        description: Optional override for PSIZAM_COMPILER_FIXTURES_URL
+        description: Pinned HTTPS compiler fixture archive (or set PSIZAM_COMPILER_FIXTURES_URL)
         required: false
         type: string
 

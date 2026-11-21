@@ -5,7 +5,9 @@ LLVM compilation backends. Native execution supports Linux and macOS on x86_64
 and ARM64. The core templates are header based; runtime support, debug support,
 SoftFloat and LLVM integrations also contain compiled libraries.
 
-This independent checkout was extracted from psiserve. It is under release
+The standalone repository is [gofractally/psizam](https://github.com/gofractally/psizam).
+Its history was extracted from psiserve and includes subsequent standalone
+runtime, packaging and validation improvements. It is under release
 preparation, not a newly certified stable release. See [extraction](docs/extraction.md)
 for source provenance and [compiler bootstrap](docs/compiler-bootstrap.md) for the
 Wasm compiler chain and its verification gate.
@@ -54,6 +56,21 @@ WASI_SDK=/path/to/wasi-sdk CC=/path/to/clang CXX=/path/to/clang++ \
 This check excludes the external WebAssembly spec corpus and long-running
 fuzz/benchmark suites. Passing it does not establish complete proposal support,
 security certification, or success of the full LLVM bootstrap.
+
+The [standalone publication record](docs/github-publication.md) records the
+source provenance and initial native package checks.
+
+The **Standalone library** GitHub workflow runs these native package and quick
+execution checks on Linux x86-64 and macOS ARM64 for pushes and pull requests,
+using an explicitly pinned psio commit and WASI SDK. It also tests both installed
+and source consumers.
+
+The separate **Compiler qualification** workflow is manually dispatched. It
+requires a pinned HTTPS compiler-fixture archive through its input or the
+`PSIZAM_COMPILER_FIXTURES_URL` repository variable; the checked-in manifest
+verifies the fixture contents. Missing fixtures fail that workflow. This is a
+required release qualification gate, separate from ordinary package CI; a green
+standalone workflow does not imply compiler qualification or a stable release.
 
 [LLVM O2 saved-PZAM spec tests](docs/aot-spec-tests.md) exercise the actual AOT
 compiler, file serialization, loading and scalar/SIMD assertions. They are

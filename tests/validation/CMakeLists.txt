@@ -158,11 +158,19 @@ add_dependencies(check-execution psizam_resource_runner)
 add_dependencies(psizam_execution_driver psizam_resource_runner psizam_pzam_compile_tests)
 
 if(PSIZAM_ENABLE_INSTALL)
+   # Source psio is installed alongside psizam; only imported psio needs
+   # its existing package directory carried into the downstream build.
+   get_target_property(_psio_imported psio IMPORTED)
+   set(_installed_runtime_psio_dir "")
+   if(_psio_imported)
+      set(_installed_runtime_psio_dir "${psio_DIR}")
+   endif()
    add_test(NAME execution.installed-runtime
       COMMAND "${CMAKE_COMMAND}" "-DBUILD=${CMAKE_BINARY_DIR}"
          "-DSOURCE=${PSIZAM_SOURCE_DIR}" "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/installed-runtime"
          "-DCC=${CMAKE_C_COMPILER}" "-DCXX=${CMAKE_CXX_COMPILER}"
          "-DLLVM_DIR=${LLVM_DIR}" "-DHAVE_LLVM=${PSIZAM_ENABLE_LLVM}"
+         "-DPREFIX_PATH=${CMAKE_PREFIX_PATH}" "-DPSIO_DIR=${_installed_runtime_psio_dir}"
          "-DWAT2WASM=${PSIZAM_WAT2WASM}"
          "-DCOMPILER=$<TARGET_FILE:pzam-compile>" "-DARCH=${_execution_arch}"
          -P "${CMAKE_CURRENT_SOURCE_DIR}/installed_runtime.cmake")

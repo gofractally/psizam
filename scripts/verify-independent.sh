@@ -5,9 +5,14 @@ work=${1:?usage: verify-independent.sh BUILD_DIRECTORY PSIO_INSTALL_PREFIX}
 psio_prefix=${2:?psio install prefix is required}
 mkdir -p "$work"
 work=$(cd "$work" && pwd)
-cmake -S "$root" -B "$work/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH="$psio_prefix" -DCMAKE_INSTALL_PREFIX="$work/install" \
-  -DPSIZAM_ENABLE_TESTS=ON -DPSIZAM_ENABLE_SPEC_TESTS=OFF -DPSIZAM_ENABLE_TOOLS=ON
+configure_args=(-S "$root" -B "$work/build" -G Ninja -DCMAKE_BUILD_TYPE=Release
+  "-DCMAKE_PREFIX_PATH=$psio_prefix" "-DCMAKE_INSTALL_PREFIX=$work/install"
+  -DPSIZAM_ENABLE_TESTS=ON -DPSIZAM_ENABLE_SPEC_TESTS=OFF -DPSIZAM_ENABLE_TOOLS=ON)
+wasi_sdk=${PSIZAM_WASI_SDK:-${WASI_SDK:-}}
+if [[ -n "$wasi_sdk" ]]; then
+  configure_args+=("-DPSIZAM_WASI_SDK=$wasi_sdk")
+fi
+cmake "${configure_args[@]}"
 # The quick CTest selection includes every registered acceptance executable;
 # building a hand-maintained target list can leave newer gates unbuilt.
 cmake --build "$work/build" --parallel "${PSIZAM_BUILD_JOBS:-4}"
