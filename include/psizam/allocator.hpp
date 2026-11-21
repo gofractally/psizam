@@ -773,6 +773,9 @@ namespace psizam {
       static std::int32_t table0_size_offset() { return globals_end() - 12; }
       // Current linear memory size in bytes (8-byte uint64_t), used by checked mode
       static std::int32_t mem_size_offset() { return globals_end() - 20; }
+      static std::size_t inline_table_bytes() {
+         return static_cast<std::size_t>(mem_size_offset() - table_offset());
+      }
       template <typename T>
       void alloc(size_t = 1) {}
       template <typename T>
@@ -859,6 +862,13 @@ namespace psizam {
       // 8-byte uint64_t at offset globals_end() - 20.
       static std::int32_t mem_size_offset() {
          return globals_end() - 20;
+      }
+
+      // The inline table ends before all prefix metadata, including memory size.
+      // Derive its extent from the first metadata slot instead of assuming that
+      // only the globals pointer occupies the end of the table page.
+      static std::size_t inline_table_bytes() {
+         return static_cast<std::size_t>(mem_size_offset() - table_offset());
       }
 
       bool is_external() const { return external_; }

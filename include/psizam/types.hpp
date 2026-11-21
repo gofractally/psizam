@@ -495,7 +495,7 @@ namespace psizam {
 #else
          if (i >= mod.tables.size()) return false;
          // Large tables that don't fit in the prefix area need heap allocation + pointer
-         bool large = mod.tables[i].limits.initial * sizeof(table_entry) > (wasm_allocator::table_size()) - sizeof(void*);
+         bool large = mod.tables[i].limits.initial > wasm_allocator::inline_table_bytes() / sizeof(table_entry);
          // Growable table 0 needs indirect because table.grow moves entries to the heap.
          // The JIT must use pointer indirection so the updated pointer is followed.
          bool growable = (i == 0) &&

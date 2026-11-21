@@ -24,7 +24,9 @@
 namespace psizam {
 
    static constexpr uint32_t PZAM_MAGIC   = 0x4d415a50; // "PZAM" in little-endian
-   static constexpr uint32_t PZAM_VERSION = 4;
+   // Version 5 reserves the full inline-table metadata tail. Older native code
+   // can embed a different inline/indirect layout decision and must be rebuilt.
+   static constexpr uint32_t PZAM_VERSION = 5;
 
    // ---- Architecture ----
 

@@ -550,11 +550,24 @@ foreach(fixture table-growth-limit table-growth-unbounded)
          -o "${CMAKE_CURRENT_BINARY_DIR}/${fixture}.wasm"
       DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${fixture}.wat" VERBATIM)
 endforeach()
-add_executable(psizam_table_limit_tests main.cpp table_growth_limit_tests.cpp
+set(table_tail_fixtures)
+foreach(TABLE_TAIL_SIZE 255 1023 4095)
+   math(EXPR TABLE_TAIL_LAST "${TABLE_TAIL_SIZE} - 1")
+   configure_file(table-tail.wat.in "table-tail-${TABLE_TAIL_SIZE}.wat" @ONLY)
+   add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/table-tail-${TABLE_TAIL_SIZE}.wasm"
+      COMMAND "${PSIZAM_WAT2WASM}" "${CMAKE_CURRENT_BINARY_DIR}/table-tail-${TABLE_TAIL_SIZE}.wat"
+         -o "${CMAKE_CURRENT_BINARY_DIR}/table-tail-${TABLE_TAIL_SIZE}.wasm"
+      DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/table-tail-${TABLE_TAIL_SIZE}.wat" VERBATIM)
+   list(APPEND table_tail_fixtures "${CMAKE_CURRENT_BINARY_DIR}/table-tail-${TABLE_TAIL_SIZE}.wasm")
+endforeach()
+add_executable(psizam_table_limit_tests main.cpp table_growth_limit_tests.cpp ${table_tail_fixtures}
    "${CMAKE_CURRENT_BINARY_DIR}/table-growth-limit.wasm"
    "${CMAKE_CURRENT_BINARY_DIR}/table-growth-unbounded.wasm")
+target_sources(psizam_pzam_compile_tests PRIVATE ${table_tail_fixtures})
+target_compile_definitions(psizam_pzam_compile_tests PRIVATE TABLE_TAIL_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(psizam_table_limit_tests PRIVATE psizam psizam-exec Catch2::Catch2)
 target_compile_definitions(psizam_table_limit_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
+   TABLE_TAIL_DIR="${CMAKE_CURRENT_BINARY_DIR}"
    TABLE_LIMIT_WASM="${CMAKE_CURRENT_BINARY_DIR}/table-growth-limit.wasm"
    TABLE_UNBOUNDED_WASM="${CMAKE_CURRENT_BINARY_DIR}/table-growth-unbounded.wasm")
 add_test(NAME execution.table-growth-policy COMMAND psizam_table_limit_tests)

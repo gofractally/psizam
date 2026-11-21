@@ -148,6 +148,8 @@ inline bool derive_reverse_host_args(uint8_t opt_tier) noexcept {
 // `jit_allocator::instance().free(...)`).
 inline pzam_load_result load_pzam(const pzam_file& pzam)
 {
+   PSIZAM_ASSERT(pzam.magic == PZAM_MAGIC && pzam.format_version == PZAM_VERSION,
+                 wasm_parse_exception, "pzam_loader: incompatible PZAM format version");
    const pzam_code_section& cs = pick_code_section(pzam);
    PSIZAM_ASSERT(pzam_page_layout_compatible(cs), wasm_parse_exception, pzam_page_layout_error);
 

@@ -87,3 +87,11 @@ TEST_CASE("typed API: export proxy type is constructible", "[pzam_typed]") {
    using proxy_t = pzam_export_proxy<test_exports>;
    static_assert(!std::is_same_v<proxy_t, void>);
 }
+
+TEST_CASE("typed API rejects old native table layouts before restoring metadata", "[pzam_typed]") {
+   pzam_file file;
+   file.format_version = 4;
+   test_host host;
+   CHECK_THROWS_WITH((pzam_instance<test_host, test_exports>(std::move(file), host)),
+                     "pzam_instance: incompatible PZAM format version");
+}

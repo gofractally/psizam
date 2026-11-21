@@ -74,6 +74,39 @@ TEST_CASE("JIT PZAM rejects an incompatible memory page layout", "[pzam-compile]
    CHECK_THROWS_WITH(psizam::detail::load_pzam(file), pzam_page_layout_error);
 }
 
+TEST_CASE("PZAM loader rejects native code compiled with the old table layout", "[pzam-compile]") {
+   auto file = pzam_load(pzam_compile(add_wasm, {.tier=pzam_tier_flags::jit2}));
+   file.format_version = 4;
+   CHECK_THROWS_WITH(psizam::detail::load_pzam(file), "pzam_loader: incompatible PZAM format version");
+   // Simulate persisted version-4 bytes through the codec, bypassing the writer's
+   // deliberate version check. Both encoded and already-decoded entry points reject.
+   auto bytes = psio::encode(psio::pssz{}, file);
+   CHECK_FALSE(pzam_validate(bytes));
+   CHECK_THROWS(pzam_load(bytes));
+}
+
+TEST_CASE("Saved JIT code preserves the final table entry after memory growth", "[pzam-compile][table-tail]") {
+   for (auto tier : {pzam_tier_flags::jit1, pzam_tier_flags::jit2}) {
+      for (auto size : {255u, 1023u, 4095u}) {
+         CAPTURE(uint32_t(tier), size);
+         auto wasm = read_wasm(std::string(TABLE_TAIL_DIR) + "/table-tail-" + std::to_string(size) + ".wasm");
+         auto bytes = pzam_compile(wasm, {.tier=tier});
+         auto loaded = psizam::detail::load_pzam(pzam_load(bytes));
+         std::shared_ptr<void> owner(loaded.exec_code, [](void* p) { jit_allocator::instance().free(p); });
+         wasm_allocator memory;
+         psizam::detail::jit_execution_context<> context(loaded.mod, 8192);
+         context.set_wasm_allocator(&memory);
+         context.reset();
+         for (auto name : {"last", "grow-and-last", "last"}) {
+            auto value = context.execute(nullptr, psizam::detail::jit_visitor{nullptr},
+                                         loaded.mod.get_exported_function(name));
+            REQUIRE(value);
+            CHECK(value->to_ui32() == 42);
+         }
+      }
+   }
+}
+
 TEST_CASE("pzam_compile emits actual code for each requested target and tier", "[pzam-compile]") {
    auto tiers = pzam_tier_flags::all_jit;
 #ifdef PSIZAM_ENABLE_LLVM_BACKEND

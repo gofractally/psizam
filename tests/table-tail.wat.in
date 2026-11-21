@@ -1,0 +1,15 @@
+(module
+  (type $answer (func (result i32)))
+  (table @TABLE_TAIL_SIZE@ @TABLE_TAIL_SIZE@ funcref)
+  (memory 1 2)
+  (func $answer (type $answer) (result i32) i32.const 42)
+  (elem (i32.const @TABLE_TAIL_LAST@) $answer)
+  (func (export "last") (result i32)
+    i32.const @TABLE_TAIL_LAST@
+    call_indirect (type $answer))
+  (func (export "grow-and-last") (result i32)
+    i32.const 1
+    memory.grow
+    drop
+    i32.const @TABLE_TAIL_LAST@
+    call_indirect (type $answer)))

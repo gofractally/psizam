@@ -17,7 +17,7 @@ TEST_CASE("PZAM uses the public psio pSSZ codec", "[pzam-format]") {
    CHECK(bytes == psio::encode(psio::pssz{}, file));
    REQUIRE(psio::validate<pzam_file>(psio::pssz{}, bytes).ok());
    REQUIRE(pzam_validate(bytes));
-   const std::vector<char> prefix{'P','Z','A','M', 4,0,0,0};
+   const std::vector<char> prefix{'P','Z','A','M', 5,0,0,0};
    REQUIRE(bytes.size() >= prefix.size());
    CHECK(std::equal(prefix.begin(), prefix.end(), bytes.begin()));
    CHECK(pzam_load(bytes).metadata.wit == std::nullopt);
@@ -74,7 +74,7 @@ TEST_CASE("PZAM validates identity and offsets before decoding", "[pzam-format]"
       CHECK_FALSE(pzam_validate(truncated));
       CHECK_THROWS(pzam_load(truncated));
    }
-   for (auto [offset, value] : {std::pair{0u, 0u}, {4u, 0u}, {4u, PZAM_VERSION + 1},
+   for (auto [offset, value] : {std::pair{0u, 0u}, {4u, 0u}, {4u, 4u}, {4u, PZAM_VERSION + 1},
                                {40u, 0u}, {40u, 49u}, {40u, UINT32_MAX},
                                {44u, 0u}, {44u, UINT32_MAX}}) {
       auto corrupt = bytes;

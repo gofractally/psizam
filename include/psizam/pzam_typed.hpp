@@ -187,6 +187,8 @@ namespace psizam {
       pzam_instance(pzam_file&& pzam, Imports& host, const std::string& import_module = "env")
          : _mod(), _ctx(_mod, 8192), _host(&host)
       {
+         if (pzam.magic != PZAM_MAGIC || pzam.format_version != PZAM_VERSION)
+            throw std::runtime_error("pzam_instance: incompatible PZAM format version");
          // Find code section for this platform
          auto expected_arch =
 #if defined(__x86_64__)
