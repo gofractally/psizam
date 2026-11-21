@@ -31,7 +31,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: gofractally/psio
-          ref: ff114b6a8c9265e6b5da5ffb85df1617b2b43514
+          ref: f6b10ec7d7bba4022cd1c9394f88ad1440b4b2b7
           path: validation-deps/psio
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
