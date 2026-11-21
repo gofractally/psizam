@@ -8,6 +8,20 @@ if(PSIZAM_ENABLE_FUZZ_TESTS)
 endif()
 
 enable_testing()
+# WABT removes opt-in switches when proposals become enabled by default.
+# Keep compiling the required fixtures; an unsupported opcode must still fail.
+find_program(PSIZAM_WAT2WASM wat2wasm REQUIRED)
+execute_process(COMMAND "${PSIZAM_WAT2WASM}" --help
+   OUTPUT_VARIABLE _wat2wasm_help RESULT_VARIABLE _wat2wasm_help_result)
+if(NOT _wat2wasm_help_result EQUAL 0)
+   message(FATAL_ERROR "Cannot inspect wat2wasm feature switches: ${PSIZAM_WAT2WASM}")
+endif()
+set(PSIZAM_WAT2WASM_FEATURE_FLAGS)
+foreach(_flag --enable-tail-call --enable-relaxed-simd)
+   if(_wat2wasm_help MATCHES "${_flag}([ \r\n]|$)")
+      list(APPEND PSIZAM_WAT2WASM_FEATURE_FLAGS "${_flag}")
+   endif()
+endforeach()
 add_subdirectory(validation)
 
 add_executable(psizam_compile_reactor_test compile_reactor_test.cpp)
@@ -521,7 +535,7 @@ target_compile_definitions(psizam_jit1_backtrace_tests PRIVATE CATCH_CONFIG_NO_P
    JIT1_BACKTRACE_WASM="${CMAKE_CURRENT_BINARY_DIR}/jit1-backtrace.wasm")
 find_program(PSIZAM_BACKTRACE_WAT2WASM wat2wasm REQUIRED)
 add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/jit1-backtrace.wasm"
-   COMMAND "${PSIZAM_BACKTRACE_WAT2WASM}" --enable-relaxed-simd
+   COMMAND "${PSIZAM_BACKTRACE_WAT2WASM}" ${PSIZAM_WAT2WASM_FEATURE_FLAGS}
       "${CMAKE_CURRENT_SOURCE_DIR}/jit1-backtrace.wat" -o "${CMAKE_CURRENT_BINARY_DIR}/jit1-backtrace.wasm"
    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/jit1-backtrace.wat" VERBATIM)
 add_custom_target(psizam_jit1_backtrace_fixture DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/jit1-backtrace.wasm")

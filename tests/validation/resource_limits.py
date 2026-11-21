@@ -18,6 +18,8 @@ def main():
     for arg in ['runner', 'compiler', 'pzam-run', 'wat2wasm', 'arch', 'llvm']:
         p.add_argument('--'+arg, required=True)
     a = p.parse_args()
+    wat_help = checked([a.wat2wasm, '--help']).stdout
+    wat_flags = ['--enable-tail-call'] if '--enable-tail-call' in wat_help else []
     modes = [('jit', False), ('jit1', True), ('jit2', False), ('jit2', True)]
     if a.llvm == 'ON': modes += [('llvm', False), ('llvm', True)]
     count = 0
@@ -31,7 +33,7 @@ def main():
         }
         for name, text in sources.items():
             (work/(name+'.wat')).write_text(text)
-            checked([a.wat2wasm, '--enable-tail-call', work/(name+'.wat'), '-o', work/(name+'.wasm')])
+            checked([a.wat2wasm, *wat_flags, work/(name+'.wat'), '-o', work/(name+'.wasm')])
         for mode, saved in modes:
             for profile in ['none', 'gas', 'timeout']:
                 policy = profile

@@ -31,7 +31,7 @@ set(_wasms)
 foreach(_fixture IN LISTS _fixtures)
    set(_wasm "${CMAKE_CURRENT_BINARY_DIR}/${_fixture}.wasm")
    add_custom_command(OUTPUT "${_wasm}"
-      COMMAND "${PSIZAM_WAT2WASM}" --enable-tail-call --enable-relaxed-simd "${CMAKE_CURRENT_SOURCE_DIR}/${_fixture}.wat" -o "${_wasm}"
+      COMMAND "${PSIZAM_WAT2WASM}" ${PSIZAM_WAT2WASM_FEATURE_FLAGS} "${CMAKE_CURRENT_SOURCE_DIR}/${_fixture}.wat" -o "${_wasm}"
       DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${_fixture}.wat" VERBATIM)
    list(APPEND _wasms "${_wasm}")
 endforeach()
