@@ -57,7 +57,7 @@ namespace psizam::detail {
 // `exec_code` via `jit_allocator::instance().free(exec_code)` when done.
 // `mod` is movable; the caller is expected to take it by value.
 struct pzam_load_result {
-   module   mod;                       // restored module with code mapped
+   psizam::module mod;                 // restored module with code mapped
    void*    exec_code            = nullptr;
    std::size_t code_alloc_size   = 0;
    std::size_t total_code_size   = 0;

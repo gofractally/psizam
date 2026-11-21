@@ -70,7 +70,7 @@ static bool compile_wasm(
       std::uint32_t compile_threads = 0,
       const std::string& dump_layout = {}, bool gas_metering = true) {
 
-   module mod;
+   psizam::module mod;
    mod.allocator.use_default_memory();
 
    pzam_compile_result compile_result;

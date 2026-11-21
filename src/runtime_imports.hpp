@@ -87,7 +87,7 @@ inline std::vector<unresolved_import> check_module_imports(const module& mod,
 
 inline std::vector<unresolved_import> check_wasm_imports(wasm_code wasm,
                                                        const host_function_table& table) {
-   module mod;
+   psizam::module mod;
    mod.allocator.use_default_memory();
    null_debug_info debug;
    binary_parser<null_writer, default_options, null_debug_info> parser(

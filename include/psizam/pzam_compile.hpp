@@ -161,7 +161,7 @@ namespace psizam {
       inline void compile_pzam_section(std::vector<uint8_t>& wasm, pzam_file& file,
             pzam_arch arch, pzam_opt_tier tier, bool softfloat, bool backtrace,
             int opt_level = 2, bool gas_metering = false) {
-         module mod;
+         psizam::module mod;
          mod.allocator.use_default_memory();
          pzam_compile_result result;
          result.target_triple = arch == pzam_arch::x86_64

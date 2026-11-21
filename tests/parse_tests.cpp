@@ -13,7 +13,7 @@ using namespace psizam;
 using namespace psizam::detail;
 
 TEST_CASE("small parse test", "[small_parse_test]") {
-   module mod;
+   psizam::module mod;
    binary_parser bp{mod.allocator};
    wasm_code error = { 0x01, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00 };
    wasm_code_ptr error_ptr( error.data(), 4 );
@@ -84,7 +84,7 @@ BOOST_AUTO_TEST_CASE(actual_wasm_test) {
       {
          memory_manager::set_memory_limits( 32*1024*1024 );
          binary_parser bp;
-         module mod;
+         psizam::module mod;
          wasm_code code = read_wasm( "wasms/system.wasm" );
          wasm_code_ptr code_ptr(code.data(), 0);
          bp.parse_module( code, mod );

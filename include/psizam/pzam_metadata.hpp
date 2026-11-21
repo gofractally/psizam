@@ -370,7 +370,7 @@ namespace psizam {
    /// Reconstruct a runtime module from serialized metadata.
    /// The returned module has no compiled code — that comes from the code section.
    inline module restore_module(const pzam_module_metadata& meta) {
-      module mod;
+      psizam::module mod;
 
       // --- Types ---
       mod.types.reserve(meta.types.size());

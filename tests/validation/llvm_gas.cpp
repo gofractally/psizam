@@ -44,7 +44,7 @@ class inspect_writer : public ir_writer {
 };
 
 struct translated_fixture {
-   module mod;
+   psizam::module mod;
    std::unique_ptr<llvm_ir_translator> translator;
    translated_fixture(bool meter, llvm_translate_options options) {
       auto wasm = read_fixture();

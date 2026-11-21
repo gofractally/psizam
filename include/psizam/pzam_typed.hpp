@@ -175,7 +175,7 @@ namespace psizam {
    /// A loaded and ready-to-execute .pzam instance with typed imports and exports.
    template<typename Imports, typename Exports>
    class pzam_instance {
-      module                    _mod;
+      psizam::module            _mod;
       wasm_allocator            _wa;
       detail::jit_execution_context<>   _ctx;
       host_function_table       _table;

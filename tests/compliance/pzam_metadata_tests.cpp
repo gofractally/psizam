@@ -13,7 +13,7 @@ using namespace psizam::detail;
 // ── Helper: build a minimal module with known data ──────────────────────────
 
 static module make_test_module() {
-   module mod;
+   psizam::module mod;
 
    // Types
    func_type ft0;

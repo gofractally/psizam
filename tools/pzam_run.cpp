@@ -251,7 +251,7 @@ int pzam_run_main(int argc, char** argv) {
    }
 
    // Restore module from embedded metadata — no .wasm needed
-   module mod = restore_module(pzam.metadata);
+   psizam::module mod = restore_module(pzam.metadata);
    mod.gas_metering = cs->instrumentation.gas_metering != 0;
    if (explicit_limits && ((limits.policy == cpu_limit::gas || limits.policy == cpu_limit::timeout_poll) != mod.gas_metering)) {
       std::cerr << "Error: artifact gas instrumentation does not match requested CPU policy\n";

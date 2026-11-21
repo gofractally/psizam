@@ -97,7 +97,7 @@ int main(int argc, const char** argv) {
 using namespace psizam::detail;
    auto code = read_wasm(filename);
    nm_debug_info info;
-   module mod;
+   psizam::module mod;
    binary_parser<null_writer, nm_options, nm_debug_info> parser(mod.allocator);
    parser.parse_module(code, mod, info);
    {

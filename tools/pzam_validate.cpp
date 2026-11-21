@@ -55,7 +55,7 @@ static bool validate_wasm(const std::string& path) {
       return false;
    }
 
-   module mod;
+   psizam::module mod;
    mod.allocator.use_default_memory();
    null_debug_info debug;
 

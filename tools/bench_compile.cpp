@@ -40,7 +40,7 @@ template<typename IrWriter>
 static bool try_compile(std::vector<uint8_t>& wasm_bytes,
                         pzam_arch target_arch,
                         const std::string& target_triple = {}) {
-   module mod;
+   psizam::module mod;
    mod.allocator.use_default_memory();
 
    pzam_compile_result compile_result;
