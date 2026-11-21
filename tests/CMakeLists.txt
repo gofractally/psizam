@@ -12,12 +12,14 @@ enable_testing()
 add_executable(psizam_proper_tail_tests proper_tail_tests.cpp)
 target_link_libraries(psizam_proper_tail_tests PRIVATE psizam psizam-exec Catch2::Catch2)
 target_compile_definitions(psizam_proper_tail_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
-   PROPER_TAIL_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail.wasm")
+   PROPER_TAIL_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail.wasm"
+   PROPER_TAIL_LARGE_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wasm")
 add_test(NAME psizam_proper_tail_tests COMMAND psizam_proper_tail_tests)
 set_tests_properties(psizam_proper_tail_tests PROPERTIES TIMEOUT 60 LABELS "execution;resource;abi")
 # WABT removes opt-in switches when proposals become enabled by default.
 # Keep compiling the required fixtures; an unsupported opcode must still fail.
 find_program(PSIZAM_WAT2WASM wat2wasm REQUIRED)
+find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter)
 execute_process(COMMAND "${PSIZAM_WAT2WASM}" --help
    OUTPUT_VARIABLE _wat2wasm_help RESULT_VARIABLE _wat2wasm_help_result)
 if(NOT _wat2wasm_help_result EQUAL 0)
@@ -35,6 +37,14 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/proper_tail.wasm"
    DEPENDS proper_tail.wat VERBATIM)
 add_custom_target(psizam_proper_tail_fixture DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/proper_tail.wasm")
 add_dependencies(psizam_proper_tail_tests psizam_proper_tail_fixture)
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wasm"
+   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/generate_proper_tail_large.py"
+      "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wat"
+   COMMAND "${PSIZAM_WAT2WASM}" ${PSIZAM_WAT2WASM_FEATURE_FLAGS}
+      "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wat" -o "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wasm"
+   DEPENDS generate_proper_tail_large.py VERBATIM)
+add_custom_target(psizam_proper_tail_large_fixture DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wasm")
+add_dependencies(psizam_proper_tail_tests psizam_proper_tail_large_fixture)
 add_subdirectory(validation)
 
 add_executable(psizam_compile_reactor_test compile_reactor_test.cpp)

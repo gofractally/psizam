@@ -15,6 +15,22 @@ tail paths remain until the next checkpoint. Existing serialized native
 artifacts use the old private ABI and must not be reused with changed code.
 The integrating artifact contract must identify and reject that mismatch.
 
+The second checkpoint replaces every JIT1 AArch64 direct/indirect tail,
+including imports, without a call/return fallback. It consumes the separately
+reviewed common logical byte-stack dependency. Its local focused checks include
+100,000 signature-changing cycles, count and params-counted byte modes, backtrace
+mode, imported targets, nested host entry/failure, vector and multiple results,
+traps and reuse, and a 301-parameter fixture exceeding 4095 native argument bytes.
+The parameter-copy loop reads payload words only and copies high-to-low. The
+existing large-SP add/sub emitter is corrected to the AArch64 extended-register
+encoding; the previous words address XZR rather than SP. The large ordinary
+return fixture specifically exercises the corrected large positive cleanup.
+The independent interpreter metadata supplies the exact boundary-budget oracle.
+Dynamic nonnull table mutation and saved import-thunk reconstruction remain
+separate integration prerequisites. Other native backends and LLVM have not yet
+been ported by this checkpoint, so the new long-tail matrix is not qualified on
+those targets.
+
 For frame replacement, let `B` be the current frame pointer, `M` its incoming
 native argument bytes and `K` the target's argument bytes. The retained ordinary
 caller continuation expects completion at `S = B + 16 + M`. Stage the target

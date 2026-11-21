@@ -838,54 +838,64 @@ namespace psizam::detail {
          emit_check_call_depth_end();
       }
 
-      // Tail calls: narrow TCO when callee is an internal function with a
-      // signature identical to the current function's and no params. Falls back
-      // to call+return for all other cases (imports, mismatched sigs, any
-      // params, stack-bytes-limit mode). Frame-reuse for the narrow case means
-      // deep return_call chains no longer blow the native stack.
-      void emit_tail_call(const func_type& ft, uint32_t funcnum) {
-         uint32_t imported_count = _mod.get_imported_functions_size();
-         bool is_import = funcnum < imported_count;
-         bool same_sig = _ft
-             && ft.param_types == _ft->param_types
-             && ft.return_types == _ft->return_types;
-         bool tco_ok = !is_import
-             && same_sig
-             && ft.param_types.empty()
-             && !_stack_limit_is_bytes;
-         if (!tco_ok) {
-            emit_tail_byte_adjust(false);
-            emit_call(ft, funcnum);
-            emit_tail_byte_adjust(true);
-            return;
-         }
+      // Replace the current activation while preserving its ordinary caller's
+      // completion SP. Arguments have already been staged on the operand stack.
+      // Only payload words are copied; 16-byte native slot padding is not read.
+      // X15, when used for an indirect target, survives this sequence.
+      void emit_tail_replace_frame(const func_type& ft) {
          invalidate_recent_ops();
-         // Restore caller's frame — matches emit_epilogue's teardown.
-         // MOV SP, X29
-         emit32(0x910003BF);
-         // LDP X29, X30, [SP], #16
-         emit32(0xA8C17BFD);
-         // B callee (patched via register_call). Callee runs its own prologue
-         // on the restored stack so deep chains don't grow the native stack.
+         emit_tail_byte_adjust(false);
+         const uint32_t incoming = native_param_bytes(*_ft);
+         const uint32_t outgoing = native_param_bytes(ft);
+         PSIZAM_ASSERT(incoming <= INT32_MAX - 16, wasm_parse_exception,
+                       "native tail parameter area too large");
+         emit32(0xA9400000 | (X14 << 10) | (FP << 5) | X13); // saved FP, LR
+         emit_add_signed_imm(X10, FP, static_cast<int32_t>(incoming + 16)); // S
+         if (outgoing) {
+            emit32(0x910003E9); // MOV X9, SP
+            emit_add_signed_imm(X9, X9, static_cast<int32_t>(outgoing)); // source end
+            emit_mov_imm32(X11, outgoing / 16);
+            auto* loop = code;
+            emit32(0xD1000000 | (16 << 10) | (X9 << 5) | X9);
+            emit32(0xD1000000 | (16 << 10) | (X10 << 5) | X10);
+            emit32(0xF9400000 | (X9 << 5) | X12);
+            emit32(0xF9000000 | (X10 << 5) | X12);
+            emit32(0x71000000 | (1 << 10) | (X11 << 5) | X11); // SUBS W11
+            auto* branch = code;
+            emit32(0x54000001); // B.NE loop
+            fix_branch(branch, loop);
+         }
+         emit32(0x91000000 | (X10 << 5) | SP); // SP = S - outgoing
+         emit32(0xAA0003E0 | (X13 << 16) | FP);
+         emit32(0xAA0003E0 | (X14 << 16) | X30);
+      }
+
+      void emit_tail_call(const func_type& ft, uint32_t funcnum) {
+         emit_validate_watermark();
+         emit_tail_replace_frame(ft);
+         // Target runs its full prologue, including local initialization and
+         // logical/gas admission. Imported targets use the same private ABI.
          void* branch = code;
          emit32(0x14000000);
          register_call(branch, funcnum);
       }
       void emit_tail_call_indirect(const func_type& ft, uint32_t functypeidx, uint32_t table_idx = 0) {
-         bool same_sig = _ft
-             && ft.param_types == _ft->param_types
-             && ft.return_types == _ft->return_types;
-         bool tco_ok = same_sig
-             && ft.param_types.empty()
-             && !_stack_limit_is_bytes
-             && table_idx == 0;
-         if (!tco_ok) {
-            emit_tail_byte_adjust(false);
-            emit_call_indirect(ft, functypeidx, table_idx);
-            emit_tail_byte_adjust(true);
+         emit_validate_watermark();
+         invalidate_recent_ops();
+         if (table_idx != 0) {
+            emit_pop_x(X3);
+            emit_save_context();
+            emit32(0xAA1303E0); // context
+            emit_mov_imm32(X1, functypeidx);
+            emit_mov_imm32(X2, table_idx);
+            emit_call_c_function(&__psizam_resolve_indirect);
+            emit_restore_context();
+            emit_cbz_to_handler64(X0, call_indirect_handler);
+            emit32(0xAA0003EF); // MOV X15, X0
+            emit_tail_replace_frame(ft);
+            emit32(0xD61F01E0); // BR X15
             return;
          }
-         invalidate_recent_ops();
          // Pop element index into X0.
          emit_pop_x(X0);
          // Bounds check.
@@ -911,12 +921,9 @@ namespace psizam::detail {
          emit32(0xB9400008 | (X0 << 5)); // LDR W8, [X0]
          emit_cmp_imm32(X8, functypeidx);
          emit_branch_to_handler(COND_NE, type_error_handler);
-         // Load function pointer into X8.
-         emit32(0xF9400408 | (X0 << 5)); // LDR X8, [X0, #8]
-         // Restore caller's frame, then branch without link.
-         emit32(0x910003BF); // MOV SP, X29
-         emit32(0xA8C17BFD); // LDP X29, X30, [SP], #16
-         emit32(0xD61F0100); // BR X8
+         emit32(0xF9400400 | (X0 << 5) | X15); // LDR X15, [X0, #8]
+         emit_tail_replace_frame(ft);
+         emit32(0xD61F01E0); // BR X15
       }
 
       // ===================================================================
@@ -4576,16 +4583,16 @@ namespace psizam::detail {
                emit32(0x910003FF | (static_cast<uint32_t>(imm) << 10));
             } else {
                emit_mov_imm64(X8, imm);
-               emit32(0x8B0803FF); // ADD SP, SP, X8
+               emit32(0x8B2863FF); // ADD SP, SP, X8, UXTX (SP needs extended form)
             }
          } else {
-            uint32_t neg = static_cast<uint32_t>(-imm);
+            uint32_t neg = static_cast<uint32_t>(-static_cast<int64_t>(imm));
             if (neg <= 4095) {
                // SUB SP, SP, #neg
                emit32(0xD10003FF | (neg << 10));
             } else {
                emit_mov_imm64(X8, neg);
-               emit32(0xCB0803FF); // SUB SP, SP, X8
+               emit32(0xCB2863FF); // SUB SP, SP, X8, UXTX
             }
          }
       }
