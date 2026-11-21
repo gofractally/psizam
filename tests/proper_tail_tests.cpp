@@ -153,3 +153,17 @@ TEST_CASE("Private guest cleanup preserves ordinary call continuations and retur
       CHECK(vm.call_with_return("env", "ordinary_bits", bits)->to_ui64() == bits);
    CHECK(vm.call_with_return("env", "ordinary")->to_ui64() == 3155);
 }
+
+TEMPLATE_TEST_CASE("Shared funcref resolution preserves dynamic tail targets", "[proper-tail][table]",
+                   psizam::interpreter, psizam::jit, psizam::jit2) {
+   functions::add<&host>("env", "host");
+   functions::add<&sample>("env", "sample");
+   psizam::wasm_allocator allocator;
+   psizam::backend<functions, TestType> vm(fixture(), &allocator);
+   functions::resolve(vm.get_module());
+   for (const char* name : {"set_tail", "fill_tail", "grow_tail", "set_secondary_tail"})
+      CHECK(vm.call_with_return("env", name, 0u)->to_ui64() == UINT64_C(0x123456789abcdef));
+   CHECK(vm.call_with_return("env", "set_import_tail", 23u)->to_ui64() == 1023);
+   CHECK(vm.call_with_return("env", "grow_import_tail", 23u)->to_ui64() == 1023);
+   CHECK(vm.call_with_return("env", "ordinary")->to_ui64() == 3155);
+}
