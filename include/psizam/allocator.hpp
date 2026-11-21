@@ -19,6 +19,13 @@
 #include <utility>
 #include <vector>
 
+#if !defined(PSIZAM_COMPILE_ONLY) && (defined(__APPLE__) || defined(__linux__))
+#include <pthread.h>
+#endif
+#if !defined(PSIZAM_COMPILE_ONLY) && defined(__linux__)
+#include <sys/syscall.h>
+#endif
+
 #if !defined(PSIZAM_COMPILE_ONLY) || defined(__LP64__)
 #include <sys/mman.h>
 #include <unistd.h>
@@ -31,6 +38,79 @@ extern "C" void __deregister_frame(const void*);
 #endif
 
 namespace psizam {
+
+   namespace detail {
+      struct thread_stack_bounds {
+         std::uintptr_t low = 0;
+         std::uintptr_t high = 0;
+      };
+
+      // This is a borrowing cap, not a claim about the size of a thread stack.
+      inline constexpr std::size_t native_stack_borrow_limit = 4*1024*1024;
+      inline constexpr std::size_t native_stack_headroom = 64*1024;
+
+      inline thread_stack_bounds discover_thread_stack_bounds() noexcept {
+#if !defined(PSIZAM_COMPILE_ONLY) && defined(__APPLE__)
+         const auto self = pthread_self();
+         const auto high = reinterpret_cast<std::uintptr_t>(pthread_get_stackaddr_np(self));
+         const auto size = pthread_get_stacksize_np(self);
+         if (high != 0 && size != 0 && size <= high)
+            return {high - size, high};
+#elif !defined(PSIZAM_COMPILE_ONLY) && defined(__linux__) && (defined(_GNU_SOURCE) || defined(__USE_GNU))
+         pthread_attr_t attr;
+         if (pthread_getattr_np(pthread_self(), &attr) != 0) return {};
+         void* address = nullptr;
+         std::size_t size = 0, guard = 0;
+         const auto stack_status = pthread_attr_getstack(&attr, &address, &size);
+         const auto guard_status = pthread_attr_getguardsize(&attr, &guard);
+         const auto destroy_status = pthread_attr_destroy(&attr);
+         const auto low = reinterpret_cast<std::uintptr_t>(address);
+         if (stack_status == 0 && guard_status == 0 && destroy_status == 0 &&
+             low != 0 && size != 0 && guard < size &&
+             size <= std::numeric_limits<std::uintptr_t>::max() - low)
+            // Conservatively exclude the reported guard even on implementations
+            // which already exclude it from the returned stack address/size.
+            return {low + guard, low + size};
+#endif
+         // Unknown stacks (including untracked alternate stacks) are never borrowed.
+         return {};
+      }
+
+      inline thread_stack_bounds current_thread_stack_bounds() noexcept {
+#if !defined(PSIZAM_COMPILE_ONLY) && defined(__linux__) && (defined(_GNU_SOURCE) || defined(__USE_GNU))
+         // Linux's main-thread bounds can follow a changed RLIMIT_STACK.
+         // Pthread-created stacks are immutable and may be cached per thread.
+#if defined(SYS_gettid)
+         static thread_local const bool main_thread = ::getpid() == ::syscall(SYS_gettid);
+         if (main_thread) return discover_thread_stack_bounds();
+#else
+         return discover_thread_stack_bounds();
+#endif
+#endif
+#if !defined(PSIZAM_COMPILE_ONLY) && (defined(__APPLE__) || defined(__linux__))
+         static thread_local const auto bounds = discover_thread_stack_bounds();
+         return bounds;
+#else
+         return {};
+#endif
+      }
+
+      inline std::size_t available_native_stack(thread_stack_bounds bounds,
+                                                std::uintptr_t frame) noexcept {
+         if (bounds.low == 0 || bounds.high <= bounds.low ||
+             frame < bounds.low || frame >= bounds.high)
+            return 0;
+         const auto remaining = frame - bounds.low;
+         if (remaining <= native_stack_headroom) return 0;
+         return std::min<std::size_t>(remaining - native_stack_headroom,
+                                     native_stack_borrow_limit);
+      }
+
+      inline std::size_t available_native_stack() noexcept {
+         return available_native_stack(current_thread_stack_bounds(),
+            reinterpret_cast<std::uintptr_t>(__builtin_frame_address(0)));
+      }
+   }
 
    class bounded_allocator {
     public:
@@ -75,7 +155,8 @@ namespace psizam {
    // regular program stack, does nothing and returns nullptr.
    class stack_allocator {
     public:
-      explicit stack_allocator(std::size_t min_size, std::size_t available = 4*1024*1024) {
+      explicit stack_allocator(std::size_t min_size,
+                               std::size_t available = detail::available_native_stack()) {
          if(min_size > available) {
             std::size_t pagesize = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
             // Add one guard page at the bottom for stack overflow detection
@@ -120,7 +201,7 @@ namespace psizam {
       struct entry {
          std::size_t capacity;
          stack_allocator stack;
-         explicit entry(std::size_t size) : capacity(size), stack(size) {}
+         explicit entry(std::size_t size) : capacity(size), stack(size, 0) {}
       };
       std::vector<std::unique_ptr<entry>> _stacks;
       std::size_t _active = 0;
@@ -128,8 +209,9 @@ namespace psizam {
       std::size_t cached_stack_count() const { return _stacks.size(); }
       template<typename F>
       decltype(auto) execute(std::size_t size, F&& f) {
-         if (size <= 4*1024*1024) {
-            stack_allocator stack(size);
+         const auto available = detail::available_native_stack();
+         if (size <= available) {
+            stack_allocator stack(size, available);
             return std::forward<F>(f)(stack);
          }
          return execute_large(size, std::forward<F>(f));

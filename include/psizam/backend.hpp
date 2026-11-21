@@ -140,7 +140,9 @@
 #include <atomic>
 #include <exception>
 #include <iostream>
+#include <memory>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <system_error>
 #include <vector>
@@ -863,23 +865,28 @@ namespace psizam {
       template<typename R, typename... Args>
       class typed_function<R(Args...)> {
          using jit_ctx = detail::jit_execution_context<>;
-         jit_ctx*  _ctx;
-         void*     _linear_memory;
-         bool      _is_llvm;      // true  → entry is int64_t(*)(void*,void*,native_value*)
+         jit_ctx*  _ctx = nullptr;
+         void*     _linear_memory = nullptr;
+         bool      _is_llvm = false; // true  → entry is int64_t(*)(void*,void*,native_value*)
                                    // false → use the code_base trampoline
          // For LLVM: absolute fn pointer.  For native JIT: offset-relative fn pointer.
-         void*     _fn;
-         void*     _code_base;
+         void*     _fn = nullptr;
+         void*     _code_base = nullptr;
          // Cached trampoline (code_base) for native JIT
          native_value_extended (*_trampoline)(jit_ctx*, void*, native_value*,
                                                       native_value(*)(void*,void*),
-                                                      void*, uint64_t, uint32_t);
-         void*     _stack;
+                                                      void*, uint64_t, uint32_t) = nullptr;
+         void*     _stack = nullptr;
+         std::shared_ptr<stack_allocator> _stack_owner;
+         std::span<std::byte> _stack_guard;
       public:
-         typed_function() : _ctx(nullptr) {}
+         typed_function() = default;
 
-         typed_function(jit_ctx* ctx, module& mod, uint32_t func_index, void* stack)
-            : _ctx(ctx), _linear_memory(ctx->linear_memory()), _stack(stack)
+         typed_function(jit_ctx* ctx, module& mod, uint32_t func_index, void* stack,
+                        std::shared_ptr<stack_allocator> owner = {},
+                        std::span<std::byte> guard = {})
+            : _ctx(ctx), _linear_memory(ctx->linear_memory()), _stack(stack),
+              _stack_owner(std::move(owner)), _stack_guard(guard)
          {
             _is_llvm = (mod.allocator._code_base == nullptr);
             uint32_t code_idx = func_index - mod.get_imported_functions_size();
@@ -896,6 +903,12 @@ namespace psizam {
          }
 
          R operator()(Args... args) {
+#ifndef PSIZAM_COMPILE_ONLY
+            // scoped_execution owns the trap boundary. This handle's mapping
+            // can differ from that scope's stack, so register the actual guard.
+            const auto previous_guard = detail::stack_guard_range;
+            if (!_stack_guard.empty()) detail::stack_guard_range = _stack_guard;
+#endif
             constexpr std::size_t args_count = sizeof...(Args);
             constexpr std::size_t buf_count = args_count < 2 ? 2 : args_count;
             native_value args_raw[buf_count];
@@ -905,10 +918,19 @@ namespace psizam {
             }
 
             native_value_extended result;
+            try {
             if (_is_llvm) {
                using llvm_fn_t = int64_t(*)(void*, void*, native_value*);
                auto entry = reinterpret_cast<llvm_fn_t>(_fn);
-               result.scalar.i64 = entry(_ctx, _linear_memory, args_raw);
+               if (_stack) {
+                  std::exception_ptr exception;
+                  result.scalar.i64 = detail::call_on_stack(
+                     _stack, reinterpret_cast<detail::llvm_entry_fn_t>(entry),
+                     _ctx, _linear_memory, args_raw, &exception);
+                  if (exception) std::rethrow_exception(exception);
+               } else {
+                  result.scalar.i64 = entry(_ctx, _linear_memory, args_raw);
+               }
             } else {
                auto fn = reinterpret_cast<native_value(*)(void*, void*)>(_fn);
                void* stack = _stack;
@@ -918,6 +940,17 @@ namespace psizam {
                result = _trampoline(_ctx, _linear_memory, args_raw, fn, stack,
                                     static_cast<uint64_t>(args_count), false);
             }
+            } catch (...) {
+#ifndef PSIZAM_COMPILE_ONLY
+               detail::stack_guard_range = previous_guard;
+#endif
+               throw;
+            }
+#ifndef PSIZAM_COMPILE_ONLY
+            // Signal escapes restore this TLS at scoped_execution's existing
+            // trap boundary; no destructor is crossed by that longjmp.
+            detail::stack_guard_range = previous_guard;
+#endif
 
             if constexpr (std::is_void_v<R>) {
                return;
@@ -963,8 +996,11 @@ namespace psizam {
       template<typename Sig>
       typed_function<Sig> get_typed_function(const std::string_view& name) {
          uint32_t fi = mod->get_exported_function(name);
-         stack_allocator alt_stack(ctx->get_maximum_stack_size());
-         return typed_function<Sig>(ctx.get(), *mod, fi, alt_stack.top());
+         // The handle can outlive this frame or be called at a different depth.
+         // Own its guarded stack instead of returning a pointer to a local owner.
+         auto stack = std::make_shared<stack_allocator>(ctx->get_maximum_stack_size(), 0);
+         return typed_function<Sig>(ctx.get(), *mod, fi, stack->top(), stack,
+            {static_cast<std::byte*>(stack->guard_base()), stack->guard_size()});
       }
 
       /// Execute a callable within a signal-handler session.  Sets up the
@@ -989,7 +1025,8 @@ namespace psizam {
       typed_function<Sig> get_typed_function(const std::string_view& name,
                                              stack_allocator& alt_stack) {
          uint32_t fi = mod->get_exported_function(name);
-         return typed_function<Sig>(ctx.get(), *mod, fi, alt_stack.top());
+         return typed_function<Sig>(ctx.get(), *mod, fi, alt_stack.top(), {},
+            {static_cast<std::byte*>(alt_stack.guard_base()), alt_stack.guard_size()});
       }
 
       inline void set_wasm_allocator(wasm_allocator* alloc) {

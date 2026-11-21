@@ -112,11 +112,11 @@ namespace psizam::detail {
          auto p = reinterpret_cast<std::uintptr_t>(__builtin_frame_address(0));
          if (base == 0 && size == 0)
          {
-            base = p - default_stack_size;
-            size = default_stack_size;
+            size = available_native_stack(current_thread_stack_bounds(), p);
+            base = p - size;
          }
 
-         std::size_t available_stack = (p >= base && p <= base + size) ? p - base : 0;
+         std::size_t available_stack = (p >= base && p - base <= size) ? p - base : 0;
          stack_allocator alt_stack{sz, available_stack};
          if (alt_stack.top())
          {

@@ -480,6 +480,22 @@ target_compile_definitions(psizam_signal_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIG
 add_test(NAME psizam_signal_tests COMMAND psizam_signal_tests)
 set_tests_properties(psizam_signal_tests PROPERTIES TIMEOUT 30 LABELS "execution;quick;calls")
 
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/thread-stack.wasm"
+   COMMAND "${PSIZAM_WAT2WASM}" "${CMAKE_CURRENT_SOURCE_DIR}/thread_stack.wat"
+      -o "${CMAKE_CURRENT_BINARY_DIR}/thread-stack.wasm"
+   DEPENDS thread_stack.wat VERBATIM)
+add_executable(psizam_thread_stack_tests thread_stack_tests.cpp
+   "${CMAKE_CURRENT_BINARY_DIR}/thread-stack.wasm")
+target_link_libraries(psizam_thread_stack_tests PRIVATE psizam psizam-exec Catch2::Catch2)
+target_compile_definitions(psizam_thread_stack_tests PRIVATE
+   PSIZAM_THREAD_STACK_WASM="${CMAKE_CURRENT_BINARY_DIR}/thread-stack.wasm")
+add_test(NAME psizam_thread_stack_tests COMMAND psizam_thread_stack_tests)
+set_tests_properties(psizam_thread_stack_tests PROPERTIES TIMEOUT 30 LABELS "execution;quick;calls")
+add_executable(psizam_thread_stack_compile_only thread_stack_compile_only.cpp)
+target_compile_definitions(psizam_thread_stack_compile_only PRIVATE PSIZAM_COMPILE_ONLY)
+target_link_libraries(psizam_thread_stack_compile_only PRIVATE psizam)
+add_test(NAME psizam_thread_stack_compile_only COMMAND psizam_thread_stack_compile_only)
+
 # Focused service-entry / import regressions, also usable as a standalone benchmark.
 find_program(PSIZAM_CALL_WAT2WASM wat2wasm REQUIRED)
 add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/call-boundary.wasm"
