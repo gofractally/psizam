@@ -8,6 +8,13 @@ if(PSIZAM_ENABLE_FUZZ_TESTS)
 endif()
 
 enable_testing()
+
+add_executable(psizam_proper_tail_tests proper_tail_tests.cpp)
+target_link_libraries(psizam_proper_tail_tests PRIVATE psizam psizam-exec Catch2::Catch2)
+target_compile_definitions(psizam_proper_tail_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
+   PROPER_TAIL_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail.wasm")
+add_test(NAME psizam_proper_tail_tests COMMAND psizam_proper_tail_tests)
+set_tests_properties(psizam_proper_tail_tests PROPERTIES TIMEOUT 60 LABELS "execution;resource;abi")
 # WABT removes opt-in switches when proposals become enabled by default.
 # Keep compiling the required fixtures; an unsupported opcode must still fail.
 find_program(PSIZAM_WAT2WASM wat2wasm REQUIRED)
@@ -22,6 +29,12 @@ foreach(_flag --enable-tail-call --enable-relaxed-simd)
       list(APPEND PSIZAM_WAT2WASM_FEATURE_FLAGS "${_flag}")
    endif()
 endforeach()
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/proper_tail.wasm"
+   COMMAND "${PSIZAM_WAT2WASM}" ${PSIZAM_WAT2WASM_FEATURE_FLAGS}
+      "${CMAKE_CURRENT_SOURCE_DIR}/proper_tail.wat" -o "${CMAKE_CURRENT_BINARY_DIR}/proper_tail.wasm"
+   DEPENDS proper_tail.wat VERBATIM)
+add_custom_target(psizam_proper_tail_fixture DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/proper_tail.wasm")
+add_dependencies(psizam_proper_tail_tests psizam_proper_tail_fixture)
 add_subdirectory(validation)
 
 add_executable(psizam_compile_reactor_test compile_reactor_test.cpp)

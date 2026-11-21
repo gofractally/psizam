@@ -351,6 +351,15 @@ namespace psizam::detail {
          emit32(0xD65F03C0);
       }
 
+      static uint32_t native_param_bytes(const func_type& ft) {
+         uint64_t bytes = 0;
+         for (uint8_t type : ft.param_types)
+            bytes += type == types::v128 ? 32 : 16;
+         PSIZAM_ASSERT(bytes <= INT32_MAX, wasm_parse_exception,
+                       "native parameter area too large");
+         return static_cast<uint32_t>(bytes);
+      }
+
       // ===================================================================
       // Prologue / Epilogue
       // ===================================================================
@@ -523,6 +532,10 @@ namespace psizam::detail {
          emit32(0x91000000 | (FP << 5) | SP);
          // LDP X29, X30, [SP], #16
          emit32(0xA8C17BFD);
+         // The private guest ABI uses callee cleanup. This leaves the
+         // original caller's SP unchanged even when a tail target has a
+         // different parameter footprint.
+         emit_add_imm_sp(native_param_bytes(ft));
          // RET
          emit32(0xD65F03C0);
       }
@@ -5011,6 +5024,7 @@ namespace psizam::detail {
          }
 
          emit32(0xA8C17BFD); // LDP X29, X30, [SP], #16
+         emit_add_imm_sp(native_param_bytes(ft));
          emit32(0xD65F03C0); // RET
       }
 
@@ -5405,14 +5419,8 @@ namespace psizam::detail {
          // reaches across the BL instruction that precedes this.
          invalidate_recent_ops();
          if (ft.return_types.size() > 1) {
-            // Multi-value return: pop params, push N results from ctx->_multi_return
-            uint32_t total_size = 0;
-            for(uint32_t i = 0; i < ft.param_types.size(); ++i) {
-               total_size += (ft.param_types[i] == types::v128) ? 32 : 16;
-            }
-            if(total_size != 0) {
-               emit_add_imm_sp(total_size);
-            }
+            // The callee removed its parameters. Push N results from
+            // ctx->_multi_return onto the restored caller operand stack.
             // Push return values: result[0] first (deepest), result[N-1] last (top).
             // _multi_return layout: packed; scalar=8, v128=16 (low@off, high@off+8).
             uint32_t mr_accum = 0;
@@ -5433,35 +5441,15 @@ namespace psizam::detail {
             }
             return;
          }
-         uint32_t total_size = 0;
-         for(uint32_t i = 0; i < ft.param_types.size(); ++i) {
-            if(ft.param_types[i] == types::v128) {
-               total_size += 32; // v128 = two 16-byte slots
-            } else {
-               total_size += 16; // scalar = one 16-byte slot
-            }
-         }
          if (ft.return_count && ft.return_type == types::v128) {
-            if (total_size != 32) {
-               emit_add_imm_sp(total_size - 32);
-            }
-            // v128 result is in X0,X1 from epilogue; store as two 16-byte slots
-            emit32(0xF90003E0); // STR X0, [SP]       (low 64 bits)
-            emit32(0xF9000BE1); // STR X1, [SP, #16]  (high 64 bits)
-         } else {
-            if(total_size != 0) {
-               emit_add_imm_sp(total_size);
-            }
-            if (ft.return_count != 0) {
-               emit_push_x(X0);
-            }
+            emit_push_x(X1); // high (deeper)
+            emit_push_x(X0); // low
+         } else if (ft.return_count != 0) {
+            emit_push_x(X0);
          }
-         // Prevent peephole from undoing the push and leaving the SP
-         // adjustment orphaned. The ADD SP and push are a coupled pair
-         // that must not be partially unwound.
-         if (total_size != 0) {
-            invalidate_recent_ops();
-         }
+         // Return registers are produced by a call, not by a preceding
+         // local push; peephole state must not cross this boundary.
+         invalidate_recent_ops();
       }
 
       // ===================================================================
