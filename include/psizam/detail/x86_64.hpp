@@ -476,7 +476,10 @@ namespace psizam::detail {
 
       void emit_unreachable() {
          COUNT_INSTR();
-         auto icount = fixed_size_instr(16);
+         auto icount = fixed_size_instr(_enable_backtrace ? 25 : 16);
+         // Publish a generated frame before diagnostics walk the trap stack.
+         // This path never returns; the protected entry clears the frame state.
+         emit_setup_backtrace();
          emit_error_handler(&on_unreachable);
       }
       void emit_nop() {}

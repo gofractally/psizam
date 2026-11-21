@@ -424,3 +424,41 @@ TEST_CASE("Debug binary streams reject malformed lengths and preserve LEB bounda
    CHECK(static_cast<unsigned char>(fixed[0]) == 0x34);
    CHECK_THROWS(bin::to_bin(uint8_t{0}, bounded));
 }
+
+#if defined(__x86_64__) || defined(__aarch64__)
+TEST_CASE("Explicit unreachable diagnostics retain a mapped generated frame", "[debug][backtrace][trap_observer]") {
+   auto code = kTwoFuncs;
+   // Keep the function type and body size: replace `i32.const 42` with
+   // `unreachable; nop`, whose polymorphic stack satisfies the i32 result.
+   code[code.size() - 8] = 0x00;
+   code[code.size() - 7] = 0x01;
+   using engine_type     = backend<std::nullptr_t, jit_profile, default_options, psizam::debug::debug_instr_map>;
+   engine_type engine(code, &wa);
+   struct observed {
+      engine_type* engine;
+      unsigned     calls  = 0;
+      unsigned     mapped = 0;
+   } result{ &engine };
+   {
+      psizam::detail::scoped_trap_observer observer{
+         +[](const char*, void* data) noexcept {
+            auto& value = *static_cast<observed*>(data);
+            if (psizam::detail::active_code_allocator != &value.engine->get_module().allocator)
+               return;
+            ++value.calls;
+            void* frames[32];
+            auto  count = value.engine->get_context().backtrace(frames, 32, nullptr);
+            for (int i = 0; i < count; ++i)
+               if (value.engine->get_debug().translate(frames[i]) != 0xffffffffu)
+                  ++value.mapped;
+         },
+         &result
+      };
+      CHECK_THROWS_WITH(engine.call_with_return("env", "f0"), "unreachable");
+      CHECK(result.calls == 1);
+      CHECK(result.mapped > 0);
+   }
+   CHECK(psizam::detail::trap_observer == nullptr);
+   CHECK(engine.call_with_return("env", "f1")->to_ui32() == 7);
+}
+#endif
