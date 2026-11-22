@@ -249,6 +249,45 @@ pub unsafe extern "C" fn pzwt_wat_to_wasm(
     }
 }
 
+/// The cost list as a slice. A module with no functions has an empty list,
+/// which C++ may pass as a null pointer; a slice must never be built from one.
+unsafe fn cost_slice<'a>(costs: *const u32, len: usize) -> &'a [u32] {
+    if len == 0 || costs.is_null() {
+        &[]
+    } else {
+        std::slice::from_raw_parts(costs, len)
+    }
+}
+
+/// Hands `sink` the module exactly as it would be compiled: with stack
+/// accounting if `metered` is nonzero, and with relaxed multiply-add unfused if
+/// `strict_float` is nonzero. For inspection and tests.
+#[no_mangle]
+pub unsafe extern "C" fn pzwt_rewrite(
+    bytes: *const u8,
+    len: usize,
+    costs: *const u32,
+    costs_len: usize,
+    metered: u8,
+    strict_float: u8,
+    sink: unsafe extern "C" fn(*mut c_void, *const u8, usize),
+    sink_data: *mut c_void,
+    error: *mut PzwtError,
+) -> i32 {
+    let bytes = std::slice::from_raw_parts(bytes, len);
+    let costs = (metered != 0).then(|| cost_slice(costs, costs_len));
+    match stack_meter::rewrite(bytes, costs, strict_float != 0) {
+        Ok(out) => {
+            sink(sink_data, out.as_ptr(), out.len());
+            PZWT_OK
+        }
+        Err(e) => {
+            set_error(error, PZWT_ERROR, 0, e);
+            PZWT_ERROR
+        }
+    }
+}
+
 /// Like `pzwt_module_new`, with deterministic stack accounting added first.
 /// `wasm` must be a binary module. `costs` gives the byte cost of each defined
 /// function, in order; the instance then follows the budget set with
@@ -263,7 +302,7 @@ pub unsafe extern "C" fn pzwt_module_new_metered(
     error: *mut PzwtError,
 ) -> *mut PzwtModule {
     let bytes = std::slice::from_raw_parts(bytes, len);
-    let costs = std::slice::from_raw_parts(costs, costs_len);
+    let costs = cost_slice(costs, costs_len);
     let metered = match stack_meter::rewrite(bytes, Some(costs), (*engine).strict_float) {
         Ok(m) => m,
         Err(e) => {

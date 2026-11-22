@@ -88,6 +88,8 @@ namespace abi {
    void        pzwt_engine_delete(PzwtEngine*);
    int32_t     pzwt_wat_to_wasm(const char*, size_t, void (*)(void*, const uint8_t*, size_t), void*,
                                 PzwtError*);
+   int32_t     pzwt_rewrite(const uint8_t*, size_t, const uint32_t*, size_t, uint8_t, uint8_t,
+                            void (*)(void*, const uint8_t*, size_t), void*, PzwtError*);
    PzwtModule* pzwt_module_new(const PzwtEngine*, const uint8_t*, size_t, PzwtError*);
    PzwtModule* pzwt_module_new_metered(const PzwtEngine*, const uint8_t*, size_t, const uint32_t*,
                                        size_t, PzwtError*);
@@ -373,6 +375,25 @@ inline std::vector<uint8_t> assemble(std::string_view wat)
       static_cast<std::vector<uint8_t>*>(self)->assign(data, data + size);
    };
    if (abi::pzwt_wat_to_wasm(wat.data(), wat.size(), sink, &out, &e))
+      detail::raise(e);
+   return out;
+}
+
+// The module exactly as the engine would compile it: with stack accounting if
+// costs are given, and with relaxed multiply-add unfused under the strict
+// profile. For inspection and tests.
+inline std::vector<uint8_t> rewritten(std::span<const uint8_t> wasm,
+                                      const std::vector<uint32_t>* costs,
+                                      float_profile                fp = float_profile::performance)
+{
+   std::vector<uint8_t> out;
+   abi::PzwtError       e{};
+   auto sink = [](void* self, const uint8_t* data, size_t size) {
+      static_cast<std::vector<uint8_t>*>(self)->assign(data, data + size);
+   };
+   if (abi::pzwt_rewrite(wasm.data(), wasm.size(), costs ? costs->data() : nullptr,
+                         costs ? costs->size() : 0, costs != nullptr,
+                         fp == float_profile::strict, sink, &out, &e))
       detail::raise(e);
    return out;
 }

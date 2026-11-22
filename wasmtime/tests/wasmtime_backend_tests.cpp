@@ -768,3 +768,21 @@ TEST_CASE("wasmtime: host spans reach a memory the module does not export")
    CHECK(h.seen == "private");
    CHECK(inst.memory().size() == 65536);
 }
+
+TEST_CASE("wasmtime: a module with no functions still gets its memory and stack counter")
+{
+   // No functions means an empty cost list. The module must still be treated
+   // as metered: the host reaches its memory through the reserved export.
+   psizam::wasm_code code = wt::assemble(R"((module (memory 2) (data (i32.const 4) "abc")))");
+   stack_options     psizam_options;
+   auto              costs = wt::validate_and_cost(code, psizam_options);
+   REQUIRE(costs.empty());
+   struct none {};
+   none               n;
+   wt::runtime<none>  rt;
+   wt::instance<none> inst(rt, rt.compile_metered(code, costs), n);
+   CHECK(inst.memory().size() == 2 * 65536);
+   CHECK(std::string_view(inst.memory().data() + 4, 3) == "abc");
+   inst.set_stack_remaining(1234);
+   CHECK(inst.stack_remaining() == 1234);
+}
