@@ -732,3 +732,20 @@ if(PSIZAM_ENABLE_LLVM)
    add_test(NAME execution.private-atomics COMMAND psizam_private_atomic_tests)
    set_tests_properties(execution.private-atomics PROPERTIES LABELS "execution;quick;resource" TIMEOUT 120)
 endif()
+
+# Proper guest ABI coverage shared by x86 and AArch64 JIT2 implementations.
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_returns.wasm"
+   COMMAND "${PSIZAM_WAT2WASM}" ${PSIZAM_WAT2WASM_FEATURE_FLAGS} --enable-exceptions
+      "${CMAKE_CURRENT_SOURCE_DIR}/proper_tail_returns.wat"
+      -o "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_returns.wasm"
+   DEPENDS proper_tail_returns.wat VERBATIM)
+add_executable(psizam_proper_tail_jit2_tests proper_tail_jit2_tests.cpp
+   "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_returns.wasm")
+target_link_libraries(psizam_proper_tail_jit2_tests PRIVATE psizam psizam-exec Catch2::Catch2)
+target_compile_definitions(psizam_proper_tail_jit2_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
+   PROPER_TAIL_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail.wasm"
+   PROPER_TAIL_LARGE_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wasm"
+   PROPER_TAIL_RETURNS_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail_returns.wasm")
+add_dependencies(psizam_proper_tail_jit2_tests psizam_proper_tail_fixture psizam_proper_tail_large_fixture)
+add_test(NAME psizam_proper_tail_jit2_tests COMMAND psizam_proper_tail_jit2_tests)
+set_tests_properties(psizam_proper_tail_jit2_tests PROPERTIES TIMEOUT 120 LABELS "execution;resource;abi")
