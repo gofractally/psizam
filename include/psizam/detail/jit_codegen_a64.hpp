@@ -2638,6 +2638,7 @@ namespace psizam::detail {
             load_vreg_x0(inst.rr.src1);
             emit32(0x1E270000); // FMOV S0, W0
             emit32(0x1E21C000); // FSQRT S0, S0
+            emit_f32_canonicalize_nan();
             emit32(0x1E260000); // FMOV W0, S0
             store_x0_vreg(inst.dest);
             break;
@@ -2649,6 +2650,7 @@ namespace psizam::detail {
             load_vreg_x0(inst.rr.src1);
             emit32(0x9E670000); // FMOV D0, X0
             emit32(0x1E61C000); // FSQRT D0, D0
+            emit_f64_canonicalize_nan();
             emit32(0x9E660000); // FMOV X0, D0
             store_x0_vreg(inst.dest);
             break;
@@ -4254,6 +4256,10 @@ namespace psizam::detail {
          load_vreg_x0(inst.rr.src1);
          emit32(0x1E270000); // FMOV S0, W0
          emit32(round_op);   // FRINTx S0, S0
+         // FRINTx and FSQRT return a NaN operand quieted, sign and payload
+         // intact; the softfloat result every other engine matches is the
+         // canonical NaN.
+         emit_f32_canonicalize_nan();
          emit32(0x1E260000); // FMOV W0, S0
          store_x0_vreg(inst.dest);
       }
@@ -4261,6 +4267,7 @@ namespace psizam::detail {
          load_vreg_x0(inst.rr.src1);
          emit32(0x9E670000); // FMOV D0, X0
          emit32(round_op);
+         emit_f64_canonicalize_nan();
          emit32(0x9E660000); // FMOV X0, D0
          store_x0_vreg(inst.dest);
       }

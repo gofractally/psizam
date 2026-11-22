@@ -472,3 +472,60 @@ TEST_CASE("fp_mode differential: interpreter three-way value compare", "[fp_mode
    // correctness violation for fast to diverge in principle. Report via INFO
    // above, don't fail the test on it.
 }
+
+// Compiled engines fix the mode when the module is built. In hw_deterministic
+// each must give softfloat's bits, in particular the positive canonical NaN
+// for any NaN operand of a unary operator: hardware sqrt and rounding return
+// the operand quieted, with its sign and payload.
+namespace {
+struct soft_options { static constexpr auto fp = fp_mode::softfloat; };
+struct hw_options { static constexpr auto fp = fp_mode::hw_deterministic; };
+const std::vector<FnSpec>& unary_fns() {
+   static const std::vector<FnSpec> v = {
+      {"f32_ceil", 1, 0x8D}, {"f32_floor", 1, 0x8E}, {"f32_trunc", 1, 0x8F},
+      {"f32_nearest", 1, 0x90}, {"f32_sqrt", 1, 0x91},
+      {"f64_ceil", 3, 0x9B}, {"f64_floor", 3, 0x9C}, {"f64_trunc", 3, 0x9D},
+      {"f64_nearest", 3, 0x9E}, {"f64_sqrt", 3, 0x9F},
+   };
+   return v;
+}
+template <typename Impl>
+void unary_matches_softfloat(const char* engine) {
+   static const uint32_t f32_inputs[] = {
+      0x00000000, 0x80000000, 0x3f800000, 0xbf800000, 0x00000001, 0x807fffff, 0x7f800000, 0xff800000,
+      0x7fc00000, 0xffc00000, 0x7fa00001, 0xffa12345, 0x7fe00002, 0x3f000000, 0xbfc00000, 0x40200000,
+      0x4f000000, 0xcf000001, 0x7f7fffff, 0x3f800001, 0x4b000001, 0xcb7fffff};
+   static const uint64_t f64_inputs[] = {
+      0x0000000000000000, 0x8000000000000000, 0x3ff0000000000000, 0xbff0000000000000,
+      0x0000000000000001, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000000000000,
+      0xfff8000000000000, 0x7ff4000000000001, 0xfff4123456789abc, 0x7ffc000000000002,
+      0x3fe0000000000000, 0xbff8000000000000, 0x4004000000000000, 0x4330000000000001};
+   auto wasm_bytes = build_fp_module(unary_fns());
+   wasm_allocator soft_memory, hw_memory;
+   backend<std::nullptr_t, interpreter, soft_options> soft(wasm_bytes, &soft_memory, soft_options{});
+   backend<std::nullptr_t, Impl, hw_options> hw(wasm_bytes, &hw_memory, hw_options{});
+   for (auto& fn : unary_fns()) {
+      if (fn.type_idx == 1) {
+         for (auto input : f32_inputs) {
+            CAPTURE(engine, fn.name, input);
+            CHECK(f32_bits(hw.call_with_return("env", fn.name, f32_from_bits(input))->to_f32()) ==
+                  f32_bits(soft.call_with_return("env", fn.name, f32_from_bits(input))->to_f32()));
+         }
+      } else {
+         for (auto input : f64_inputs) {
+            CAPTURE(engine, fn.name, input);
+            CHECK(f64_bits(hw.call_with_return("env", fn.name, f64_from_bits(input))->to_f64()) ==
+                  f64_bits(soft.call_with_return("env", fn.name, f64_from_bits(input))->to_f64()));
+         }
+      }
+   }
+}
+}  // namespace
+
+TEST_CASE("hw_deterministic unary float operators match softfloat on compiled engines", "[fp_mode_diff][unary]") {
+   unary_matches_softfloat<interpreter>("interpreter");
+#if defined(__x86_64__) || defined(__aarch64__)
+   unary_matches_softfloat<jit>("jit1");
+   unary_matches_softfloat<jit2>("jit2");
+#endif
+}
