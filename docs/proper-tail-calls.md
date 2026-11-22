@@ -43,6 +43,17 @@ host continuations; the integrating physical policy must cover those separately.
 LLVM can publish exact prologue allocations in the same bound fields. Artifact
 format persistence and ABI rejection remain the integrating owner's work.
 
+The AArch64 JIT2 checkpoint uses the same completion-SP contract for every
+direct/indirect/import/self tail. Ordinary and explicit returns share the
+maintained epilogue, preserve result channels, release the logical frame and
+remove native parameters. Both AArch64 JITs synchronize the live logical budget
+before an exception snapshot. The shared JIT2 matrix includes serial and four
+worker compilation, long signature-changing cycles, imported and mutated table
+targets, exception scope removal and argument cleanup beyond 65535 bytes.
+This does not by itself bound ordinary C++ host continuations retained by
+recursive host-to-guest reentry. A positive host-boundary reserve is a separate
+required contract and release gate owned by the integrating runtime work.
+
 For frame replacement, let `B` be the current frame pointer, `M` its incoming
 native argument bytes and `K` the target's argument bytes. The retained ordinary
 caller continuation expects completion at `S = B + 16 + M`. Stage the target

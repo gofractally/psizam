@@ -1571,6 +1571,7 @@ namespace psizam::detail {
          }
 
          // ── 2. Call __psizam_eh_enter(ctx, catch_count, catch_data) ──
+         emit32(0xB9001275); // STR W21, [X19, #16]: snapshot the live logical budget
          emit32(0xAA1303E0); // MOV X0, X19 (context)
          emit_mov_imm32(X1, catch_count);
          emit32(0x910003E2); // MOV X2, SP (catch_data)

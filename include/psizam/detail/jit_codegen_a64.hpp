@@ -43,6 +43,7 @@ namespace psizam::detail {
 
    class jit_codegen_a64 {
     public:
+      static constexpr psizam::native_guest_abi guest_call_abi = psizam::native_guest_abi::jit_callee_cleanup;
       // Register numbers
       static constexpr uint32_t X0  = 0,  X1  = 1,  X2  = 2,  X3  = 3;
       static constexpr uint32_t X4  = 4,  X5  = 5,  X6  = 6,  X7  = 7;
@@ -807,6 +808,7 @@ namespace psizam::detail {
          }
 
          emit32(0xA8C17BFD); // LDP X29, X30, [SP], #16
+         emit_add_imm(SP, SP, native_param_bytes(ft));
          emit32(0xD65F03C0); // RET
       }
 
@@ -1027,24 +1029,61 @@ namespace psizam::detail {
             }
          }
 
-         // Restore callee-saved registers (FP-relative — stable regardless of v128 stack)
-         if (_use_regalloc && _callee_saved_used) {
-            int32_t save_offset = static_cast<int32_t>((_body_locals + _num_spill_slots) * 8) - _frame_size;
-            for (int i = 0; i < 7; ++i) {
-               if (_callee_saved_used & (1 << i)) {
-                  uint32_t reg = callee_saved_reg(i);
-                  emit_ldr_offset(reg, FP, save_offset);
-                  save_offset += 8;
-               }
-            }
-         }
+         emit_restore_callee_saved();
 
          // MOV SP, X29
          emit32(0x91000000 | (FP << 5) | SP);
          // LDP X29, X30, [SP], #16
          emit32(0xA8C17BFD);
+         emit_add_imm(SP, SP, native_param_bytes(*func.type));
          // RET
          emit32(0xD65F03C0);
+      }
+
+      void emit_restore_callee_saved() {
+         if (_use_regalloc && _callee_saved_used) {
+            int32_t save_offset = static_cast<int32_t>((_body_locals + _num_spill_slots) * 8) - _frame_size;
+            for (int i = 0; i < 7; ++i) {
+               if (_callee_saved_used & (1 << i)) {
+                  emit_ldr_offset(callee_saved_reg(i), FP, save_offset);
+                  save_offset += 8;
+               }
+            }
+         }
+      }
+
+      // All target arguments are staged before this operation. The unchanged
+      // completion pointer anchors every differing-signature tail cycle.
+      // X15 may hold an indirect target and is preserved throughout.
+      void emit_tail_replace_frame(ir_function& func, const func_type& ft) {
+         emit_validate_watermark();
+         emit_byte_stack_leave(func);
+         emit_restore_callee_saved();
+         const uint32_t incoming = native_param_bytes(*func.type);
+         const uint32_t outgoing = native_param_bytes(ft);
+         PSIZAM_ASSERT(incoming <= INT32_MAX - 16, wasm_parse_exception,
+                       "native tail parameter area too large");
+         emit32(0xA9400000 | (X14 << 10) | (FP << 5) | X13); // saved FP/LR
+         emit_add_imm(X10, FP, incoming + 16); // retained completion SP
+         if (outgoing) {
+            emit32(0x910003E9); // MOV X9, SP
+            emit_add_imm(X9, X9, outgoing);
+            emit_mov_imm32(X11, outgoing / 16);
+            auto* loop = code;
+            emit_sub_imm(X9, X9, 16);
+            emit_sub_imm(X10, X10, 16);
+            emit32(0xF9400000 | (X9 << 5) | X12);
+            emit32(0xF9000000 | (X10 << 5) | X12);
+            emit32(0x71000000 | (1 << 10) | (X11 << 5) | X11);
+            auto* branch = code;
+            emit32(0x54000001); // B.NE loop
+            fix_branch(branch, loop);
+         }
+         emit32(0x91000000 | (X10 << 5) | SP);
+         emit_mov_reg(FP, X13);
+         emit_mov_reg(X30, X14);
+         for (uint8_t type : ft.param_types)
+            if (type == types::v128) _v128_sp_bytes -= 32;
       }
 
       // ──────── Register allocation helpers ────────
@@ -2229,19 +2268,7 @@ namespace psizam::detail {
                   load_vreg_x0(inst.rr.src1);
                }
             }
-            // Restore callee-saved (FP-relative — stable regardless of v128 stack)
-            if (_callee_saved_used) {
-               int32_t save_offset = static_cast<int32_t>((_body_locals + _num_spill_slots) * 8) - _frame_size;
-               for (int i = 0; i < 7; ++i) {
-                  if (_callee_saved_used & (1 << i)) {
-                     emit_ldr_offset(callee_saved_reg(i), FP, save_offset);
-                     save_offset += 8;
-                  }
-               }
-            }
-            emit32(0x91000000 | (FP << 5) | SP); // MOV SP, X29
-            emit32(0xA8C17BFD); // LDP X29, X30, [SP], #16
-            emit32(0xD65F03C0); // RET
+            emit_function_epilogue(func, /*skip_return_fetch=*/true);
             break;
          }
 
@@ -2254,14 +2281,11 @@ namespace psizam::detail {
             emit_call_depth_dec();
             void* branch = emit_bl_placeholder();
             register_call(branch, funcnum);
-            // Pop params
-            uint32_t arg_bytes = 0;
+            // Callee removed native parameter slots; retain vector bookkeeping.
             uint32_t v128_arg_bytes = 0;
             for (uint32_t p = 0; p < ft.param_types.size(); ++p) {
-               if (ft.param_types[p] == types::v128) { arg_bytes += 32; v128_arg_bytes += 32; }
-               else arg_bytes += 16;
+               if (ft.param_types[p] == types::v128) v128_arg_bytes += 32;
             }
-            if (arg_bytes > 0) emit_add_imm(SP, SP, arg_bytes);
             _v128_sp_bytes -= v128_arg_bytes;
             emit_call_depth_inc();
             if (ft.return_count > 1) {
@@ -2345,14 +2369,11 @@ namespace psizam::detail {
                emit_call_depth_dec();
                emit32(0xD63F0100); // BLR X8
             }
-            // Pop params
-            uint32_t ci_arg_bytes = 0;
+            // Native parameter slots were removed by the callee.
             uint32_t ci_v128_arg_bytes = 0;
             for (uint32_t p = 0; p < ft.param_types.size(); ++p) {
-               if (ft.param_types[p] == types::v128) { ci_arg_bytes += 32; ci_v128_arg_bytes += 32; }
-               else ci_arg_bytes += 16;
+               if (ft.param_types[p] == types::v128) ci_v128_arg_bytes += 32;
             }
-            if (ci_arg_bytes > 0) emit_add_imm(SP, SP, ci_arg_bytes);
             _v128_sp_bytes -= ci_v128_arg_bytes;
             emit_call_depth_inc();
             if (ft.return_count > 1) {
@@ -2369,29 +2390,17 @@ namespace psizam::detail {
             break;
          }
 
-         // ── Tail calls (fallback: call + return) ──
+         // ── Proper tail calls ──
          case ir_op::tail_call: {
-            emit_byte_stack_leave(func);
             uint32_t funcnum = inst.call.index;
             const func_type& ft = _mod.get_function_type(funcnum);
-            // Fallback: emit as regular call then return
-            emit_call_depth_dec();
-            void* branch = emit_bl_placeholder();
+            emit_tail_replace_frame(func, ft);
+            void* branch = code;
+            emit32(0x14000000); // B target; no retained return continuation
             register_call(branch, funcnum);
-            uint32_t arg_bytes = 0;
-            for (uint32_t p = 0; p < ft.param_types.size(); ++p)
-               arg_bytes += (ft.param_types[p] == types::v128) ? 32 : 16;
-            if (arg_bytes > 0) emit_add_imm(SP, SP, arg_bytes);
-            emit_call_depth_inc();
-            // Callee returned with X0 (and X1 for v128) holding the result.
-            // Skip the epilogue's return-value fetch so it doesn't clobber
-            // X0/X1 by reloading from a stale vreg or empty stack.
-            emit_function_epilogue(func, /*skip_return_fetch=*/true, /*release_bytes=*/false);
             break;
          }
          case ir_op::tail_call_indirect: {
-            emit_byte_stack_leave(func);
-            // Fallback: emit as call_indirect + return
             uint32_t fti_packed = inst.call.index;
             uint32_t fti = fti_packed & 0xFFFF;
             uint32_t table_idx = fti_packed >> 16;
@@ -2408,9 +2417,7 @@ namespace psizam::detail {
                emit32(0xD63F0100);
                emit_pop(X20); emit_pop(X19);
                emit_branch_to_handler_cbz(X0, call_indirect_handler);
-               emit32(0xAA0003E8);
-               emit_call_depth_dec();
-               emit32(0xD63F0100);
+               emit_mov_reg(X15, X0);
             } else {
                if (_mod.indirect_table(0)) {
                   emit_add_signed_imm(X8, X20, wasm_allocator::table0_size_offset());
@@ -2441,17 +2448,10 @@ namespace psizam::detail {
                emit32(0xB9400008 | (X0 << 5));
                emit_cmp_imm32(X8, fti);
                emit_branch_to_handler(COND_NE, type_error_handler);
-               emit_ldr_offset(X8, X0, 8);
-               emit_call_depth_dec();
-               emit32(0xD63F0100);
+               emit_ldr_offset(X15, X0, 8);
             }
-            uint32_t arg_bytes = 0;
-            for (uint32_t p = 0; p < ft.param_types.size(); ++p)
-               arg_bytes += (ft.param_types[p] == types::v128) ? 32 : 16;
-            if (arg_bytes > 0) emit_add_imm(SP, SP, arg_bytes);
-            emit_call_depth_inc();
-            // See ir_op::tail_call for the explanation of skip_return_fetch.
-            emit_function_epilogue(func, /*skip_return_fetch=*/true, /*release_bytes=*/false);
+            emit_tail_replace_frame(func, ft);
+            emit32(0xD61F01E0); // BR X15
             break;
          }
 
@@ -3107,6 +3107,7 @@ namespace psizam::detail {
                }
             }
             // __psizam_eh_enter(ctx, catch_count, catch_data)
+            emit32(0xB9001275); // publish the live logical budget in both limit modes
             emit_mov_reg(X0, X19);           // ctx
             emit_mov_imm32(X1, catch_count); // catch_count
             emit_mov_reg(X2, SP);            // catch_data ptr (hack: use add to get SP)
