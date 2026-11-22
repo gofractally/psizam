@@ -45,14 +45,14 @@ std::vector<outcome> run_all(const invoke& run, const queries& calls) {
    for (auto& q : calls) results.push_back(call(run, q.name, q.argument));
    return results;
 }
-template<class Impl>
+template<class Impl, class Options = parity_options>
 std::vector<outcome> native(const char* path, const queries& calls) {
    host h;
    auto wasm = read_wasm(path);
-   parity_options options;
+   Options options;
    wasm_allocator memory;
    using registry = registered_host_functions<host>;
-   backend<registry, Impl, parity_options> engine(wasm, host_function_table{}, &h, &memory, options);
+   backend<registry, Impl, Options> engine(wasm, host_function_table{}, &h, &memory, options);
    invoke run = [&](const char* name, uint32_t n) {
       auto value = engine.call_with_return(h, "env", name, n);
       if (!value) throw std::runtime_error("missing return value");
@@ -188,6 +188,55 @@ void matches_or_refuses(Run&& run) {
 TEST_CASE("Shuffle lane indices are never taken for operand registers", "[parity][simd]") {
    expect_parity(ENGINE_PARITY_WASM, {{"shuffle-lanes-are-immediate", 0}, {"shuffle-lanes-are-immediate", 4}},
                  {value(10203 + 8 * 7), value(50607 + 8 * 7)});
+}
+// Each deterministic float mode and profile, on every engine.
+template<fp_mode Mode, float_profile Profile>
+struct float_options : parity_options {
+   static constexpr auto fp = Mode;
+   static constexpr auto float_profile = Profile;
+};
+template<fp_mode Mode, float_profile Profile>
+void expect_float_parity(const char* mode) {
+   using options = float_options<Mode, Profile>;
+   const bool fused = Profile == float_profile::performance;
+   const queries calls{
+      {"madd-f32", 0}, {"nmadd-f32", 0}, {"madd-f64", 0}, {"nmadd-f64", 0},
+      {"madd-nan", 0xffa12345}, {"madd-nan", 0x7f800001},
+      {"min-f32", 0xffc12345}, {"max-f32", 0x7fa00001}, {"min-f32", 0x80000000}, {"max-f32", 0},
+      {"min-f64", 0xfff81234}, {"max-f64", 0x7ff40000}, {"min-f64", 0x80000000}, {"max-f64", 0},
+      {"promote", 0x7fa00001}, {"promote", 0xffc12345}, {"promote", 0x3f800000},
+      {"demote", 0x7ff40000}, {"demote", 0xfff81234}, {"demote", 0x3ff00000},
+      {"promote-low", 0xffa12345}, {"demote-zero", 0xfff40000}};
+   const std::vector<outcome> expected{
+      value(fused ? 0x33800000 : 0), value(fused ? 0xb3800000 : 0),
+      value(fused ? 0x3c900000 : 0), value(fused ? 0xbc900000 : 0),
+      value(0x7fc00000), value(0x7fc00000),
+      value(0x7fc00000), value(0x7fc00000), value(0x80000000), value(0),
+      value(0x7ff80000), value(0x7ff80000), value(0x80000000), value(0),
+      value(0x7ff80000), value(0x7ff80000), value(0x3ff00000),
+      value(0x7fc00000), value(0x7fc00000), value(0x3f800000),
+      value(0x7ff80000), value(0x7fc00000)};
+   auto check = [&](const std::vector<outcome>& actual, const char* engine) {
+      REQUIRE(actual.size() == expected.size());
+      for (size_t i = 0; i < actual.size(); ++i) {
+         CAPTURE(mode, engine, calls[i].name, calls[i].argument);
+         CHECK(actual[i] == expected[i]);
+      }
+   };
+   check(native<interpreter, options>(ENGINE_PARITY_FLOAT_WASM, calls), "interpreter");
+   check(native<jit, options>(ENGINE_PARITY_FLOAT_WASM, calls), "jit1");
+   check(native<jit2, options>(ENGINE_PARITY_FLOAT_WASM, calls), "jit2");
+#ifdef PSIZAM_ENABLE_LLVM_BACKEND
+   check(native<aot_profile, options>(ENGINE_PARITY_FLOAT_WASM, calls), "LLVM-O2-cold");
+#endif
+}
+TEST_CASE("The strict float profile rounds relaxed_madd twice on every engine", "[parity][float]") {
+   expect_float_parity<fp_mode::softfloat, float_profile::strict>("softfloat");
+   expect_float_parity<fp_mode::hw_deterministic, float_profile::strict>("hw_deterministic");
+}
+TEST_CASE("The performance float profile fuses relaxed_madd on every engine", "[parity][float]") {
+   expect_float_parity<fp_mode::softfloat, float_profile::performance>("softfloat");
+   expect_float_parity<fp_mode::hw_deterministic, float_profile::performance>("hw_deterministic");
 }
 TEST_CASE("JIT1 runs a function with more than 65535 values and SIMD", "[parity][simd]") {
    CHECK(native<jit>(ENGINE_PARITY_WIDE_SIMD_WASM, wide_simd_calls) == wide_simd_expected);

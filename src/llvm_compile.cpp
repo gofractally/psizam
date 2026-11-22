@@ -26,7 +26,8 @@ namespace psizam::detail {
                                bool deterministic,
                                mem_safety mem_mode,
                                checked_mode checked_kind,
-                               bool enable_backtrace) {
+                               bool enable_backtrace,
+                               float_profile profile) {
       // Step 1: Translate all IR functions to LLVM IR
       llvm_translate_options topts;
       topts.opt_level          = g_llvm_opt_level;
@@ -34,6 +35,7 @@ namespace psizam::detail {
          topts.opt_level = std::atoi(lv);
       }
       topts.fp                 = deterministic ? fp_mode::hw_deterministic : fp_mode::fast;
+      topts.profile            = profile;
       topts.nothrow_host_calls = false;  // longjmp via trap_jmp_ptr — same as jit/jit2 backends
       topts.mem_mode           = mem_mode;
       topts.checked_kind       = checked_kind;

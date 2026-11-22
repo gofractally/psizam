@@ -22,7 +22,8 @@ namespace psizam::detail {
                                bool deterministic = false,
                                mem_safety mem_mode = mem_safety::guarded,
                                checked_mode checked_kind = checked_mode::strict,
-                               bool enable_backtrace = false);
+                               bool enable_backtrace = false,
+                               float_profile profile = float_profile::strict);
 
    // Set/get LLVM optimization level (0-3). Default is 2.
    void     set_llvm_opt_level(int level);
@@ -64,7 +65,8 @@ namespace psizam::detail {
          try {
             llvm_compile_functions(get_functions(), get_num_functions(),
                                    get_ir_module(), get_ir_allocator(),
-                                   _deterministic, _mem_mode, _checked_kind, _enable_backtrace);
+                                   _deterministic, _mem_mode, _checked_kind, _enable_backtrace,
+                                   this->_float_profile);
          } catch (...) {
             // Cannot throw from destructor; defer for rethrow after parser destructs
             llvm_deferred_exception = std::current_exception();

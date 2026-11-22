@@ -88,6 +88,7 @@ namespace psizam::detail {
       // Current JIT2 aarch64 status: SIMD FP ops always route through softfloat
       // regardless of _fp.
       void set_fp_mode(fp_mode m) noexcept { _fp = m; }
+      void set_float_profile(float_profile p) noexcept { _float_profile = p; }
       fp_mode get_fp_mode() const noexcept { return _fp; }
 
       void set_mem_mode(mem_safety m) noexcept { _mem_mode = m; }
@@ -2914,6 +2915,7 @@ namespace psizam::detail {
             load_vreg_x0(inst.rr.src1);
             emit32(0x9E670000); // FMOV D0, X0
             emit32(0x1E624000); // FCVT S0, D0
+            emit_f32_canonicalize_nan();  // FCVT keeps a NaN's sign and payload
             emit32(0x1E260000); // FMOV W0, S0
             store_x0_vreg(inst.dest);
             break;
@@ -2925,6 +2927,7 @@ namespace psizam::detail {
             load_vreg_x0(inst.rr.src1);
             emit32(0x1E270000); // FMOV S0, W0
             emit32(0x1E22C000); // FCVT D0, S0
+            emit_f64_canonicalize_nan();
             emit32(0x9E660000); // FMOV X0, D0
             store_x0_vreg(inst.dest);
             break;
@@ -3894,10 +3897,30 @@ namespace psizam::detail {
          case simd_sub::f64x2_promote_low_f32x4:     simd_v128_unop_softfloat(&_psizam_f64x2_promote_low_f32x4, reloc_symbol::simd_f64x2_promote_low_f32x4); break;
 
          // ── Relaxed SIMD ──
-         case simd_sub::f32x4_relaxed_madd:  simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_madd, reloc_symbol::simd_f32x4_relaxed_madd); break;
-         case simd_sub::f32x4_relaxed_nmadd: simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_nmadd, reloc_symbol::simd_f32x4_relaxed_nmadd); break;
-         case simd_sub::f64x2_relaxed_madd:  simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_madd, reloc_symbol::simd_f64x2_relaxed_madd); break;
-         case simd_sub::f64x2_relaxed_nmadd: simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_nmadd, reloc_symbol::simd_f64x2_relaxed_nmadd); break;
+         case simd_sub::f32x4_relaxed_madd:
+            if (_float_profile == float_profile::performance)
+               simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_madd_fused, reloc_symbol::simd_f32x4_relaxed_madd_fused);
+            else
+               simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_madd, reloc_symbol::simd_f32x4_relaxed_madd);
+            break;
+         case simd_sub::f32x4_relaxed_nmadd:
+            if (_float_profile == float_profile::performance)
+               simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_nmadd_fused, reloc_symbol::simd_f32x4_relaxed_nmadd_fused);
+            else
+               simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_nmadd, reloc_symbol::simd_f32x4_relaxed_nmadd);
+            break;
+         case simd_sub::f64x2_relaxed_madd:
+            if (_float_profile == float_profile::performance)
+               simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_madd_fused, reloc_symbol::simd_f64x2_relaxed_madd_fused);
+            else
+               simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_madd, reloc_symbol::simd_f64x2_relaxed_madd);
+            break;
+         case simd_sub::f64x2_relaxed_nmadd:
+            if (_float_profile == float_profile::performance)
+               simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_nmadd_fused, reloc_symbol::simd_f64x2_relaxed_nmadd_fused);
+            else
+               simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_nmadd, reloc_symbol::simd_f64x2_relaxed_nmadd);
+            break;
          case simd_sub::i16x8_relaxed_dot_i8x16_i7x16_s: simd_v128_binop_softfloat(&_psizam_i16x8_relaxed_dot_i8x16_i7x16_s, reloc_symbol::simd_i16x8_relaxed_dot_i8x16_i7x16_s); break;
          case simd_sub::i32x4_relaxed_dot_i8x16_i7x16_add_s: simd_v128_ternop_softfloat(&_psizam_i32x4_relaxed_dot_i8x16_i7x16_add_s, reloc_symbol::simd_i32x4_relaxed_dot_i8x16_i7x16_add_s); break;
 
@@ -4781,6 +4804,7 @@ namespace psizam::detail {
       bool _enable_backtrace;
       bool _stack_limit_is_bytes;
       fp_mode _fp = use_softfloat ? fp_mode::softfloat : fp_mode::fast;
+      float_profile _float_profile = float_profile::strict;
       mem_safety    _mem_mode     = mem_safety::guarded;
       checked_mode  _checked_kind = checked_mode::strict;
       void* _code_segment_base = nullptr;

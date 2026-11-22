@@ -2593,28 +2593,34 @@ namespace psizam::detail {
       [[gnu::always_inline]] inline void operator()(const f32x4_relaxed_madd_t&) {
          v128_ternop<float[4]>([this](float a, float b, float c) -> float {
             if (context.fp() != fp_mode::fast)
-               return _psizam_f32_add(_psizam_f32_mul(a, b), c);
+               return context.profile() == float_profile::performance
+                         ? _psizam_f32_fma(a, b, c) : _psizam_f32_add(_psizam_f32_mul(a, b), c);
             return a * b + c;
          });
       }
       [[gnu::always_inline]] inline void operator()(const f32x4_relaxed_nmadd_t&) {
          v128_ternop<float[4]>([this](float a, float b, float c) -> float {
             if (context.fp() != fp_mode::fast)
-               return _psizam_f32_add(_psizam_f32_neg(_psizam_f32_mul(a, b)), c);
+               return context.profile() == float_profile::performance
+                         ? _psizam_f32_fnma(a, b, c)
+                         : _psizam_f32_add(_psizam_f32_neg(_psizam_f32_mul(a, b)), c);
             return -(a * b) + c;
          });
       }
       [[gnu::always_inline]] inline void operator()(const f64x2_relaxed_madd_t&) {
          v128_ternop<double[2]>([this](double a, double b, double c) -> double {
             if (context.fp() != fp_mode::fast)
-               return _psizam_f64_add(_psizam_f64_mul(a, b), c);
+               return context.profile() == float_profile::performance
+                         ? _psizam_f64_fma(a, b, c) : _psizam_f64_add(_psizam_f64_mul(a, b), c);
             return a * b + c;
          });
       }
       [[gnu::always_inline]] inline void operator()(const f64x2_relaxed_nmadd_t&) {
          v128_ternop<double[2]>([this](double a, double b, double c) -> double {
             if (context.fp() != fp_mode::fast)
-               return _psizam_f64_add(_psizam_f64_neg(_psizam_f64_mul(a, b)), c);
+               return context.profile() == float_profile::performance
+                         ? _psizam_f64_fnma(a, b, c)
+                         : _psizam_f64_add(_psizam_f64_neg(_psizam_f64_mul(a, b)), c);
             return -(a * b) + c;
          });
       }

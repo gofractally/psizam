@@ -233,6 +233,8 @@ namespace psizam::detail {
       llvm::Function* sf_f64_convert_i64u = nullptr;
       llvm::Function* sf_f32_demote_f64 = nullptr;
       llvm::Function* sf_f64_promote_f32 = nullptr;
+      llvm::Function* sf_f32_fma = nullptr;
+      llvm::Function* sf_f64_fma = nullptr;
 
       // gas_state redesign — universal memory-deadline shape. Used at
       // function entry and at every loop header so each iteration pays
@@ -651,6 +653,13 @@ namespace psizam::detail {
             llvm::FunctionType::get(f32_ty, {f64_ty}, false));
          sf_f64_promote_f32 = decl("__psizam_sf_f64_promote_f32",
             llvm::FunctionType::get(f64_ty, {f32_ty}, false));
+         // One correctly rounded a*b+c (float_profile::performance). A software
+         // helper on every target: llvm.fma becomes a libm call where the
+         // CPU has no FMA instruction, and saved code cannot link libm.
+         sf_f32_fma = decl("__psizam_sf_f32_fma",
+            llvm::FunctionType::get(f32_ty, {f32_ty, f32_ty, f32_ty}, false));
+         sf_f64_fma = decl("__psizam_sf_f64_fma",
+            llvm::FunctionType::get(f64_ty, {f64_ty, f64_ty, f64_ty}, false));
       }
 
       // Helpers: coerce arbitrary vreg values to a float/double so they match
@@ -738,6 +747,18 @@ namespace psizam::detail {
       // SIMD softfloat scalarization — extract each lane, call scalar sf_*, insert back.
       // Only used when opts.fp == fp_mode::softfloat. Slow (lane-by-lane host calls)
       // but guarantees bit-identical results to scalar softfloat backends.
+      llvm::Value* simd_sf_fused(llvm::IRBuilder<>& builder, llvm::Function* fn, unsigned lanes,
+                                 llvm::Value* a, llvm::Value* b, llvm::Value* c) {
+         llvm::Value* r = llvm::UndefValue::get(a->getType());
+         for (unsigned j = 0; j < lanes; ++j) {
+            auto* idx = builder.getInt32(j);
+            auto* lane = builder.CreateCall(fn, {builder.CreateExtractElement(a, idx),
+                                                 builder.CreateExtractElement(b, idx),
+                                                 builder.CreateExtractElement(c, idx)});
+            r = builder.CreateInsertElement(r, lane, idx);
+         }
+         return r;
+      }
       llvm::Value* simd_sf_f32x4_binop(llvm::IRBuilder<>& builder, llvm::Function* fn,
                                        llvm::Value* a, llvm::Value* b) {
          llvm::Value* result = llvm::UndefValue::get(v4xf32_ty);
@@ -4708,14 +4729,8 @@ namespace psizam::detail {
                      store_v128(inst.simd.v_dest, builder.CreateBitCast(r, v128_ty)); break;
                   }
                   case simd_sub::f32x4_demote_f64x2_zero: {
-                     // NaN-payload-sensitive: route through the softfloat helper
-                     // in any non-`fast` mode so results match the interpreter
-                     // bit-for-bit. Hardware fptrunc canonicalizes NaN payloads
-                     // to 0x7fc00000, which diverges from softfloat's f64_to_f32.
-                     // When the softfloat helper is used, skip maybe_canon_v4xf32
-                     // — the helper already produces the WASM-spec NaN payload
-                     // and canonicalization would overwrite it (matches scalar
-                     // f32_demote_f64 handling above).
+                     // Every non-`fast` mode converts through the softfloat
+                     // helper, which already returns the canonical NaN.
                      auto* a = load_v128(inst.simd.v_src1, v2xf64_ty);
                      llvm::Value* r;
                      bool used_sf = (opts.fp != fp_mode::fast);
@@ -4737,7 +4752,6 @@ namespace psizam::detail {
                      store_v128(inst.simd.v_dest, builder.CreateBitCast(final_r, v128_ty)); break;
                   }
                   case simd_sub::f64x2_promote_low_f32x4: {
-                     // NaN-payload-sensitive: same reasoning as f32x4_demote_f64x2_zero.
                      auto* a = load_v128(inst.simd.v_src1, v4xf32_ty);
                      llvm::Value* r;
                      bool used_sf = (opts.fp != fp_mode::fast);
@@ -4763,6 +4777,9 @@ namespace psizam::detail {
                      auto* b = load_v128(inst.simd.v_src2, v4xf32_ty);
                      auto* c = load_v128(static_cast<uint16_t>(inst.simd.addr), v4xf32_ty);
                      llvm::Value* r;
+                     if (opts.fp != fp_mode::fast && opts.profile == float_profile::performance) {
+                        r = simd_sf_fused(builder, sf_f32_fma, 4, a, b, c);
+                     } else
                      if (opts.fp != fp_mode::fast) {
                         // DET profile: independently rounded multiplication and
                         // addition, using the same canonical-NaN helpers as JITs.
@@ -4780,6 +4797,9 @@ namespace psizam::detail {
                      auto* b = load_v128(inst.simd.v_src2, v4xf32_ty);
                      auto* c = load_v128(static_cast<uint16_t>(inst.simd.addr), v4xf32_ty);
                      llvm::Value* r;
+                     if (opts.fp != fp_mode::fast && opts.profile == float_profile::performance) {
+                        r = simd_sf_fused(builder, sf_f32_fma, 4, builder.CreateFNeg(a), b, c);
+                     } else
                      if (opts.fp != fp_mode::fast) {
                         // DET profile: independently rounded multiplication and
                         // addition, using the same canonical-NaN helpers as JITs.
@@ -4798,6 +4818,9 @@ namespace psizam::detail {
                      auto* b = load_v128(inst.simd.v_src2, v2xf64_ty);
                      auto* c = load_v128(static_cast<uint16_t>(inst.simd.addr), v2xf64_ty);
                      llvm::Value* r;
+                     if (opts.fp != fp_mode::fast && opts.profile == float_profile::performance) {
+                        r = simd_sf_fused(builder, sf_f64_fma, 2, a, b, c);
+                     } else
                      if (opts.fp != fp_mode::fast) {
                         // DET profile: independently rounded multiplication and
                         // addition, using the same canonical-NaN helpers as JITs.
@@ -4815,6 +4838,9 @@ namespace psizam::detail {
                      auto* b = load_v128(inst.simd.v_src2, v2xf64_ty);
                      auto* c = load_v128(static_cast<uint16_t>(inst.simd.addr), v2xf64_ty);
                      llvm::Value* r;
+                     if (opts.fp != fp_mode::fast && opts.profile == float_profile::performance) {
+                        r = simd_sf_fused(builder, sf_f64_fma, 2, builder.CreateFNeg(a), b, c);
+                     } else
                      if (opts.fp != fp_mode::fast) {
                         // DET profile: independently rounded multiplication and
                         // addition, using the same canonical-NaN helpers as JITs.

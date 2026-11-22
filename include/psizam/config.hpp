@@ -22,6 +22,20 @@ enum class fp_mode : unsigned char {
    softfloat        = 2,
 };
 
+// Which deterministic results the relaxed fused operators give. Every
+// deterministic fp_mode honours it identically on every engine; `fast` does
+// not consult it.
+//   strict      : the WebAssembly deterministic profile. relaxed_madd is
+//                 a*b rounded, then +c rounded.
+//   performance : relaxed_madd is one correctly rounded fma(a, b, c) and
+//                 relaxed_nmadd is fma(-a, b, c), as hardware with FMA and
+//                 wasmtime's deterministic relaxed SIMD compute it.
+// Both give the canonical NaN, and are otherwise identical.
+enum class float_profile : unsigned char {
+   strict      = 0,
+   performance = 1,
+};
+
 // Legacy bool-pair → fp_mode. Used by code still carrying the old
 // `softfloat` / `deterministic` booleans during the rollout.
 constexpr fp_mode fp_mode_from_legacy(bool softfloat, bool deterministic) {

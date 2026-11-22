@@ -219,6 +219,7 @@ namespace psizam::detail {
    PARSER_OPTION(enable_exception_handling, true, bool)
 #endif
    PARSER_OPTION(compile_threads, static_cast<std::uint32_t>(0), std::uint32_t)
+   PARSER_OPTION(float_profile, float_profile::strict, psizam::float_profile)
    PARSER_OPTION(memory_mode, mem_safety::guarded, mem_safety)
    PARSER_OPTION(checked_kind, checked_mode::strict, checked_mode)
    // fp_mode picked up by write_code_out below and baked into JIT code
@@ -2963,29 +2964,31 @@ namespace psizam::detail {
                         op_stack.push(types::v128);
                         code_writer.emit_v128_bitselect();
                         break;
+                     // The deterministic profile defines relaxed min and max as the
+                     // ordinary ones: NaN if either operand is, and -0 below +0.
                      case 0x10D: // f32x4.relaxed_min
                         check_in_bounds();
                         op_stack.pop(types::v128); op_stack.pop(types::v128);
                         op_stack.push(types::v128);
-                        code_writer.emit_f32x4_pmin();
+                        code_writer.emit_f32x4_min();
                         break;
                      case 0x10E: // f32x4.relaxed_max
                         check_in_bounds();
                         op_stack.pop(types::v128); op_stack.pop(types::v128);
                         op_stack.push(types::v128);
-                        code_writer.emit_f32x4_pmax();
+                        code_writer.emit_f32x4_max();
                         break;
                      case 0x10F: // f64x2.relaxed_min
                         check_in_bounds();
                         op_stack.pop(types::v128); op_stack.pop(types::v128);
                         op_stack.push(types::v128);
-                        code_writer.emit_f64x2_pmin();
+                        code_writer.emit_f64x2_min();
                         break;
                      case 0x110: // f64x2.relaxed_max
                         check_in_bounds();
                         op_stack.pop(types::v128); op_stack.pop(types::v128);
                         op_stack.push(types::v128);
-                        code_writer.emit_f64x2_pmax();
+                        code_writer.emit_f64x2_max();
                         break;
                      case 0x111: // i16x8.relaxed_q15mulr_s
                         check_in_bounds();
@@ -3383,6 +3386,9 @@ namespace psizam::detail {
             // code writers (x86_64, aarch64, jit2/x86_64, jit2/aarch64, and
             // ir_writer_llvm) bake _fp into their emitted instructions.
             code_writer.set_fp_mode(get_fp(_options));
+         }
+         if constexpr (requires { code_writer.set_float_profile(float_profile{}); }) {
+            code_writer.set_float_profile(get_float_profile(_options));
          }
 #if !defined(__wasi__)
          if constexpr (requires { code_writer.set_parse_callback(std::declval<typename Writer::parse_callback_t>()); }) {

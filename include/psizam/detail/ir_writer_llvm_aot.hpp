@@ -268,6 +268,7 @@ namespace psizam::detail {
          topts.opt_level        = _compile_result->opt_level;
          topts.fp               = _compile_result->softfloat ? fp_mode::softfloat
                                                              : fp_mode::hw_deterministic;
+         topts.profile          = this->_float_profile;
          // Batch mode still uses ExternalLinkage for all wasm_func_N so that
          // cross-batch refs resolve via the symbol table. Same-batch refs
          // produce negative-addend relocs that resolve_cross_function_relocs
@@ -500,6 +501,7 @@ namespace psizam::detail {
          topts.opt_level        = _compile_result->opt_level;
          topts.fp               = _compile_result->softfloat ? fp_mode::softfloat
                                                              : fp_mode::hw_deterministic;
+         topts.profile          = this->_float_profile;
          topts.per_function     = true;
          topts.enable_backtrace = _compile_result->backtrace;
          topts.mem_mode = _mem_mode;

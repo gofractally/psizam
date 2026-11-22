@@ -233,6 +233,8 @@ namespace psizam::detail {
          {"__psizam_sf_f64_convert_i64u", reloc_symbol::sf_f64_convert_i64u},
          {"__psizam_sf_f32_demote_f64",  reloc_symbol::sf_f32_demote_f64},
          {"__psizam_sf_f64_promote_f32", reloc_symbol::sf_f64_promote_f32},
+         {"__psizam_sf_f32_fma", reloc_symbol::sf_f32_fma},
+         {"__psizam_sf_f64_fma", reloc_symbol::sf_f64_fma},
       };
       auto it = sym_map.find(name.str());
       if (it != sym_map.end()) return it->second;

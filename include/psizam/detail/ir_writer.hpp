@@ -235,6 +235,7 @@ namespace psizam::detail {
       // constructed for fresh JIT code. AOT uses the explicit compile_result
       // policy so emitted code agrees with the serialized section metadata.
       void set_fp_mode(fp_mode m) noexcept { _requested_fp = m; }
+      void set_float_profile(float_profile p) noexcept { _float_profile = p; }
       // Branch/label types — dummy values since IR tracks control flow directly.
       // The parser stores and passes these between emit_if/emit_else/emit_end/emit_br
       // but never interprets them. fix_branch is a no-op.
@@ -3421,6 +3422,7 @@ namespace psizam::detail {
             generator.set_fp_mode(_compile_result->softfloat ? fp_mode::softfloat : fp_mode::fast);
          else if (_requested_fp)
             generator.set_fp_mode(*_requested_fp);
+         generator.set_float_profile(_float_profile);
          generator.set_mem_mode(_mem_mode);
          generator.set_checked_kind(_checked_kind);
       }
@@ -3505,6 +3507,7 @@ namespace psizam::detail {
       // Caller-requested fp_mode from parser's set_fp_mode path; unset
       // means use the codegen's compile-result default (see ensure_codegen).
       std::optional<fp_mode>   _requested_fp;
+      float_profile            _float_profile = float_profile::strict;
       // Parallel compilation state
       uint32_t _compile_threads = 0;          // 0 or 1 = serial, >1 = parallel threads
       std::size_t _max_func_bytes = 0;        // Largest function body in module

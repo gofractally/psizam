@@ -171,6 +171,7 @@ namespace psizam::detail {
       // Current JIT2 status: SIMD FP ops always route through softfloat regardless
       // of _fp. Scalar FP paths inherit from x86_64_base patterns.
       void set_fp_mode(fp_mode m) noexcept { _fp = m; }
+      void set_float_profile(float_profile p) noexcept { _float_profile = p; }
       fp_mode get_fp_mode() const noexcept { return _fp; }
 
       void set_mem_mode(mem_safety m) noexcept { _mem_mode = m; }
@@ -1677,11 +1678,13 @@ namespace psizam::detail {
          case ir_op::f32_demote_f64:
             // cvtsd2ss (%rsp), %xmm0; movss %xmm0, (%rsp)
             this->emit_bytes(0xf2, 0x0f, 0x5a, 0x04, 0x24);
+            emit_f32_canonicalize_nan();
             this->emit_bytes(0xf3, 0x0f, 0x11, 0x04, 0x24);
             break;
          case ir_op::f64_promote_f32:
             // cvtss2sd (%rsp), %xmm0; movsd %xmm0, (%rsp)
             this->emit_bytes(0xf3, 0x0f, 0x5a, 0x04, 0x24);
+            emit_f64_canonicalize_nan();
             this->emit_bytes(0xf2, 0x0f, 0x11, 0x04, 0x24);
             break;
 
@@ -3729,6 +3732,7 @@ namespace psizam::detail {
             load_vreg_rax(inst.rr.src1);
             this->emit_bytes(0x66, 0x48, 0x0f, 0x6e, 0xc0);  // movq rax, xmm0
             this->emit_bytes(0xf2, 0x0f, 0x5a, 0xc0);         // cvtsd2ss xmm0, xmm0
+            emit_f32_canonicalize_nan();  // the conversion keeps a NaN's sign and payload
             // f32 result: extract as 32-bit to zero-extend upper 32 of rax.
             this->emit_bytes(0x66, 0x0f, 0x7e, 0xc0);         // movd xmm0, eax
             store_rax_vreg(inst.dest);
@@ -3737,6 +3741,7 @@ namespace psizam::detail {
             load_vreg_rax(inst.rr.src1);
             this->emit_bytes(0x66, 0x48, 0x0f, 0x6e, 0xc0);  // movq rax, xmm0
             this->emit_bytes(0xf3, 0x0f, 0x5a, 0xc0);         // cvtss2sd xmm0, xmm0
+            emit_f64_canonicalize_nan();
             this->emit_bytes(0x66, 0x48, 0x0f, 0x7e, 0xc0);  // movq xmm0, rax
             store_rax_vreg(inst.dest);
             return true;
@@ -6890,10 +6895,30 @@ namespace psizam::detail {
          case simd_sub::f64x2_promote_low_f32x4: simd_v128_unop_softfloat(&_psizam_f64x2_promote_low_f32x4, reloc_symbol::simd_f64x2_promote_low_f32x4); break;
 
          // Relaxed SIMD
-         case simd_sub::f32x4_relaxed_madd: simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_madd, reloc_symbol::simd_f32x4_relaxed_madd); break;
-         case simd_sub::f32x4_relaxed_nmadd: simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_nmadd, reloc_symbol::simd_f32x4_relaxed_nmadd); break;
-         case simd_sub::f64x2_relaxed_madd: simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_madd, reloc_symbol::simd_f64x2_relaxed_madd); break;
-         case simd_sub::f64x2_relaxed_nmadd: simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_nmadd, reloc_symbol::simd_f64x2_relaxed_nmadd); break;
+         case simd_sub::f32x4_relaxed_madd:
+            if (_float_profile == float_profile::performance)
+               simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_madd_fused, reloc_symbol::simd_f32x4_relaxed_madd_fused);
+            else
+               simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_madd, reloc_symbol::simd_f32x4_relaxed_madd);
+            break;
+         case simd_sub::f32x4_relaxed_nmadd:
+            if (_float_profile == float_profile::performance)
+               simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_nmadd_fused, reloc_symbol::simd_f32x4_relaxed_nmadd_fused);
+            else
+               simd_v128_ternop_softfloat(&_psizam_f32x4_relaxed_nmadd, reloc_symbol::simd_f32x4_relaxed_nmadd);
+            break;
+         case simd_sub::f64x2_relaxed_madd:
+            if (_float_profile == float_profile::performance)
+               simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_madd_fused, reloc_symbol::simd_f64x2_relaxed_madd_fused);
+            else
+               simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_madd, reloc_symbol::simd_f64x2_relaxed_madd);
+            break;
+         case simd_sub::f64x2_relaxed_nmadd:
+            if (_float_profile == float_profile::performance)
+               simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_nmadd_fused, reloc_symbol::simd_f64x2_relaxed_nmadd_fused);
+            else
+               simd_v128_ternop_softfloat(&_psizam_f64x2_relaxed_nmadd, reloc_symbol::simd_f64x2_relaxed_nmadd);
+            break;
          case simd_sub::i16x8_relaxed_dot_i8x16_i7x16_s: simd_v128_binop_softfloat(&_psizam_i16x8_relaxed_dot_i8x16_i7x16_s, reloc_symbol::simd_i16x8_relaxed_dot_i8x16_i7x16_s); break;
          case simd_sub::i32x4_relaxed_dot_i8x16_i7x16_add_s: simd_v128_ternop_softfloat(&_psizam_i32x4_relaxed_dot_i8x16_i7x16_add_s, reloc_symbol::simd_i32x4_relaxed_dot_i8x16_i7x16_add_s); break;
 
@@ -7314,6 +7339,7 @@ namespace psizam::detail {
       bool _enable_backtrace;
       bool _stack_limit_is_bytes;
       fp_mode _fp = use_softfloat ? fp_mode::softfloat : fp_mode::fast;
+      float_profile _float_profile = float_profile::strict;
       mem_safety _mem_mode = mem_safety::guarded;
       checked_mode _checked_kind = checked_mode::strict;
       relocation_recorder _reloc_recorder;   // tracks absolute address embeddings for PIC

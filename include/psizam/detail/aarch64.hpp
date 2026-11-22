@@ -205,6 +205,7 @@ namespace psizam::detail {
       // before emit_prologue / parse_function_body code). After machine code
       // has been emitted, changing the mode has no effect on baked code.
       void set_fp_mode(fp_mode m) { _fp = m; }
+      void set_float_profile(float_profile p) { _float_profile = p; }
       fp_mode get_fp_mode() const { return _fp; }
 
       void set_mem_mode(mem_safety m) noexcept { _mem_mode = m; }
@@ -4118,16 +4119,20 @@ namespace psizam::detail {
 
       // Relaxed SIMD
       void emit_f32x4_relaxed_madd() {
-         emit_v128_ternop_softfloat(&_psizam_f32x4_relaxed_madd);
+         emit_v128_ternop_softfloat(_float_profile == float_profile::performance
+                                       ? &_psizam_f32x4_relaxed_madd_fused : &_psizam_f32x4_relaxed_madd);
       }
       void emit_f32x4_relaxed_nmadd() {
-         emit_v128_ternop_softfloat(&_psizam_f32x4_relaxed_nmadd);
+         emit_v128_ternop_softfloat(_float_profile == float_profile::performance
+                                       ? &_psizam_f32x4_relaxed_nmadd_fused : &_psizam_f32x4_relaxed_nmadd);
       }
       void emit_f64x2_relaxed_madd() {
-         emit_v128_ternop_softfloat(&_psizam_f64x2_relaxed_madd);
+         emit_v128_ternop_softfloat(_float_profile == float_profile::performance
+                                       ? &_psizam_f64x2_relaxed_madd_fused : &_psizam_f64x2_relaxed_madd);
       }
       void emit_f64x2_relaxed_nmadd() {
-         emit_v128_ternop_softfloat(&_psizam_f64x2_relaxed_nmadd);
+         emit_v128_ternop_softfloat(_float_profile == float_profile::performance
+                                       ? &_psizam_f64x2_relaxed_nmadd_fused : &_psizam_f64x2_relaxed_nmadd);
       }
       void emit_i16x8_relaxed_dot_i8x16_i7x16_s() {
          emit_v128_binop_softfloat(&_psizam_i16x8_relaxed_dot_i8x16_i7x16_s);
@@ -5940,6 +5945,7 @@ namespace psizam::detail {
       // module is JIT-compiled, the emitted code is baked — changing _fp
       // afterward has no effect on already-emitted machine code.
       fp_mode _fp = use_softfloat ? fp_mode::softfloat : fp_mode::fast;
+      float_profile _float_profile = float_profile::strict;
       mem_safety    _mem_mode     = mem_safety::guarded;
       checked_mode  _checked_kind = checked_mode::strict;
       const func_type* _ft = nullptr;

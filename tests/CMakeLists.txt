@@ -668,6 +668,11 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/engine-parity.wasm"
    COMMAND "${PSIZAM_WAT2WASM}" "${CMAKE_CURRENT_SOURCE_DIR}/engine-parity.wat"
       -o "${CMAKE_CURRENT_BINARY_DIR}/engine-parity.wasm"
    DEPENDS engine-parity.wat VERBATIM)
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-float.wasm"
+   COMMAND "${PSIZAM_WAT2WASM}" --enable-relaxed-simd
+      "${CMAKE_CURRENT_SOURCE_DIR}/engine-parity-float.wat"
+      -o "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-float.wasm"
+   DEPENDS engine-parity-float.wat VERBATIM)
 # One vector stays live while 65536 more are created: with 16-bit operand ids
 # a later vector would alias the first.
 string(REPEAT "i32.const 9 i32x4.splat drop\n" 65536 _wide_simd_body)
@@ -696,6 +701,7 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-loop.w
    DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-loop.wat" VERBATIM)
 add_executable(psizam_engine_parity_tests main.cpp engine_parity_tests.cpp
    "${CMAKE_CURRENT_BINARY_DIR}/engine-parity.wasm"
+   "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-float.wasm"
    "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-loop.wasm"
    "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-simd.wasm")
 target_link_libraries(psizam_engine_parity_tests PRIVATE psizam psizam-exec Catch2::Catch2)
@@ -711,6 +717,7 @@ if(PSIZAM_ENABLE_LLVM)
 endif()
 target_compile_definitions(psizam_engine_parity_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
    ENGINE_PARITY_WASM="${CMAKE_CURRENT_BINARY_DIR}/engine-parity.wasm"
+   ENGINE_PARITY_FLOAT_WASM="${CMAKE_CURRENT_BINARY_DIR}/engine-parity-float.wasm"
    ENGINE_PARITY_WIDE_LOOP_WASM="${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-loop.wasm"
    ENGINE_PARITY_WIDE_SIMD_WASM="${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-simd.wasm")
 add_test(NAME execution.engine-parity COMMAND psizam_engine_parity_tests)

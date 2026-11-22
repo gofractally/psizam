@@ -236,6 +236,8 @@ namespace psizam::detail {
       add_sym("__psizam_sf_f64_convert_i64u", reinterpret_cast<void*>(&_psizam_ui64_to_f64));
       add_sym("__psizam_sf_f32_demote_f64",   reinterpret_cast<void*>(&_psizam_f64_demote));
       add_sym("__psizam_sf_f64_promote_f32",  reinterpret_cast<void*>(&_psizam_f32_promote));
+      add_sym("__psizam_sf_f32_fma",          reinterpret_cast<void*>(&_psizam_f32_fma));
+      add_sym("__psizam_sf_f64_fma",          reinterpret_cast<void*>(&_psizam_f64_fma));
 
       if (auto err = jd.define(llvm::orc::absoluteSymbols(std::move(runtime_syms)))) {
          std::string msg;

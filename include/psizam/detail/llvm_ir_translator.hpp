@@ -48,6 +48,8 @@ namespace psizam::detail {
       // hw_deterministic : native FP, NaN-canonicalized, bit-matches softfloat.
       // softfloat        : lane-wise softfloat (reference oracle, slowest).
       fp_mode fp             = fp_mode::fast;
+      // Fused or unfused relaxed_madd in the deterministic modes.
+      float_profile profile  = float_profile::strict;
 
       bool enable_backtrace  = false; // Enable async backtrace support
       int  opt_level         = 2;     // LLVM optimization level (0-3)

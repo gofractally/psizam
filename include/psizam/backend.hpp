@@ -262,6 +262,9 @@ namespace psizam {
          if constexpr (requires { options.fp; }) {
             ctx.set_fp_mode(options.fp);
          }
+         if constexpr (requires { options.float_profile; }) {
+            ctx.set_float_profile(options.float_profile);
+         }
       }
    }
 

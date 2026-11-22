@@ -435,12 +435,15 @@ inline bool _psizam_f64_ge( double af, double bf ) {
    return !::f64_lt( a, b );
 }
 
+// A NaN converts to the positive canonical NaN of the result type, as the
+// WebAssembly deterministic profile requires and as for every other operator
+// here; the conversion alone would carry the operand's sign and payload over.
 inline double _psizam_f32_promote( float a ) {
-   return from_softfloat64(f32_to_f64( to_softfloat32(a)) );
+   return from_softfloat64(canonicalize_nan(f32_to_f64( to_softfloat32(a))) );
 }
 
 inline float _psizam_f64_demote( double a ) {
-   return from_softfloat32(f64_to_f32( to_softfloat64(a)) );
+   return from_softfloat32(canonicalize_nan(f64_to_f32( to_softfloat64(a))) );
 }
 
 inline int32_t _psizam_f32_trunc_i32s( float af ) {
@@ -1026,6 +1029,46 @@ inline v128_t _psizam_f64x2_relaxed_nmadd(v128_t a, v128_t b, v128_t c) {
    v128_t tmp = _psizam_f64x2_mul(a, b);
    v128_t neg = _psizam_f64x2_neg(tmp);
    return _psizam_f64x2_add(neg, c);
+}
+
+// float_profile::performance: one rounding. Computed in software on every
+// engine and CPU, so a machine without an FMA instruction gives the same bits.
+inline float _psizam_f32_fma(float a, float b, float c) {
+   return from_softfloat32(canonicalize_nan(
+       ::f32_mulAdd(to_softfloat32(a), to_softfloat32(b), to_softfloat32(c))));
+}
+inline double _psizam_f64_fma(double a, double b, double c) {
+   return from_softfloat64(canonicalize_nan(
+       ::f64_mulAdd(to_softfloat64(a), to_softfloat64(b), to_softfloat64(c))));
+}
+inline float _psizam_f32_fnma(float a, float b, float c) {
+   return _psizam_f32_fma(_psizam_f32_neg(a), b, c);
+}
+inline double _psizam_f64_fnma(double a, double b, double c) {
+   return _psizam_f64_fma(_psizam_f64_neg(a), b, c);
+}
+template <typename T, int Lanes, T (*F)(T, T, T)>
+inline v128_t _psizam_fused_lanes(v128_t a, v128_t b, v128_t c) {
+   T x[Lanes], y[Lanes], z[Lanes];
+   std::memcpy(x, &a, sizeof(x));
+   std::memcpy(y, &b, sizeof(y));
+   std::memcpy(z, &c, sizeof(z));
+   for (int i = 0; i < Lanes; ++i) x[i] = F(x[i], y[i], z[i]);
+   v128_t result;
+   std::memcpy(&result, x, sizeof(x));
+   return result;
+}
+inline v128_t _psizam_f32x4_relaxed_madd_fused(v128_t a, v128_t b, v128_t c) {
+   return _psizam_fused_lanes<float, 4, _psizam_f32_fma>(a, b, c);
+}
+inline v128_t _psizam_f32x4_relaxed_nmadd_fused(v128_t a, v128_t b, v128_t c) {
+   return _psizam_fused_lanes<float, 4, _psizam_f32_fnma>(a, b, c);
+}
+inline v128_t _psizam_f64x2_relaxed_madd_fused(v128_t a, v128_t b, v128_t c) {
+   return _psizam_fused_lanes<double, 2, _psizam_f64_fma>(a, b, c);
+}
+inline v128_t _psizam_f64x2_relaxed_nmadd_fused(v128_t a, v128_t b, v128_t c) {
+   return _psizam_fused_lanes<double, 2, _psizam_f64_fnma>(a, b, c);
 }
 
 inline v128_t _psizam_i16x8_relaxed_dot_i8x16_i7x16_s(v128_t a, v128_t b) {

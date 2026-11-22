@@ -232,6 +232,8 @@ namespace psizam::detail {
       // ── Floating-point execution mode (per-instance) ──
       inline fp_mode fp() const noexcept { return _fp; }
       inline void    set_fp_mode(fp_mode m) noexcept { _fp = m; }
+      inline float_profile profile() const noexcept { return _float_profile; }
+      inline void    set_float_profile(float_profile p) noexcept { _float_profile = p; }
 
       // ── LLVM runtime helper accessors ──
       inline init_expr& get_global(uint32_t idx) { return _globals[idx]; }
@@ -621,6 +623,7 @@ namespace psizam::detail {
       std::vector<bool>               _dropped_elems;
       std::vector<bool>               _dropped_data;
       fp_mode                         _fp = use_softfloat ? fp_mode::softfloat : fp_mode::fast;
+      float_profile                   _float_profile = float_profile::strict;
       // Gas metering — single gas_state struct. Defaults to inert
       // (consumed=0, deadline=UINT64_MAX, null handler). Enable by
       // calling set_gas_budget(gas_units{N}) and optionally
