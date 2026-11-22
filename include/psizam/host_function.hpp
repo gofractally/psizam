@@ -7,6 +7,7 @@
 #include <psizam/detail/span.hpp>
 #include <psizam/utils.hpp>
 #include <psizam/detail/wasm_stack.hpp>
+#include <psizam/detail/signals.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -544,7 +545,7 @@ namespace psizam {
       // Read a parameter from native_value array at given offset, with memory base for span/proxy types.
       // Reversed=true when reading from a reverse-order buffer (JIT stack order):
       // multi-slot types (span, argument_proxy<span>) have their sub-fields reversed.
-      template<typename T, bool Reversed = false>
+      template<typename T, bool Reversed = false, bool Memory16 = false>
       inline decltype(auto) read_fast_arg(native_value* args, std::size_t offset, char* memory) {
          if constexpr (is_simple_wasm_type_v<T>) {
             return read_native_arg<T>(args[offset]);
@@ -556,8 +557,10 @@ namespace psizam {
             constexpr std::size_t len_idx = Reversed ? 0 : 1;
             wasm_ptr_t ptr = args[offset + ptr_idx].i32;
             wasm_size_t len = args[offset + len_idx].i32;
+            if constexpr (Memory16)
+               execution_interface{memory, nullptr, fp_mode::fast, true}.template validate_pointer<value_type>(ptr, len);
             void* addr = memory + ptr;
-            if (len > 0) {
+            if (!Memory16 && len > 0) {
                // Validate: touch last byte (same as execution_interface::validate_pointer)
                PSIZAM_ASSERT(len <= std::numeric_limits<wasm_size_t>::max() / (wasm_size_t)sizeof(value_type),
                              wasm_interpreter_exception, "length will overflow");
@@ -573,8 +576,10 @@ namespace psizam {
                constexpr std::size_t len_idx = Reversed ? 0 : 1;
                wasm_ptr_t ptr = args[offset + ptr_idx].i32;
                wasm_size_t len = args[offset + len_idx].i32;
+               if constexpr (Memory16)
+                  execution_interface{memory, nullptr, fp_mode::fast, true}.template validate_pointer<pointee_type>(ptr, len);
                void* addr = memory + ptr;
-               if (len > 0) {
+               if (!Memory16 && len > 0) {
                   PSIZAM_ASSERT(len <= std::numeric_limits<wasm_size_t>::max() / (wasm_size_t)sizeof(pointee_type),
                                 wasm_interpreter_exception, "length will overflow");
                   volatile auto check = *(reinterpret_cast<const char*>(addr) + (len * sizeof(pointee_type)) - 1);
@@ -585,10 +590,14 @@ namespace psizam {
                // argument_proxy<U*> — consumes 1 slot: ptr
                using pointee_type = typename T::pointee_type;
                wasm_ptr_t ptr = args[offset].i32;
+               if constexpr (Memory16)
+                  execution_interface{memory, nullptr, fp_mode::fast, true}.template validate_pointer<pointee_type>(ptr, 1);
                void* addr = memory + ptr;
                // Validate single element
-               volatile auto check = *(reinterpret_cast<const char*>(addr) + sizeof(pointee_type) - 1);
-               ignore_unused_variable_warning(check);
+               if constexpr (!Memory16) {
+                  volatile auto check = *(reinterpret_cast<const char*>(addr) + sizeof(pointee_type) - 1);
+                  ignore_unused_variable_warning(check);
+               }
                return T{addr};
             }
          }
@@ -621,19 +630,55 @@ namespace psizam {
       }
    } // ns detail
 
+   namespace detail {
+      // Keep C++ unwinding inside native host code. JIT1's dynamically aligned
+      // import stubs cannot be described by the generic JIT frame registration.
+      // The existing trap boundary safely restores the guest's native stack.
+      template<auto Func, typename Cls>
+      native_value memory16_host_call(Cls* host, native_value* args, char* memory) {
+#ifndef PSIZAM_COMPILE_ONLY
+         if (trap_jmp_ptr) {
+            native_value result{uint64_t{0}};
+            longjmp_on_exception([&] { result = Func(host, args, memory); });
+            return result;
+         }
+#endif
+         return Func(host, args, memory);
+      }
+
+      // Opt-in hook for hosts which consume raw integer offsets (e.g. WASI).
+      // Only memory16 trampolines change the flag; nested calls restore it.
+      template<typename Cls, bool Memory16>
+      struct host_memory16_scope {
+         Cls* host;
+         bool previous = false;
+         explicit host_memory16_scope(Cls* host) : host(host) {
+            if constexpr (Memory16 && requires { host->psizam_memory16; }) {
+               previous = host->psizam_memory16;
+               host->psizam_memory16 = true;
+            }
+         }
+         ~host_memory16_scope() {
+            if constexpr (Memory16 && requires { host->psizam_memory16; })
+               host->psizam_memory16 = previous;
+         }
+      };
+   }
+
    // Extended fast trampoline type: includes memory pointer for span/proxy construction.
    template<typename Cls>
    using fast_host_trampoline_t = native_value(*)(Cls*, native_value*, char*);
 
    // Forward-order trampoline: args[0..] in parameter order
-   template<auto F, typename Cls, typename R, typename Args, std::size_t... Is>
+   template<auto F, typename Cls, typename R, typename Args, bool Memory16 = false, std::size_t... Is>
    native_value fast_trampoline_fwd_impl(Cls* host, native_value* args, char* memory, std::index_sequence<Is...>) {
+      detail::host_memory16_scope<Cls, Memory16> mode{host};
       auto call = [&]() {
          if constexpr (std::is_same_v<Cls, standalone_function_t>)
-            return std::invoke(F, detail::read_fast_arg<std::tuple_element_t<Is, Args>>(
+            return std::invoke(F, detail::read_fast_arg<std::tuple_element_t<Is, Args>, false, Memory16>(
                args, detail::native_offset_of<Args, Is>(), memory)...);
          else
-            return std::invoke(F, host, detail::read_fast_arg<std::tuple_element_t<Is, Args>>(
+            return std::invoke(F, host, detail::read_fast_arg<std::tuple_element_t<Is, Args>, false, Memory16>(
                args, detail::native_offset_of<Args, Is>(), memory)...);
       };
       if constexpr (std::is_void_v<R>) {
@@ -645,15 +690,16 @@ namespace psizam {
    }
 
    // Reverse-order trampoline: args[0] = last WASM stack slot
-   template<auto F, typename Cls, typename R, typename Args, std::size_t... Is>
+   template<auto F, typename Cls, typename R, typename Args, bool Memory16 = false, std::size_t... Is>
    native_value fast_trampoline_rev_impl(Cls* host, native_value* args, char* memory, std::index_sequence<Is...>) {
+      detail::host_memory16_scope<Cls, Memory16> mode{host};
       constexpr std::size_t total = detail::total_native_slots_v<Args>;
       auto call = [&]() {
          if constexpr (std::is_same_v<Cls, standalone_function_t>)
-            return std::invoke(F, detail::read_fast_arg<std::tuple_element_t<Is, Args>, true>(
+            return std::invoke(F, detail::read_fast_arg<std::tuple_element_t<Is, Args>, true, Memory16>(
                args, total - detail::native_offset_of<Args, Is>() - detail::native_slot_count_v<std::tuple_element_t<Is, Args>>, memory)...);
          else
-            return std::invoke(F, host, detail::read_fast_arg<std::tuple_element_t<Is, Args>, true>(
+            return std::invoke(F, host, detail::read_fast_arg<std::tuple_element_t<Is, Args>, true, Memory16>(
                args, total - detail::native_offset_of<Args, Is>() - detail::native_slot_count_v<std::tuple_element_t<Is, Args>>, memory)...);
       };
       if constexpr (std::is_void_v<R>) {
@@ -664,15 +710,15 @@ namespace psizam {
       }
    }
 
-   template<auto F, typename Cls, typename R, typename Args>
+   template<auto F, typename Cls, typename R, typename Args, bool Memory16 = false>
    native_value fast_trampoline_fwd(Cls* host, native_value* args, char* memory) {
-      return fast_trampoline_fwd_impl<F, Cls, R, Args>(host, args, memory,
+      return fast_trampoline_fwd_impl<F, Cls, R, Args, Memory16>(host, args, memory,
          std::make_index_sequence<std::tuple_size_v<Args>>{});
    }
 
-   template<auto F, typename Cls, typename R, typename Args>
+   template<auto F, typename Cls, typename R, typename Args, bool Memory16 = false>
    native_value fast_trampoline_rev(Cls* host, native_value* args, char* memory) {
-      return fast_trampoline_rev_impl<F, Cls, R, Args>(host, args, memory,
+      return fast_trampoline_rev_impl<F, Cls, R, Args, Memory16>(host, args, memory,
          std::make_index_sequence<std::tuple_size_v<Args>>{});
    }
 
@@ -684,14 +730,15 @@ namespace psizam {
    // Two variants exist for the two argument orders:
    //   _rev: args[0] = last WASM stack slot (used by jit, jit2)
    //   _fwd: args[0] = first WASM parameter  (used by jit_llvm)
-   template<auto F, typename Cls, typename TC, typename R, typename Args, typename Preconditions>
+   template<auto F, typename Cls, typename TC, typename R, typename Args, typename Preconditions, bool Memory16 = false>
    native_value slow_trampoline_rev(Cls* host, native_value* args, char* memory) {
+      detail::host_memory16_scope<Cls, Memory16> mode{host};
       constexpr uint32_t total_slots = detail::total_native_slots_v<Args>;
       detail::operand_stack temp_stack;
       for (int32_t i = static_cast<int32_t>(total_slots) - 1; i >= 0; i--) {
          temp_stack.push(i64_const_t{args[i].i64});
       }
-      execution_interface ei{memory, &temp_stack};
+      execution_interface ei{memory, &temp_stack, fp_mode::fast, Memory16};
       TC tc{static_cast<Cls*>(host), std::move(ei)};
 
       if constexpr (std::is_void_v<R>) {
@@ -714,14 +761,15 @@ namespace psizam {
       }
    }
 
-   template<auto F, typename Cls, typename TC, typename R, typename Args, typename Preconditions>
+   template<auto F, typename Cls, typename TC, typename R, typename Args, typename Preconditions, bool Memory16 = false>
    native_value slow_trampoline_fwd(Cls* host, native_value* args, char* memory) {
+      detail::host_memory16_scope<Cls, Memory16> mode{host};
       constexpr uint32_t total_slots = detail::total_native_slots_v<Args>;
       detail::operand_stack temp_stack;
       for (uint32_t i = 0; i < total_slots; i++) {
          temp_stack.push(i64_const_t{args[i].i64});
       }
-      execution_interface ei{memory, &temp_stack};
+      execution_interface ei{memory, &temp_stack, fp_mode::fast, Memory16};
       TC tc{static_cast<Cls*>(host), std::move(ei)};
 
       if constexpr (std::is_void_v<R>) {
@@ -833,6 +881,8 @@ namespace psizam {
          std::vector<host_function>                                        host_functions;
          std::vector<fast_host_trampoline_t<Cls>>                          fast_fwd;  // forward order (interpreter)
          std::vector<fast_host_trampoline_t<Cls>>                          fast_rev;  // reverse order (JIT)
+         std::vector<fast_host_trampoline_t<Cls>>                          memory16_fwd;
+         std::vector<fast_host_trampoline_t<Cls>>                          memory16_rev;
          std::vector<void*>                                                raw_ptrs;  // raw C function pointers for direct JIT calls
          size_t                                                            current_index = 0;
          std::unordered_map<host_func_pair, host_table_import, host_func_pair_hash>  table_imports;
@@ -854,6 +904,8 @@ namespace psizam {
                           std::tuple_size_v<Preconditions> == 0) {
                fast_fwd.push_back(&fast_trampoline_fwd<F, Cls, R, Args>);
                fast_rev.push_back(&fast_trampoline_rev<F, Cls, R, Args>);
+               memory16_fwd.push_back(&detail::memory16_host_call<&fast_trampoline_fwd<F, Cls, R, Args, true>, Cls>);
+               memory16_rev.push_back(&detail::memory16_host_call<&fast_trampoline_rev<F, Cls, R, Args, true>, Cls>);
             } else {
                // Non-fast-eligible: the JIT path needs SOMETHING callable here
                // (otherwise _trampoline_ptrs[i] is null and the JIT-emitted
@@ -862,6 +914,8 @@ namespace psizam {
                // type_converter pipeline.
                fast_fwd.push_back(&slow_trampoline_fwd<F, Cls, Type_Converter, R, Args, Preconditions>);
                fast_rev.push_back(&slow_trampoline_rev<F, Cls, Type_Converter, R, Args, Preconditions>);
+               memory16_fwd.push_back(&detail::memory16_host_call<&slow_trampoline_fwd<F, Cls, Type_Converter, R, Args, Preconditions, true>, Cls>);
+               memory16_rev.push_back(&detail::memory16_host_call<&slow_trampoline_rev<F, Cls, Type_Converter, R, Args, Preconditions, true>, Cls>);
             }
             // Store raw function pointer for direct JIT calls.
             // Only safe when all params are direct-call-safe (no bool, no pointers, no type conversion).

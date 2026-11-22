@@ -12,6 +12,7 @@
 #include <psizam/detail/vector.hpp>
 #include <psizam/detail/debug_info.hpp>
 #include <psizam/detail/gas_injector.hpp>
+#include <psizam/detail/null_writer.hpp>
 
 #include <algorithm>
 #include <cassert>
@@ -403,6 +404,26 @@ namespace psizam::detail {
          // LLVM translation may run while the writer is still parsing. Publish
          // the mode before constructing or finalizing any function writer.
          mod.stack_limit_is_bytes = has_max_stack_bytes<Options>;
+         PSIZAM_ASSERT(sz >= code_ptr.offset() && sz <= code_ptr.bounds(), wasm_parse_exception,
+                       "module size out of range");
+         mod.execution_profile = read_execution_profile({code_ptr.raw(), sz - code_ptr.offset()});
+         if (!mod.execution_profile && get_memory_mode(_options) == mem_safety::memory16)
+            mod.execution_profile = memory16_p32_v1;
+         if constexpr (requires { typename Writer::parse_callback_t; }) {
+            if (is_memory16_profile(mod.execution_profile) && get_compile_threads(_options) > 1) {
+               // Worker parsing currently runs in noexcept writer teardown.
+               // Reject malformed memory16 code on this thread before it can
+               // throw across a worker/destructor boundary and abort the host.
+               // null_writer never dispatches workers, even with these options.
+               module validated;
+               validated.allocator.use_default_memory();
+               null_debug_info validation_debug;
+               binary_parser<null_writer, Options, null_debug_info> validator(
+                  validated.allocator, _options, _enable_backtrace, _stack_limit_is_bytes);
+               auto validation_code = code_ptr;
+               validator.parse_module(validation_code, sz, validated, validation_debug);
+            }
+         }
          PSIZAM_ASSERT(parse_magic(code_ptr) == constants::magic, wasm_parse_exception, "magic number did not match");
          PSIZAM_ASSERT(parse_version(code_ptr) == constants::version, wasm_parse_exception,
                        "version number did not match");
@@ -468,6 +489,13 @@ namespace psizam::detail {
                if (fast_functions.empty()) normalize_types();
                write_code_out(_allocator, code_ptr, code_ptr.raw() - code_ptr.offset());
             }
+         }
+
+         if (is_memory16_profile(mod.execution_profile)) {
+            PSIZAM_ASSERT(mod.memories.size() == 1 && !mod.memories[0].is_memory64 &&
+                          mod.memories[0].limits.initial == 1 && mod.memories[0].limits.flags &&
+                          mod.memories[0].limits.maximum == 1, wasm_parse_exception,
+                          "memory16-v1 requires one fixed 64 KiB wasm32 memory");
          }
 
          _mod->stack_limit_is_bytes = has_max_stack_bytes<Options>;
@@ -750,7 +778,10 @@ namespace psizam::detail {
             PSIZAM_ASSERT(off64 <= UINT32_MAX, wasm_parse_exception, "memory64 offset exceeds implementation limit");
             return static_cast<uint32_t>(off64);
          }
-         return parse_varuint32(code);
+         auto offset = parse_varuint32(code);
+         PSIZAM_ASSERT(!is_memory16_profile(_mod->execution_profile) || offset <= memory16_address_mask,
+                       wasm_parse_exception, "memory16 offset too large");
+         return offset;
       }
 
       void parse_export_entry(wasm_code_ptr& code, export_entry& entry) {
@@ -2249,7 +2280,7 @@ namespace psizam::detail {
                      offset = parse_varuint32(code);                 \
                   }                                                  \
                   PSIZAM_ASSERT(alignment <= uint32_t(max_align), wasm_parse_exception, "alignment cannot be greater than size."); \
-                  PSIZAM_ASSERT(offset <= get_max_memory_offset(_options), wasm_parse_exception, "load offset too large."); \
+                  PSIZAM_ASSERT(offset <= std::min(get_max_memory_offset(_options), is_memory16_profile(_mod->execution_profile) ? memory16_address_mask : UINT32_MAX), wasm_parse_exception, "load offset too large."); \
                   op_stack.pop(mem_addr_type());                     \
                   op_stack.push(types::type);                        \
                   code_writer.emit_ ## op_name( alignment, offset ); \
@@ -2284,7 +2315,7 @@ namespace psizam::detail {
                      offset = parse_varuint32(code);                 \
                   }                                                  \
                   PSIZAM_ASSERT(alignment <= uint32_t(max_align), wasm_parse_exception, "alignment cannot be greater than size."); \
-                  PSIZAM_ASSERT(offset <= get_max_memory_offset(_options), wasm_parse_exception, "store offset too large."); \
+                  PSIZAM_ASSERT(offset <= std::min(get_max_memory_offset(_options), is_memory16_profile(_mod->execution_profile) ? memory16_address_mask : UINT32_MAX), wasm_parse_exception, "store offset too large."); \
                   op_stack.pop(types::type);                         \
                   op_stack.pop(mem_addr_type());                     \
                   code_writer.emit_ ## op_name( alignment, offset ); \
@@ -2540,7 +2571,7 @@ namespace psizam::detail {
                         }                                               \
                         uint8_t lane = *code++;                         \
                         PSIZAM_ASSERT(alignment <= uint32_t(max_align), wasm_parse_exception, "alignment cannot be greater than size."); \
-                        PSIZAM_ASSERT(offset <= get_max_memory_offset(_options), wasm_parse_exception, "load offset too large."); \
+                        PSIZAM_ASSERT(offset <= std::min(get_max_memory_offset(_options), is_memory16_profile(_mod->execution_profile) ? memory16_address_mask : UINT32_MAX), wasm_parse_exception, "load offset too large."); \
                         PSIZAM_ASSERT(lane < (1 << (4-max_align)), wasm_parse_exception, "laneidx out of bounds"); \
                         op_stack.pop(types::type);                      \
                         op_stack.pop(mem_addr_type());                  \
@@ -2570,7 +2601,7 @@ namespace psizam::detail {
                         }                                               \
                         uint8_t lane = *code++;                         \
                         PSIZAM_ASSERT(alignment <= uint32_t(max_align), wasm_parse_exception, "alignment cannot be greater than size."); \
-                        PSIZAM_ASSERT(offset <= get_max_memory_offset(_options), wasm_parse_exception, "store offset too large."); \
+                        PSIZAM_ASSERT(offset <= std::min(get_max_memory_offset(_options), is_memory16_profile(_mod->execution_profile) ? memory16_address_mask : UINT32_MAX), wasm_parse_exception, "store offset too large."); \
                         PSIZAM_ASSERT(lane < (1 << (4-max_align)), wasm_parse_exception, "laneidx out of bounds"); \
                         op_stack.pop(types::type);                      \
                         op_stack.pop(mem_addr_type());                  \
@@ -3387,7 +3418,8 @@ namespace psizam::detail {
             code_writer.set_compile_result(_compile_result);
          }
          if constexpr (requires { code_writer.set_mem_mode(mem_safety{}); }) {
-            code_writer.set_mem_mode(get_memory_mode(_options));
+            code_writer.set_mem_mode(is_memory16_profile(_mod->execution_profile)
+                                        ? mem_safety::memory16 : get_memory_mode(_options));
             code_writer.set_checked_kind(get_checked_kind(_options));
          }
          if constexpr (requires { code_writer.set_fp_mode(fp_mode{}); }) {

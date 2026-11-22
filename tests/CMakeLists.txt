@@ -837,3 +837,38 @@ target_compile_definitions(psizam_native_frame_metadata_tests PRIVATE CATCH_CONF
 add_test(NAME psizam_native_frame_metadata_tests COMMAND psizam_native_frame_metadata_tests)
 set_tests_properties(psizam_native_frame_metadata_tests PROPERTIES TIMEOUT 60 LABELS "execution;resource;abi")
 
+
+# The retained memory16-v1 contract is opt-in. Its writable padding is part of
+# instance state, while bulk operations and host pointers remain logical64KiB.
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/memory16.wasm"
+   COMMAND "${PSIZAM_WAT2WASM}" --enable-threads "${CMAKE_CURRENT_SOURCE_DIR}/memory16.wat"
+      -o "${CMAKE_CURRENT_BINARY_DIR}/memory16.wasm"
+   DEPENDS memory16.wat VERBATIM)
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/memory16_host.wasm"
+   COMMAND "${PSIZAM_WAT2WASM}" "${CMAKE_CURRENT_SOURCE_DIR}/memory16_host.wat"
+      -o "${CMAKE_CURRENT_BINARY_DIR}/memory16_host.wasm"
+   DEPENDS memory16_host.wat VERBATIM)
+add_executable(psizam_memory16_tests main.cpp memory16_tests.cpp
+   "${CMAKE_CURRENT_BINARY_DIR}/memory16.wasm"
+   "${CMAKE_CURRENT_BINARY_DIR}/memory16_host.wasm")
+target_link_libraries(psizam_memory16_tests PRIVATE psizam psizam-exec Catch2::Catch2)
+if(PSIZAM_ENABLE_LLVM)
+   target_link_libraries(psizam_memory16_tests PRIVATE psizam-llvm)
+endif()
+target_compile_definitions(psizam_memory16_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
+   PSIZAM_MEMORY16_FIXTURE="${CMAKE_CURRENT_BINARY_DIR}/memory16.wasm"
+   PSIZAM_MEMORY16_HOST_FIXTURE="${CMAKE_CURRENT_BINARY_DIR}/memory16_host.wasm")
+add_test(NAME execution.memory16 COMMAND psizam_memory16_tests)
+set_tests_properties(execution.memory16 PROPERTIES TIMEOUT 300 LABELS "execution;memory16;resource")
+
+# Binary marker emission is independent of the deferred Rust p16 toolchain.
+set(PSIZAM_MEMORY16_SDK_CC "" CACHE FILEPATH "Wasm C compiler for memory16 marker emission checks")
+if(NOT PSIZAM_MEMORY16_SDK_CC AND EXISTS "${PSIZAM_WASI_SDK}/bin/clang")
+   set(PSIZAM_MEMORY16_SDK_CC "${PSIZAM_WASI_SDK}/bin/clang")
+endif()
+if(PSIZAM_MEMORY16_SDK_CC)
+   add_test(NAME memory16_sdk_emission
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/memory16_sdk_test.py"
+         "${PSIZAM_MEMORY16_SDK_CC}" "${PROJECT_SOURCE_DIR}/include/psizam/memory16.h")
+   set_tests_properties(memory16_sdk_emission PROPERTIES TIMEOUT 120 LABELS "compiler;memory16;sdk")
+endif()

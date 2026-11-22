@@ -41,8 +41,9 @@ namespace psizam::detail {
    // interface used for the host function system to use
    // clients can create their own interface to overlay their own implementations
    struct execution_interface {
-      inline execution_interface( char* memory, operand_stack* os, fp_mode fp = fp_mode::fast )
-         : memory(memory), os(os), _fp(fp) {}
+      inline execution_interface( char* memory, operand_stack* os, fp_mode fp = fp_mode::fast,
+                                  bool memory16 = false )
+         : memory(memory), os(os), _fp(fp), _memory16(memory16) {}
       inline void* get_memory() const { return memory; }
       inline fp_mode fp() const { return _fp; }
       inline void trim_operands(std::size_t amt) { os->trim(amt); }
@@ -54,6 +55,11 @@ namespace psizam::detail {
 
       template <typename T>
       inline void* validate_pointer(wasm_ptr_t ptr, wasm_size_t len) const {
+         if (_memory16) {
+            PSIZAM_ASSERT(uint64_t(ptr) <= 65536 && uint64_t(len) <= (65536 - uint64_t(ptr)) / sizeof(T),
+                          wasm_memory_exception, "memory16 host/bulk access out of bounds");
+            return memory + ptr;
+         }
          auto result = memory + ptr;
          validate_pointer<T>(result, len);
          return result;
@@ -61,18 +67,36 @@ namespace psizam::detail {
 
       template <typename T>
       inline void validate_pointer(const void* ptr, wasm_size_t len) const {
+         if (_memory16) {
+            auto base = reinterpret_cast<uintptr_t>(memory);
+            auto address = reinterpret_cast<uintptr_t>(ptr);
+            PSIZAM_ASSERT(address >= base && address - base <= 65536 &&
+                          uint64_t(len) <= (65536 - (address - base)) / sizeof(T),
+                          wasm_memory_exception, "memory16 host/bulk access out of bounds");
+            return;
+         }
          PSIZAM_ASSERT( len <= std::numeric_limits<wasm_size_t>::max() / (wasm_size_t)sizeof(T), wasm_interpreter_exception, "length will overflow" );
          volatile auto check_addr = *(reinterpret_cast<const char*>(ptr) + (len * sizeof(T)) - 1);
          ignore_unused_variable_warning(check_addr);
       }
 
       inline void* validate_null_terminated_pointer(wasm_ptr_t ptr) const {
+         if (_memory16) {
+            validate_pointer<char>(ptr, 0);
+         }
          auto result = memory + ptr;
          validate_null_terminated_pointer(result);
          return result;
       }
 
       inline void validate_null_terminated_pointer(const void* ptr) const {
+         if (_memory16) {
+            validate_pointer<char>(ptr, 0);
+            const auto remaining = 65536 - (reinterpret_cast<uintptr_t>(ptr) - reinterpret_cast<uintptr_t>(memory));
+            PSIZAM_ASSERT(strnlen(static_cast<const char*>(ptr), remaining) < remaining,
+                          wasm_memory_exception, "unterminated memory16 string");
+            return;
+         }
          // Use strnlen with max_useable_memory as upper bound to prevent unbounded scan
          volatile auto check_addr = strnlen(static_cast<const char*>(ptr), constants::max_useable_memory);
          ignore_unused_variable_warning(check_addr);
@@ -80,5 +104,6 @@ namespace psizam::detail {
       char* memory;
       operand_stack* os;
       fp_mode _fp;
+      bool _memory16;
    };
 } // namespace psizam::detail

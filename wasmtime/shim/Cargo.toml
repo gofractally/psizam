@@ -13,7 +13,7 @@ crate-type = ["staticlib"]
 # (deterministic stack accounting, strict relaxed-madd profile) will be wired in
 # through [patch.crates-io] here; until then only upstream behaviour is exposed.
 [dependencies]
-wasmtime = { version = "=51.0.0", default-features = false, features = [
+wasmtime = { path = "../../../wasmtime/crates/wasmtime", version = "=51.0.0", default-features = false, features = [
     "runtime",
     "cranelift",
     "std",

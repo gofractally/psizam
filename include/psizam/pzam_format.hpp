@@ -11,6 +11,7 @@
 
 #include <psizam/detail/jit_reloc.hpp>
 #include <psizam/native_artifact.hpp>
+#include <psizam/execution_profile.hpp>
 #include <psio/pssz_view.hpp>
 #include <psio/wit_types.hpp>
 
@@ -31,7 +32,8 @@ namespace psizam {
    // Version 7 stores an element's full canonical type index. Eight bits lost
    // the null sentinel and aliased type indices above 255. It also persists
    // the private guest ABI: body and import-thunk targets and logical costs.
-   static constexpr uint32_t PZAM_VERSION = 7;
+   // Version 8 binds the memory execution profile to metadata and native code.
+   static constexpr uint32_t PZAM_VERSION = 8;
 
    // ---- Architecture ----
 
@@ -210,12 +212,13 @@ namespace psizam {
       uint32_t num_imported_globals   = 0;
       // WIT (Component Model interface types) — optional
       std::optional<psio::wit_world>   wit;
+      std::optional<uint32_t>         execution_profile;
    };
    PSIO_REFLECT(pzam_module_metadata,
       types, imports, functions, tables, memories, globals,
       exports, elements, data, tags, start_function, features_required,
       num_imported_functions, num_imported_tables,
-      num_imported_memories, num_imported_globals, wit)
+      num_imported_memories, num_imported_globals, wit, execution_profile)
 
    // ===========================================================================
    // Code sections — N per file (arch × tier × instrumentation)
@@ -269,11 +272,12 @@ namespace psizam {
       std::optional<native_aot_metadata> native_contract;
       uint8_t                        guest_abi = 0;         // psizam::native_guest_abi
       std::vector<pzam_code_range>   import_thunks;         // typed targets, import-indexed
+      std::optional<uint32_t>         execution_profile;
    };
    PSIO_REFLECT(pzam_code_section,
       arch, opt_tier, instrumentation, stack_limit_mode, page_size, max_stack,
       compiler, attestations, functions, relocations, code_blob, native_contract,
-      guest_abi, import_thunks)
+      guest_abi, import_thunks, execution_profile)
 
    // ===========================================================================
    // Top-level .pzam file
@@ -300,6 +304,23 @@ namespace psizam {
    // Serialization helpers
    // ===========================================================================
 
+   inline void validate_pzam_execution_profiles(const pzam_file& file) {
+      PSIZAM_ASSERT(file.magic == PZAM_MAGIC && file.format_version == PZAM_VERSION,
+                    wasm_parse_exception, "unsupported pzam format");
+      const auto profile = file.metadata.execution_profile.value_or(0);
+      validate_execution_profile(profile);
+      for (const auto& section : file.code_sections)
+         PSIZAM_ASSERT(section.execution_profile.value_or(0) == profile,
+                       wasm_parse_exception, "pzam code section execution profile disagrees with module");
+      if (is_memory16_profile(profile)) {
+         const auto& memories = file.metadata.memories;
+         PSIZAM_ASSERT(memories.size() == 1 && !memories[0].is_memory64.value_or(false) &&
+                       memories[0].limits.initial == 1 && memories[0].limits.has_maximum &&
+                       memories[0].limits.maximum == 1,
+                       wasm_parse_exception, "memory16 pzam requires a fixed 64 KiB memory");
+      }
+   }
+
    /// Serialize a pzam_file using psio's automatic-width pSSZ format.
    inline std::vector<char> pzam_save(const pzam_file& file) {
       if (file.magic != PZAM_MAGIC || file.format_version != PZAM_VERSION)
@@ -323,7 +344,9 @@ namespace psizam {
    inline pzam_file pzam_load(std::span<const char> data) {
       if (!pzam_validate(data))
          throw std::runtime_error("pzam_load: invalid pSSZ PZAM file");
-      return psio::decode<pzam_file>(psio::pssz{}, data);
+      auto file = psio::decode<pzam_file>(psio::pssz{}, data);
+      validate_pzam_execution_profiles(file);
+      return file;
    }
 
 } // namespace psizam

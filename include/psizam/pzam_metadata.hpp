@@ -233,6 +233,7 @@ namespace psizam {
    /// Called at compile time after parsing, before discarding the .wasm.
    inline pzam_module_metadata extract_metadata(const module& mod) {
       pzam_module_metadata meta;
+      if (mod.execution_profile) meta.execution_profile = mod.execution_profile;
 
       // --- Types ---
       meta.types.reserve(mod.types.size());
@@ -373,6 +374,8 @@ namespace psizam {
    /// The returned module has no compiled code — that comes from the code section.
    inline module restore_module(const pzam_module_metadata& meta) {
       psizam::module mod;
+      mod.execution_profile = meta.execution_profile.value_or(0);
+      validate_execution_profile(mod.execution_profile);
 
       // --- Types ---
       mod.types.reserve(meta.types.size());

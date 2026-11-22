@@ -5834,7 +5834,7 @@ namespace psizam::detail {
             native_value fwd[np > 0 ? np : 1];
             for (uint32_t i = 0; i < np; ++i)
                fwd[i] = args[np - 1 - i];
-            result = context->_table->call(context->get_host_ptr(), mapped_index, fwd, context->linear_memory());
+            result = context->_table->call(context->get_host_ptr(), mapped_index, fwd, context->linear_memory(), is_memory16_profile(context->get_module().execution_profile));
          };
          longjmp_on_exception(do_call);
          context->_remaining_call_depth = saved;

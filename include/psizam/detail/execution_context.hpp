@@ -196,7 +196,8 @@ namespace psizam::detail {
       inline char*       linear_memory() { return _linear_memory; }
       inline auto&       get_operand_stack() { return _os; }
       inline const auto& get_operand_stack() const { return _os; }
-      inline auto        get_interface() { return execution_interface{ _linear_memory, &_os, _fp }; }
+      inline auto        get_interface() { return execution_interface{ _linear_memory, &_os, _fp,
+                                                       _mem_mode == mem_safety::memory16 }; }
       void               set_max_pages(std::uint32_t max_pages) { _max_pages = std::min(max_pages, static_cast<std::uint32_t>(psizam::max_pages)); }
 
       inline std::error_code get_error_code() const { return _error_code; }
@@ -290,6 +291,11 @@ namespace psizam::detail {
       template<typename Module>
       inline void reset(Module& mod) {
          PSIZAM_ASSERT(_mod->error == nullptr, wasm_interpreter_exception, _mod->error);
+         if (is_memory16_profile(mod.execution_profile)) {
+            _mem_mode = mem_safety::memory16;
+            _max_pages = std::min(_max_pages, uint32_t{1});
+         }
+         _wasm_alloc->configure_memory16(is_memory16_profile(mod.execution_profile));
 
          // Reset the capacity of underlying memory used by operand stack if it is
          // greater than initial_stack_size
@@ -556,6 +562,10 @@ namespace psizam::detail {
          ctx->set_wasm_allocator(_wasm_alloc);
          ctx->_linear_memory = _linear_memory;
          ctx->_max_pages     = _max_pages;
+         ctx->_mem_mode      = _mem_mode;
+         ctx->_checked_kind  = _checked_kind;
+         ctx->_fp            = _fp;
+         ctx->_float_profile = _float_profile;
          ctx->_table         = _table;
          // Share function tables (read-only after init)
          ctx->_table_data    = _table_data;
@@ -750,7 +760,7 @@ namespace psizam::detail {
             fwd_args[i] = stack[num_params - 1 - i];
          }
 
-         return _table->call(_host, mapped_index, fwd_args, linear_memory());
+         return _table->call(_host, mapped_index, fwd_args, linear_memory(), is_memory16_profile(_mod->execution_profile));
       }
 
       inline void reset() {
@@ -1496,7 +1506,7 @@ namespace psizam::detail {
                   }
                }
                validate_read_watermark();
-               native_value result = _table->call(_state.host, mapped_index, args, linear_memory());
+               native_value result = _table->call(_state.host, mapped_index, args, linear_memory(), is_memory16_profile(_mod->execution_profile));
                if (!hf.signature.ret.empty()) {
                   switch(hf.signature.ret[0]) {
                    case types::i32: push_operand(i32_const_t{result.i32}); break;
@@ -1541,7 +1551,7 @@ namespace psizam::detail {
             }
             // Clean up current function's remaining operands
             eat_operands(_last_op_index);
-            native_value result = _table->call(_state.host, mapped_index, args, linear_memory());
+            native_value result = _table->call(_state.host, mapped_index, args, linear_memory(), is_memory16_profile(_mod->execution_profile));
             if (!hf.signature.ret.empty()) {
                switch(hf.signature.ret[0]) {
                 case types::i32: push_operand(i32_const_t{result.i32}); break;
@@ -1892,7 +1902,7 @@ namespace psizam::detail {
                    default: break;
                   }
                }
-               native_value result = _table->call(_state.host, mapped_index, hf_args, linear_memory());
+               native_value result = _table->call(_state.host, mapped_index, hf_args, linear_memory(), is_memory16_profile(_mod->execution_profile));
                if (!hf.signature.ret.empty()) {
                   switch(hf.signature.ret[0]) {
                    case types::i32: push_operand(i32_const_t{result.i32}); break;

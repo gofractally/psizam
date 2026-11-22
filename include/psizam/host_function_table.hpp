@@ -41,11 +41,11 @@ namespace psizam {
       concept has_memory_field = requires(Cls* h, char* m) { h->memory = m; };
 
       /// Fast trampoline wrapper: casts void* to Cls*, delegates to fast_trampoline_fwd_impl
-      template<auto Func, typename Cls, typename R, typename Args>
+      template<auto Func, typename Cls, typename R, typename Args, bool Memory16 = false>
       native_value fast_void_trampoline(void* host, native_value* args, char* memory) {
          if constexpr (has_memory_field<Cls>)
             static_cast<Cls*>(host)->memory = memory;
-         return fast_trampoline_fwd_impl<Func, Cls, R, Args>(
+         return fast_trampoline_fwd_impl<Func, Cls, R, Args, Memory16>(
             static_cast<Cls*>(host), args, memory,
             std::make_index_sequence<std::tuple_size_v<Args>>{});
       }
@@ -53,11 +53,11 @@ namespace psizam {
       /// Reverse-order trampoline: args[0] = last WASM stack slot (paramN-1).
       /// Used by JIT backends to avoid the reverse→forward copy — they pass the
       /// WASM stack pointer directly.
-      template<auto Func, typename Cls, typename R, typename Args>
+      template<auto Func, typename Cls, typename R, typename Args, bool Memory16 = false>
       native_value fast_void_trampoline_rev(void* host, native_value* args, char* memory) {
          if constexpr (has_memory_field<Cls>)
             static_cast<Cls*>(host)->memory = memory;
-         return fast_trampoline_rev_impl<Func, Cls, R, Args>(
+         return fast_trampoline_rev_impl<Func, Cls, R, Args, Memory16>(
             static_cast<Cls*>(host), args, memory,
             std::make_index_sequence<std::tuple_size_v<Args>>{});
       }
@@ -65,8 +65,9 @@ namespace psizam {
       /// Slow trampoline: constructs a type_converter, dispatches through the full
       /// type conversion pipeline. Used for functions with custom from_wasm/to_wasm
       /// conversions or preconditions.
-      template<auto Func, typename Cls, typename R, typename Args>
+      template<auto Func, typename Cls, typename R, typename Args, bool Memory16 = false, typename TC = type_converter<Cls>>
       native_value slow_void_trampoline(void* host, native_value* args, char* memory) {
+         host_memory16_scope<Cls, Memory16> mode{static_cast<Cls*>(host)};
          // Build operand stack from forward-order native_value args.
          // Push in forward order; type_converter reads from back using
          // total_operands-based indexing.
@@ -77,8 +78,7 @@ namespace psizam {
             // as_value<T> reinterprets via the operand_stack_elem union.
             temp_stack.push(i64_const_t{args[i].i64});
          }
-         execution_interface ei{memory, &temp_stack};
-         using TC = type_converter<Cls>;
+         execution_interface ei{memory, &temp_stack, fp_mode::fast, Memory16};
          TC tc{static_cast<Cls*>(host), std::move(ei)};
 
          if constexpr (std::is_void_v<R>) {
@@ -111,6 +111,8 @@ namespace psizam {
          std::string        func_name;
          void*              raw_func_ptr = nullptr; ///< Raw C function address for direct JIT calls
          void*              host_override = nullptr; ///< Per-entry host pointer; when set, overrides module-level host
+         host_trampoline_t  memory16_trampoline = nullptr;
+         host_trampoline_t  memory16_rev_trampoline = nullptr;
       };
 
       host_function_table() = default;
@@ -140,6 +142,7 @@ namespace psizam {
       /// Resolve WASM module imports against this table.
       /// Sets mod.import_functions[i] to the table index for each import.
       void resolve(module& mod) const {
+         uint32_t function_import = 0;
          for (std::size_t i = 0; i < mod.imports.size(); i++) {
             if (mod.imports[i].kind != Function)
                continue;
@@ -150,20 +153,30 @@ namespace psizam {
             auto it = _name_map.find({mod_name, fn_name});
             PSIZAM_ASSERT(it != _name_map.end(), wasm_link_exception,
                           std::string("no mapping for imported function ") + fn_name);
-            mod.import_functions[i] = it->second;
+            mod.import_functions[function_import++] = it->second;
             PSIZAM_ASSERT(_entries[it->second].signature == mod.types[mod.imports[i].type.func_t],
                           wasm_link_exception,
                           std::string("wrong type for imported function ") + fn_name);
+            if (is_memory16_profile(mod.execution_profile)) {
+               const auto& e = _entries[it->second];
+               PSIZAM_ASSERT(e.memory16_trampoline, wasm_link_exception,
+                             "host import has no memory16-safe trampoline: " + fn_name);
+            }
          }
       }
 
       /// Call a host function by mapped index.
       inline native_value call(void* host, uint32_t mapped_idx,
-                               native_value* args, char* memory) const {
+                               native_value* args, char* memory, bool memory16 = false) const {
          PSIZAM_ASSERT(mapped_idx < _entries.size(), wasm_link_exception,
                        "unresolved imported function");
          auto& e = _entries[mapped_idx];
          void* h = e.host_override ? e.host_override : host;
+         if (memory16) {
+            PSIZAM_ASSERT(e.memory16_trampoline, wasm_link_exception,
+                          "host import has no memory16-safe trampoline");
+            return e.memory16_trampoline(h, args, memory);
+         }
          if (e.trampoline)
             return e.trampoline(h, args, memory);
          PSIZAM_ASSERT(e.slow_dispatch, wasm_link_exception,
@@ -215,8 +228,14 @@ namespace psizam {
                        detail::is_simple_wasm_return_v<ret>) {
             e.trampoline = &detail::fast_void_trampoline<Func, host_cls, ret, args>;
             e.rev_trampoline = &detail::fast_void_trampoline_rev<Func, host_cls, ret, args>;
+            e.memory16_trampoline = &detail::memory16_host_call<&detail::fast_void_trampoline<Func, host_cls, ret, args, true>, void>;
+            e.memory16_rev_trampoline = &detail::memory16_host_call<&detail::fast_void_trampoline_rev<Func, host_cls, ret, args, true>, void>;
          } else {
             e.trampoline = &detail::slow_void_trampoline<Func, host_cls, ret, args>;
+            e.memory16_trampoline = reinterpret_cast<host_trampoline_t>(
+               &detail::memory16_host_call<&slow_trampoline_fwd<Func, host_cls, TypeConverter, ret, args, std::tuple<>, true>, host_cls>);
+            e.memory16_rev_trampoline = reinterpret_cast<host_trampoline_t>(
+               &detail::memory16_host_call<&slow_trampoline_rev<Func, host_cls, TypeConverter, ret, args, std::tuple<>, true>, host_cls>);
          }
 
          // Store raw function pointer for direct JIT calls.

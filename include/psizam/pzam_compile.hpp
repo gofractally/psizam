@@ -87,6 +87,7 @@ namespace psizam {
       pzam_arch_flags    arch  = pzam_arch_flags::host;
       pzam_tier_flags    tier  = pzam_tier_flags::jit2;
       pzam_compile_flags flags = pzam_compile_flags::none;
+      mem_safety        memory_mode = mem_safety::guarded;
    };
 
    // Map flag bits to format enum values
@@ -123,6 +124,7 @@ namespace psizam {
          if (llvm && result.function_offsets.size() != mod.code.size())
             throw std::runtime_error("pzam_compile: incomplete LLVM function table");
          pzam_code_section cs;
+         if (mod.execution_profile) cs.execution_profile = mod.execution_profile;
          cs.arch = static_cast<uint8_t>(arch);
          cs.opt_tier = static_cast<uint8_t>(tier);
          cs.instrumentation.softfloat = softfloat;
@@ -170,7 +172,8 @@ namespace psizam {
       template<class Writer>
       inline void compile_pzam_section(std::vector<uint8_t>& wasm, pzam_file& file,
             pzam_arch arch, pzam_opt_tier tier, bool softfloat, bool backtrace,
-            int opt_level = 2, bool gas_metering = false) {
+            int opt_level = 2, bool gas_metering = false,
+            mem_safety memory_mode = mem_safety::guarded) {
          psizam::module mod;
          mod.allocator.use_default_memory();
          pzam_compile_result result;
@@ -182,6 +185,7 @@ namespace psizam {
          null_debug_info debug;
          default_options parser_options;
          parser_options.gas_metering = gas_metering;
+         parser_options.memory_mode = memory_mode;
          binary_parser<Writer, default_options, null_debug_info> parser(
             mod.allocator, parser_options, backtrace, false);
          parser.set_compile_result(&result);
@@ -200,6 +204,8 @@ namespace psizam {
    inline std::vector<char> pzam_compile(std::span<const uint8_t> wasm_bytes,
                                          const pzam_compile_options& opts = {}) {
       using namespace detail;
+      if (opts.memory_mode != mem_safety::guarded && opts.memory_mode != mem_safety::memory16)
+         throw std::invalid_argument("pzam_compile: unsupported memory mode");
       if (!opts.arch || !!(opts.arch & ~pzam_arch_flags::all))
          throw std::invalid_argument("pzam_compile: invalid or empty architecture flags");
       if (!opts.tier || !!(opts.tier & ~pzam_tier_flags::all))
@@ -225,20 +231,20 @@ namespace psizam {
             if (!(opts.tier & tier_flag)) continue;
             if (tier == pzam_opt_tier::jit1) {
                if (arch == pzam_arch::x86_64)
-                  compile_pzam_section<machine_code_writer_x64>(wasm, file, arch, tier, false, backtrace, 2, gas_metering);
+                  compile_pzam_section<machine_code_writer_x64>(wasm, file, arch, tier, false, backtrace, 2, gas_metering, opts.memory_mode);
                else
-                  compile_pzam_section<machine_code_writer_a64>(wasm, file, arch, tier, false, backtrace, 2, gas_metering);
+                  compile_pzam_section<machine_code_writer_a64>(wasm, file, arch, tier, false, backtrace, 2, gas_metering, opts.memory_mode);
             } else if (tier == pzam_opt_tier::jit2) {
                if (arch == pzam_arch::x86_64)
-                  compile_pzam_section<ir_writer_x64>(wasm, file, arch, tier, false, backtrace, 2, gas_metering);
+                  compile_pzam_section<ir_writer_x64>(wasm, file, arch, tier, false, backtrace, 2, gas_metering, opts.memory_mode);
                else
-                  compile_pzam_section<ir_writer_a64>(wasm, file, arch, tier, false, backtrace, 2, gas_metering);
+                  compile_pzam_section<ir_writer_a64>(wasm, file, arch, tier, false, backtrace, 2, gas_metering, opts.memory_mode);
             } else {
 #ifdef PSIZAM_ENABLE_LLVM_BACKEND
                const int level = tier == pzam_opt_tier::llvm_O1 ? 1
                                : tier == pzam_opt_tier::llvm_O2 ? 2 : 3;
                compile_pzam_section<ir_writer_llvm_aot>(wasm, file, arch, tier,
-                                                       softfloat, backtrace, level, gas_metering);
+                                                       softfloat, backtrace, level, gas_metering, opts.memory_mode);
 #endif
             }
          }

@@ -14,8 +14,10 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <iostream>
+#include <memory>
 #include <random>
 #include <string>
+#include <string_view>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
@@ -119,6 +121,7 @@ namespace psizam::detail {
    struct wasi_host {
       // Memory base — updated before each host function call by the trampoline
       char* memory = nullptr;
+      bool psizam_memory16 = false; // scoped by the memory16 host trampoline
 
       // Command-line arguments
       std::vector<std::string> args;
@@ -143,6 +146,8 @@ namespace psizam::detail {
          uint8_t filetype = WASI_FILETYPE_UNKNOWN;
          bool    is_preopen = false;
          std::string preopen_path; // guest path for preopened dirs
+         std::string directory_path; // capability root for opened directories
+         std::shared_ptr<DIR> directory_stream;
       };
       std::vector<open_fd> fds;
       int exit_code = 0;
@@ -163,32 +168,45 @@ namespace psizam::detail {
       }
 
       // Helper: validate iov offset arithmetic won't overflow (guard pages handle actual OOB)
-      static void check_iov_bounds(uint32_t iovs_ptr, uint32_t iovs_len) {
+      void check_iov_bounds(uint32_t iovs_ptr, uint32_t iovs_len) const {
+         check_range(iovs_ptr, uint64_t(iovs_len) * 8);
          PSIZAM_ASSERT(uint64_t(iovs_ptr) + uint64_t(iovs_len) * 8 <= UINT32_MAX,
                        wasm_memory_exception, "WASI: iov offset overflow");
       }
 
-      // Helper: get wasm memory pointer (guard pages protect OOB)
+      void check_range(uint32_t offset, uint64_t bytes) const {
+         if (psizam_memory16)
+            PSIZAM_ASSERT(offset <= 65536 && bytes <= 65536 - offset,
+                          wasm_memory_exception, "WASI: memory16 access out of bounds");
+      }
+
+      // Guard pages protect ordinary Wasm; compact memory16 needs bounds checks.
       template<typename T = char>
-      T* mem(uint32_t offset) { return reinterpret_cast<T*>(memory + offset); }
+      T* mem(uint32_t offset, uint64_t bytes = sizeof(T)) {
+         check_range(offset, bytes);
+         return reinterpret_cast<T*>(memory + offset);
+      }
 
       template<typename T = char>
-      const T* mem(uint32_t offset) const { return reinterpret_cast<const T*>(memory + offset); }
+      const T* mem(uint32_t offset, uint64_t bytes = sizeof(T)) const {
+         check_range(offset, bytes);
+         return reinterpret_cast<const T*>(memory + offset);
+      }
 
       // Helper: write uint32 to wasm memory
       void write_u32(uint32_t offset, uint32_t val) {
-         memcpy(memory + offset, &val, 4);
+         memcpy(mem(offset, 4), &val, 4);
       }
 
       // Helper: write uint64 to wasm memory
       void write_u64(uint32_t offset, uint64_t val) {
-         memcpy(memory + offset, &val, 8);
+         memcpy(mem(offset, 8), &val, 8);
       }
 
       // Helper: read uint32 from wasm memory
       uint32_t read_u32(uint32_t offset) const {
          uint32_t val;
-         memcpy(&val, memory + offset, 4);
+         memcpy(&val, mem(offset, 4), 4);
          return val;
       }
 
@@ -202,11 +220,12 @@ namespace psizam::detail {
       std::string resolve_path(uint32_t dir_fd, const char* path, uint32_t path_len) const {
          if (dir_fd < 3 || !valid_fd(dir_fd) || !fds[dir_fd].is_preopen)
             return "";
-         uint32_t preopen_idx = dir_fd - 3;
-         if (preopen_idx >= preopens.size()) return "";
+         const auto& entry = fds[dir_fd];
+         if (entry.is_preopen && dir_fd - 3 >= preopens.size()) return "";
+         const auto& directory = entry.is_preopen ? preopens[dir_fd - 3].host_path : entry.directory_path;
+         if (directory.empty()) return "";
          std::string guest(path, path_len);
-         const auto& po = preopens[preopen_idx];
-         if (guest.empty() || guest == ".") return po.host_path;
+         if (guest.empty() || guest == ".") return directory;
 
          // Parent components are valid inside a preopen (e.g.
          // llvm/../third-party). Check the resolved target below, rather than
@@ -214,16 +233,32 @@ namespace psizam::detail {
          if (guest.find('\0') != std::string::npos)
             return "";
          // Reject absolute paths
-         if (!guest.empty() && guest[0] == '/')
+         if (guest[0] == '/' || guest.find('\0') != std::string::npos)
             return "";
+         // Parent components are valid inside a preopen, but may not ascend
+         // above it. Keep the original path for the realpath containment
+         // check below, which also accounts for symbolic links.
+         size_t depth = 0;
+         for (size_t begin = 0; begin < guest.size();) {
+            size_t end = guest.find('/', begin);
+            if (end == std::string::npos) end = guest.size();
+            auto component = std::string_view(guest).substr(begin, end - begin);
+            if (component == "..") {
+               if (depth == 0) return "";
+               --depth;
+            } else if (!component.empty() && component != ".") {
+               ++depth;
+            }
+            begin = end + 1;
+         }
 
-         std::string resolved = po.host_path + "/" + guest;
+         std::string resolved = directory + "/" + guest;
 
          // Resolve the real path and verify it stays under the preopen root
          char real[PATH_MAX];
          // First resolve the preopen root
          char real_root[PATH_MAX];
-         if (!::realpath(po.host_path.c_str(), real_root))
+         if (!::realpath(directory.c_str(), real_root))
             return "";
          std::string root_prefix(real_root);
          auto is_contained = [&](const std::string& candidate) {
@@ -260,10 +295,11 @@ namespace psizam::detail {
 
       // args_get: write arg pointers and strings into wasm memory
       uint32_t args_get(uint32_t argv_ptr, uint32_t argv_buf_ptr) {
+         check_range(argv_ptr, uint64_t(args.size()) * 4);
          uint32_t buf_offset = argv_buf_ptr;
          for (size_t i = 0; i < args.size(); i++) {
             write_u32(argv_ptr + i * 4, buf_offset);
-            memcpy(mem(buf_offset), args[i].c_str(), args[i].size() + 1);
+            memcpy(mem(buf_offset, args[i].size() + 1), args[i].c_str(), args[i].size() + 1);
             buf_offset += args[i].size() + 1;
          }
          return WASI_ESUCCESS;
@@ -280,6 +316,7 @@ namespace psizam::detail {
 
       // environ_get
       uint32_t environ_get(uint32_t environ_ptr, uint32_t buf_ptr) {
+         check_range(environ_ptr, uint64_t(env.size()) * 4);
          if (std::getenv("PSIZAM_TRACE_WASI")) {
             fprintf(stderr, "[wasi] environ_get(environ=0x%x, buf=0x%x) env.size=%zu\n",
                     environ_ptr, buf_ptr, env.size());
@@ -287,7 +324,7 @@ namespace psizam::detail {
          uint32_t buf_offset = buf_ptr;
          for (size_t i = 0; i < env.size(); i++) {
             write_u32(environ_ptr + i * 4, buf_offset);
-            memcpy(mem(buf_offset), env[i].c_str(), env[i].size() + 1);
+            memcpy(mem(buf_offset, env[i].size() + 1), env[i].c_str(), env[i].size() + 1);
             buf_offset += env[i].size() + 1;
          }
          if (std::getenv("PSIZAM_TRACE_WASI")) {
@@ -334,6 +371,7 @@ namespace psizam::detail {
          if (fd < 3) return WASI_ESUCCESS;
          ::close(fds[fd].host_fd);
          fds[fd].host_fd = -1;
+         fds[fd].directory_stream.reset();
          return WASI_ESUCCESS;
       }
 
@@ -342,7 +380,7 @@ namespace psizam::detail {
          if (fd >= fds.size() || fds[fd].host_fd < 0) return WASI_EBADF;
          // fdstat layout: u8 filetype, u16 flags, u64 rights_base, u64 rights_inheriting
          // total: 24 bytes
-         memset(mem(stat_ptr), 0, 24);
+         memset(mem(stat_ptr, 24), 0, 24);
          mem<uint8_t>(stat_ptr)[0] = fds[fd].filetype;
          // Grant all rights
          write_u64(stat_ptr + 8, WASI_RIGHTS_ALL);
@@ -364,7 +402,7 @@ namespace psizam::detail {
             return errno_to_wasi(errno);
          // filestat layout: u64 dev, u64 ino, u8 filetype, u8 pad[7],
          //                  u64 nlink, u64 size, u64 atim, u64 mtim, u64 ctim
-         memset(mem(buf_ptr), 0, 64);
+         memset(mem(buf_ptr, 64), 0, 64);
          write_u64(buf_ptr + 0, st.st_dev);
          write_u64(buf_ptr + 8, st.st_ino);
          mem<uint8_t>(buf_ptr + 16)[0] = fds[fd].filetype;
@@ -388,7 +426,7 @@ namespace psizam::detail {
          if (fd < 3 || fd >= fds.size()) return WASI_EBADF;
          if (!fds[fd].is_preopen) return WASI_EBADF;
          uint32_t copy_len = std::min(path_len, static_cast<uint32_t>(fds[fd].preopen_path.size()));
-         memcpy(mem(path_ptr), fds[fd].preopen_path.c_str(), copy_len);
+         memcpy(mem(path_ptr, copy_len), fds[fd].preopen_path.c_str(), copy_len);
          return WASI_ESUCCESS;
       }
 
@@ -400,7 +438,7 @@ namespace psizam::detail {
          for (uint32_t i = 0; i < iovs_len; i++) {
             uint32_t buf = read_u32(iovs_ptr + i * 8);
             uint32_t len = read_u32(iovs_ptr + i * 8 + 4);
-            ssize_t n = ::read(fds[fd].host_fd, mem(buf), len);
+            ssize_t n = ::read(fds[fd].host_fd, mem(buf, len), len);
             if (n < 0) {
                if (total > 0) break;
                return errno_to_wasi(errno);
@@ -421,7 +459,7 @@ namespace psizam::detail {
          for (uint32_t i = 0; i < iovs_len; i++) {
             uint32_t buf = read_u32(iovs_ptr + i * 8);
             uint32_t len = read_u32(iovs_ptr + i * 8 + 4);
-            ssize_t n = ::pread(fds[fd].host_fd, mem(buf), len, offset + total);
+            ssize_t n = ::pread(fds[fd].host_fd, mem(buf, len), len, offset + total);
             if (n < 0) {
                if (total > 0) break;
                return errno_to_wasi(errno);
@@ -441,7 +479,7 @@ namespace psizam::detail {
          for (uint32_t i = 0; i < iovs_len; i++) {
             uint32_t buf = read_u32(iovs_ptr + i * 8);
             uint32_t len = read_u32(iovs_ptr + i * 8 + 4);
-            ssize_t n = ::write(fds[fd].host_fd, mem(buf), len);
+            ssize_t n = ::write(fds[fd].host_fd, mem(buf, len), len);
             if (n < 0) {
                const int write_errno = errno;
                if (std::getenv("PSIZAM_TRACE_WASI"))
@@ -489,16 +527,23 @@ namespace psizam::detail {
       // fd_readdir: read directory entries
       uint32_t fd_readdir(uint32_t fd, uint32_t buf, uint32_t buf_len,
                           uint64_t cookie, uint32_t bufused_ptr) {
+         check_range(buf, buf_len);
+         check_range(bufused_ptr, 4);
          if (fd >= fds.size() || fds[fd].host_fd < 0) return WASI_EBADF;
-         int hfd = fds[fd].host_fd;
-         // Open a DIR* from the host fd (dup to avoid closing the original)
-         int dfd = ::dup(hfd);
-         if (dfd < 0) return errno_to_wasi(errno);
-         DIR* dir = ::fdopendir(dfd);
-         if (!dir) { ::close(dfd); return errno_to_wasi(errno); }
-
-         // Skip to the cookie position
-         if (cookie > 0) ::seekdir(dir, static_cast<long>(cookie));
+         // Keep the DIR stream alive: telldir cookies belong to that stream.
+         // This also preserves buffered entries while remove_dir_all deletes
+         // files during iteration. Replaying entry indices would skip files.
+         auto& stream = fds[fd].directory_stream;
+         if (!stream) {
+            int dfd = ::openat(fds[fd].host_fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            if (dfd < 0) return errno_to_wasi(errno);
+            DIR* opened = ::fdopendir(dfd);
+            if (!opened) { ::close(dfd); return errno_to_wasi(errno); }
+            stream = std::shared_ptr<DIR>(opened, ::closedir);
+         }
+         DIR* dir = stream.get();
+         if (cookie == 0) ::rewinddir(dir);
+         else ::seekdir(dir, static_cast<long>(cookie));
 
          uint32_t used = 0;
          struct dirent* ent;
@@ -506,15 +551,7 @@ namespace psizam::detail {
             uint32_t name_len = static_cast<uint32_t>(strlen(ent->d_name));
             // dirent layout: u64 d_next, u64 d_ino, u32 d_namlen, u8 d_type
             uint32_t header_size = 24;
-            uint32_t entry_size = header_size + name_len;
-
-            if (used + header_size > buf_len) break; // no room for header
-
-            // Write header
             uint64_t next_cookie = static_cast<uint64_t>(::telldir(dir));
-            memcpy(mem(buf + used), &next_cookie, 8);
-            write_u64(buf + used + 8, ent->d_ino);
-            write_u32(buf + used + 16, name_len);
             uint8_t ftype = WASI_FILETYPE_UNKNOWN;
             switch (ent->d_type) {
                case DT_REG: ftype = WASI_FILETYPE_REGULAR_FILE; break;
@@ -524,16 +561,25 @@ namespace psizam::detail {
                case DT_CHR: ftype = WASI_FILETYPE_CHARACTER_DEVICE; break;
                default: break;
             }
-            *mem<uint8_t>(buf + used + 20) = ftype;
-            used += header_size;
+            // WASI requires a partial entry when the buffer fills. Returning
+            // fewer bytes would incorrectly tell libc that this is EOF.
+            char header[24] = {};
+            uint64_t ino = ent->d_ino;
+            memcpy(header, &next_cookie, 8);
+            memcpy(header + 8, &ino, 8);
+            memcpy(header + 16, &name_len, 4);
+            header[20] = ftype;
+            uint32_t header_copy = std::min(header_size, buf_len - used);
+            memcpy(mem(buf + used, header_copy), header, header_copy);
+            used += header_copy;
+            if (header_copy < header_size) break;
 
             // Write name (may be truncated if buf runs out)
             uint32_t name_copy = std::min(name_len, buf_len - used);
-            memcpy(mem(buf + used), ent->d_name, name_copy);
+            memcpy(mem(buf + used, name_copy), ent->d_name, name_copy);
             used += name_copy;
             if (name_copy < name_len) break; // truncated
          }
-         ::closedir(dir); // also closes dfd
          write_u32(bufused_ptr, used);
          return WASI_ESUCCESS;
       }
@@ -541,10 +587,10 @@ namespace psizam::detail {
       // path_open: open a file relative to a pre-opened directory
       uint32_t path_open(uint32_t dir_fd, uint32_t /*dirflags*/,
                          uint32_t path_ptr, uint32_t path_len,
-                         uint32_t oflags, uint64_t /*rights_base*/,
+                         uint32_t oflags, uint64_t rights_base,
                          uint64_t /*rights_inheriting*/, uint32_t fdflags,
                          uint32_t fd_ptr) {
-         std::string host_path = resolve_path(dir_fd, mem(path_ptr), path_len);
+         std::string host_path = resolve_path(dir_fd, mem(path_ptr, path_len), path_len);
          if (host_path.empty()) return WASI_ENOENT;
 
          int flags = 0;
@@ -552,13 +598,12 @@ namespace psizam::detail {
          if (oflags & WASI_OFLAG_EXCL)   flags |= O_EXCL;
          if (oflags & WASI_OFLAG_TRUNC)  flags |= O_TRUNC;
 
-         // Determine read/write mode from fdflags (simplified)
-         if (fdflags & 1) // append
-            flags |= O_WRONLY | O_APPEND;
-         else if (oflags & (WASI_OFLAG_CREAT | WASI_OFLAG_TRUNC))
-            flags |= O_RDWR;
-         else
-            flags |= O_RDONLY;
+         constexpr uint64_t right_fd_read = uint64_t{1} << 1;
+         constexpr uint64_t right_fd_write = uint64_t{1} << 6;
+         bool read = (rights_base & right_fd_read) != 0;
+         bool write = (rights_base & right_fd_write) != 0;
+         flags |= write ? (read ? O_RDWR : O_WRONLY) : O_RDONLY;
+         if (fdflags & 1) flags |= O_APPEND;
 
          // Check if it's a directory
          struct stat st;
@@ -577,7 +622,7 @@ namespace psizam::detail {
          uint8_t ft = WASI_FILETYPE_REGULAR_FILE;
          if (fstat(hfd, &st) == 0 && S_ISDIR(st.st_mode))
             ft = WASI_FILETYPE_DIRECTORY;
-         fds.push_back({hfd, ft, false, ""});
+         fds.push_back({hfd, ft, false, "", ft == WASI_FILETYPE_DIRECTORY ? host_path : ""});
          write_u32(fd_ptr, wasi_fd);
          return WASI_ESUCCESS;
       }
@@ -586,12 +631,12 @@ namespace psizam::detail {
       uint32_t path_filestat_get(uint32_t dir_fd, uint32_t /*flags*/,
                                  uint32_t path_ptr, uint32_t path_len,
                                  uint32_t buf_ptr) {
-         std::string host_path = resolve_path(dir_fd, mem(path_ptr), path_len);
+         std::string host_path = resolve_path(dir_fd, mem(path_ptr, path_len), path_len);
          if (host_path.empty()) return WASI_ENOENT;
          struct stat st;
          if (::stat(host_path.c_str(), &st) != 0)
             return errno_to_wasi(errno);
-         memset(mem(buf_ptr), 0, 64);
+         memset(mem(buf_ptr, 64), 0, 64);
          write_u64(buf_ptr + 0, st.st_dev);
          write_u64(buf_ptr + 8, st.st_ino);
          uint8_t ft = WASI_FILETYPE_REGULAR_FILE;
@@ -606,9 +651,9 @@ namespace psizam::detail {
       // path_readlink
       uint32_t path_readlink(uint32_t dir_fd, uint32_t path_ptr, uint32_t path_len,
                              uint32_t buf_ptr, uint32_t buf_len, uint32_t bufused_ptr) {
-         std::string host_path = resolve_path(dir_fd, mem(path_ptr), path_len);
+         std::string host_path = resolve_path(dir_fd, mem(path_ptr, path_len), path_len);
          if (host_path.empty()) return WASI_ENOENT;
-         ssize_t n = ::readlink(host_path.c_str(), mem(buf_ptr), buf_len);
+         ssize_t n = ::readlink(host_path.c_str(), mem(buf_ptr, buf_len), buf_len);
          if (n < 0) return errno_to_wasi(errno);
          write_u32(bufused_ptr, static_cast<uint32_t>(n));
          return WASI_ESUCCESS;
@@ -616,7 +661,7 @@ namespace psizam::detail {
 
       // path_remove_directory
       uint32_t path_remove_directory(uint32_t dir_fd, uint32_t path_ptr, uint32_t path_len) {
-         std::string host_path = resolve_path(dir_fd, mem(path_ptr), path_len);
+         std::string host_path = resolve_path(dir_fd, mem(path_ptr, path_len), path_len);
          if (host_path.empty()) return WASI_ENOENT;
          if (::rmdir(host_path.c_str()) != 0) return errno_to_wasi(errno);
          return WASI_ESUCCESS;
@@ -624,7 +669,7 @@ namespace psizam::detail {
 
       // path_unlink_file
       uint32_t path_unlink_file(uint32_t dir_fd, uint32_t path_ptr, uint32_t path_len) {
-         std::string host_path = resolve_path(dir_fd, mem(path_ptr), path_len);
+         std::string host_path = resolve_path(dir_fd, mem(path_ptr, path_len), path_len);
          if (host_path.empty()) return WASI_ENOENT;
          if (::unlink(host_path.c_str()) != 0) return errno_to_wasi(errno);
          return WASI_ESUCCESS;
@@ -634,7 +679,7 @@ namespace psizam::detail {
       uint32_t random_get(uint32_t buf_ptr, uint32_t buf_len) {
          // Use /dev/urandom or arc4random
          std::random_device rd;
-         auto* p = mem<uint8_t>(buf_ptr);
+         auto* p = mem<uint8_t>(buf_ptr, buf_len);
          for (uint32_t i = 0; i < buf_len; i++)
             p[i] = static_cast<uint8_t>(rd());
          return WASI_ESUCCESS;
@@ -764,7 +809,7 @@ namespace psizam::detail {
          for (uint32_t i = 0; i < iovs_len; i++) {
             uint32_t buf = read_u32(iovs_ptr + i * 8);
             uint32_t len = read_u32(iovs_ptr + i * 8 + 4);
-            ssize_t n = ::pwrite(fds[fd].host_fd, mem(buf), len, offset + total);
+            ssize_t n = ::pwrite(fds[fd].host_fd, mem(buf, len), len, offset + total);
             if (n < 0) {
                if (total > 0) break;
                return errno_to_wasi(errno);
@@ -790,12 +835,13 @@ namespace psizam::detail {
          }
          fds[to] = fds[from];
          fds[from].host_fd = -1;
+         fds[from].directory_stream.reset();
          return WASI_ESUCCESS;
       }
 
       // path_create_directory
       uint32_t path_create_directory(uint32_t dir_fd, uint32_t path_ptr, uint32_t path_len) {
-         std::string host_path = resolve_path(dir_fd, mem(path_ptr), path_len);
+         std::string host_path = resolve_path(dir_fd, mem(path_ptr, path_len), path_len);
          if (host_path.empty()) return WASI_ENOENT;
          if (::mkdir(host_path.c_str(), 0777) != 0) return errno_to_wasi(errno);
          return WASI_ESUCCESS;
@@ -805,7 +851,7 @@ namespace psizam::detail {
       uint32_t path_filestat_set_times(uint32_t dir_fd, uint32_t /*flags*/,
                                        uint32_t path_ptr, uint32_t path_len,
                                        uint64_t atim, uint64_t mtim, uint32_t fst_flags) {
-         std::string host_path = resolve_path(dir_fd, mem(path_ptr), path_len);
+         std::string host_path = resolve_path(dir_fd, mem(path_ptr, path_len), path_len);
          if (host_path.empty()) return WASI_ENOENT;
          struct timespec times[2];
          if (fst_flags & 2) {
@@ -834,8 +880,8 @@ namespace psizam::detail {
                          uint32_t old_path_ptr, uint32_t old_path_len,
                          uint32_t new_fd,
                          uint32_t new_path_ptr, uint32_t new_path_len) {
-         std::string old_host = resolve_path(old_fd, mem(old_path_ptr), old_path_len);
-         std::string new_host = resolve_path(new_fd, mem(new_path_ptr), new_path_len);
+         std::string old_host = resolve_path(old_fd, mem(old_path_ptr, old_path_len), old_path_len);
+         std::string new_host = resolve_path(new_fd, mem(new_path_ptr, new_path_len), new_path_len);
          if (old_host.empty() || new_host.empty()) return WASI_ENOENT;
          if (::link(old_host.c_str(), new_host.c_str()) != 0) return errno_to_wasi(errno);
          return WASI_ESUCCESS;
@@ -844,8 +890,8 @@ namespace psizam::detail {
       // path_rename
       uint32_t path_rename(uint32_t old_fd, uint32_t old_path_ptr, uint32_t old_path_len,
                            uint32_t new_fd, uint32_t new_path_ptr, uint32_t new_path_len) {
-         std::string old_host = resolve_path(old_fd, mem(old_path_ptr), old_path_len);
-         std::string new_host = resolve_path(new_fd, mem(new_path_ptr), new_path_len);
+         std::string old_host = resolve_path(old_fd, mem(old_path_ptr, old_path_len), old_path_len);
+         std::string new_host = resolve_path(new_fd, mem(new_path_ptr, new_path_len), new_path_len);
          if (old_host.empty() || new_host.empty()) return WASI_ENOENT;
          if (::rename(old_host.c_str(), new_host.c_str()) != 0) return errno_to_wasi(errno);
          return WASI_ESUCCESS;
@@ -855,8 +901,8 @@ namespace psizam::detail {
       uint32_t path_symlink(uint32_t old_path_ptr, uint32_t old_path_len,
                             uint32_t dir_fd,
                             uint32_t new_path_ptr, uint32_t new_path_len) {
-         std::string old_path(mem(old_path_ptr), old_path_len);
-         std::string new_host = resolve_path(dir_fd, mem(new_path_ptr), new_path_len);
+         std::string old_path(mem(old_path_ptr, old_path_len), old_path_len);
+         std::string new_host = resolve_path(dir_fd, mem(new_path_ptr, new_path_len), new_path_len);
          if (new_host.empty()) return WASI_ENOENT;
          if (::symlink(old_path.c_str(), new_host.c_str()) != 0) return errno_to_wasi(errno);
          return WASI_ESUCCESS;
@@ -865,26 +911,29 @@ namespace psizam::detail {
       // poll_oneoff: event polling
       uint32_t poll_oneoff(uint32_t in_ptr, uint32_t out_ptr, uint32_t nsubscriptions,
                            uint32_t nevents_ptr) {
+         check_range(in_ptr, uint64_t(nsubscriptions) * 48);
+         check_range(out_ptr, uint64_t(nsubscriptions) * 32);
+         check_range(nevents_ptr, 4);
          // Each subscription is 48 bytes, each event is 32 bytes
          uint32_t events_written = 0;
          for (uint32_t i = 0; i < nsubscriptions; i++) {
             uint32_t sub_offset = in_ptr + i * 48;
             uint64_t userdata;
-            memcpy(&userdata, mem(sub_offset), 8);
+            memcpy(&userdata, mem(sub_offset, 8), 8);
             uint8_t type = *mem<uint8_t>(sub_offset + 8);
 
             uint32_t evt_offset = out_ptr + events_written * 32;
-            memset(mem(evt_offset), 0, 32);
-            memcpy(mem(evt_offset), &userdata, 8);  // userdata
+            memset(mem(evt_offset, 32), 0, 32);
+            memcpy(mem(evt_offset, 8), &userdata, 8);  // userdata
             // error = 0 (success)
             *mem<uint8_t>(evt_offset + 10) = type;  // event type
 
             if (type == 0) {
                // clock: extract timeout and sleep
                uint64_t timeout;
-               memcpy(&timeout, mem(sub_offset + 24), 8);
+               memcpy(&timeout, mem(sub_offset + 24, 8), 8);
                uint16_t flags;
-               memcpy(&flags, mem(sub_offset + 40), 2);
+               memcpy(&flags, mem(sub_offset + 40, 2), 2);
                if (!(flags & 1)) { // not absolute
                   struct timespec ts;
                   ts.tv_sec = timeout / 1000000000ULL;
@@ -915,12 +964,12 @@ namespace psizam::detail {
 
    /// WASI trampoline: sets host->memory before dispatching to the member function.
    /// All WASI functions take scalar types, so we use the fast trampoline path.
-   template<auto Func>
+   template<auto Func, bool Memory16 = false>
    native_value wasi_trampoline(void* host, native_value* args, char* memory) {
       using args_t = flatten_parameters_t<AUTO_PARAM_WORKAROUND(Func)>;
       using ret_t  = return_type_t<AUTO_PARAM_WORKAROUND(Func)>;
       static_cast<wasi_host*>(host)->memory = memory;
-      return fast_trampoline_fwd_impl<Func, wasi_host, ret_t, args_t>(
+      return fast_trampoline_fwd_impl<Func, wasi_host, ret_t, args_t, Memory16>(
          static_cast<wasi_host*>(host), args, memory,
          std::make_index_sequence<std::tuple_size_v<args_t>>{});
    }
@@ -928,12 +977,12 @@ namespace psizam::detail {
    /// Reverse-order WASI trampoline: args[0] = last WASM param (matches jit/jit2
    /// zero-copy stack pass). backend::construct() picks this one for backends
    /// with reverse_host_args=true.
-   template<auto Func>
+   template<auto Func, bool Memory16 = false>
    native_value wasi_trampoline_rev(void* host, native_value* args, char* memory) {
       using args_t = flatten_parameters_t<AUTO_PARAM_WORKAROUND(Func)>;
       using ret_t  = return_type_t<AUTO_PARAM_WORKAROUND(Func)>;
       static_cast<wasi_host*>(host)->memory = memory;
-      return fast_trampoline_rev_impl<Func, wasi_host, ret_t, args_t>(
+      return fast_trampoline_rev_impl<Func, wasi_host, ret_t, args_t, Memory16>(
          static_cast<wasi_host*>(host), args, memory,
          std::make_index_sequence<std::tuple_size_v<args_t>>{});
    }
@@ -952,6 +1001,8 @@ namespace psizam::detail {
          std::make_index_sequence<std::tuple_size_v<args_t>>{});
       e.trampoline      = &wasi_trampoline<Func>;
       e.rev_trampoline  = &wasi_trampoline_rev<Func>;
+      e.memory16_trampoline = &memory16_host_call<&wasi_trampoline<Func, true>, void>;
+      e.memory16_rev_trampoline = &memory16_host_call<&wasi_trampoline_rev<Func, true>, void>;
       table.add_entry(std::move(e));
    }
 

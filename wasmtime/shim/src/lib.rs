@@ -47,6 +47,9 @@ pub struct PzwtConfig {
     /// by the embedder's own stack accounting and not by the calling thread.
     pub native_stack: u64,
     pub epoch_interruption: u8,
+    /// Force memory16-v1/p32 on untagged modules. Declared profiles are still
+    /// honored when this is zero. This changes execution, not the guest ABI.
+    pub memory16: u8,
 }
 
 pub const PZWT_OK: i32 = 0;
@@ -132,6 +135,9 @@ fn report(out: *mut PzwtError, error: &Error) -> i32 {
 
 /// Bump when the module rewriting in stack_meter.rs changes what is compiled.
 const REWRITE_REVISION: u32 = 1;
+/// The C ABI and memory16-v1 runtime contract are part of artifact identity.
+const SHIM_ABI_REVISION: u32 = 2;
+const MEMORY16_PROFILE_REVISION: u32 = 1;
 
 /// Identifies what this build compiles a module into: the wasmtime version,
 /// this shim's rewriting, and the target. Part of any key under which a
@@ -142,9 +148,12 @@ pub extern "C" fn pzwt_identity() -> *const c_char {
     IDENTITY
         .get_or_init(|| {
             CString::new(format!(
-                "wasmtime 51.0.0; psizam shim {} rewrite {}; {}-{}",
+                "wasmtime 51.0.0 source {}; psizam shim {} ABI {} rewrite {} memory16-v{}; {}-{}",
+                env!("PSIZAM_WASMTIME_BUILD_ID"),
                 env!("CARGO_PKG_VERSION"),
+                SHIM_ABI_REVISION,
                 REWRITE_REVISION,
+                MEMORY16_PROFILE_REVISION,
                 std::env::consts::ARCH,
                 std::env::consts::OS
             ))
@@ -179,8 +188,17 @@ pub unsafe extern "C" fn pzwt_engine_new(
         set_error(error, PZWT_ERROR, 0, "unknown float profile".into());
         return std::ptr::null_mut();
     }
+    if config.memory16 > 1 {
+        set_error(error, PZWT_ERROR, 0, "unknown memory16 override".into());
+        return std::ptr::null_mut();
+    }
     let has = |bit: u32| config.features & bit != 0;
     let mut c = Config::new();
+
+    // This only supplies a profile for untagged source. The fork preserves
+    // each module's declared/resolved profile in its own memory metadata, so
+    // ordinary and memory16 instances can share this Engine and Linker.
+    c.psizam_memory16(config.memory16 != 0);
 
     // Deterministic floating point: positive canonical NaN from every float
     // operation, and one fixed behaviour for each relaxed SIMD instruction.
@@ -638,6 +656,33 @@ pub unsafe extern "C" fn pzwt_context_memory(
         Some(memory) => {
             *base = memory.data_ptr(&*cx);
             *len = memory.data_size(&*cx);
+        }
+        None => {
+            *base = std::ptr::null_mut();
+            *len = 0;
+        }
+    }
+}
+
+/// Complete private memory state for trusted snapshots/restores. Unlike
+/// `pzwt_context_memory` and import callbacks, this includes memory16 padding.
+/// The fork only reports that storage when the memory's actual saved profile
+/// guarantees the padded allocation; the engine's source override is not used
+/// to infer it. Callers must not retain the pointer beyond the store's lifetime
+/// or access it while Wasm is running.
+#[no_mangle]
+pub unsafe extern "C" fn pzwt_context_memory_storage(
+    context: *mut PzwtContext,
+    base: *mut *mut u8,
+    len: *mut usize,
+) {
+    let cx = &mut (*context).0;
+    match cx.data().memory {
+        Some(memory) => {
+            *base = memory.data_ptr(&*cx);
+            *len = memory
+                .psizam_memory16_data_size(&*cx)
+                .unwrap_or_else(|| memory.data_size(&*cx));
         }
         None => {
             *base = std::ptr::null_mut();

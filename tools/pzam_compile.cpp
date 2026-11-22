@@ -34,7 +34,7 @@ struct compile_options : default_options {
 };
 
 static void usage(const char* prog) {
-   std::cerr << "Usage: " << prog << " --target=x86_64|aarch64 [--backend=jit1|jit2|llvm] [--opt-level=0|1|2|3] [--softfloat] [--backtrace] [--gas-metering=on|off] [-jN] [--dump-layout=FILE] [-o output.pzam] input.wasm\n";
+   std::cerr << "Usage: " << prog << " --target=x86_64|aarch64 [--backend=jit1|jit2|llvm] [--memory16] [--opt-level=0|1|2|3] [--softfloat] [--backtrace] [--gas-metering=on|off] [-jN] [--dump-layout=FILE] [-o output.pzam] input.wasm\n";
 }
 
 static std::vector<char> write_pzam(
@@ -187,6 +187,7 @@ int pzam_compile_main(int argc, char** argv) {
    bool use_softfloat = false;
    bool use_backtrace = false;
    bool gas_metering = true;
+   bool memory16 = false;
    int opt_level = 2;
    std::uint32_t compile_threads = std::thread::hardware_concurrency();
    if (compile_threads == 0) compile_threads = 1;
@@ -215,6 +216,8 @@ int pzam_compile_main(int argc, char** argv) {
          gas_metering = false;
       } else if (arg == "--gas-metering=on") {
          gas_metering = true;
+      } else if (arg == "--memory16") {
+         memory16 = true;
       } else if (arg == "--softfloat") {
          use_softfloat = true;
       } else if (arg == "--backtrace") {
@@ -269,6 +272,8 @@ int pzam_compile_main(int argc, char** argv) {
    }
 
    auto wasm_bytes = read_wasm(input_file);
+   if (memory16 && !read_execution_profile(wasm_bytes))
+      append_execution_profile(wasm_bytes, memory16_p32_v1);
 
    bool ok;
    if (backend_str == "jit1") {

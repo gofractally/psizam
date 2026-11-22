@@ -5,6 +5,7 @@
  */
 
 #include <psizam/allocator.hpp>
+#include <psizam/execution_profile.hpp>
 #include <psizam/detail/guarded_ptr.hpp>
 #include <psizam/detail/opcodes.hpp>
 #include <psizam/detail/vector.hpp>
@@ -382,6 +383,7 @@ namespace psizam {
 
       // Custom sections:
       std::optional<name_section> names;
+      uint32_t execution_profile = 0;
 
       // not part of the spec for WASM
       std::vector<uint32_t>    import_functions;

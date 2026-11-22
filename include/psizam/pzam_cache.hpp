@@ -16,6 +16,7 @@
 #include <psizam/allocator.hpp>
 #include <psizam/detail/jit_reloc.hpp>
 #include <psizam/pzam_format.hpp>
+#include <psizam/pzam_metadata.hpp>
 #include <psizam/types.hpp>
 #ifndef PSIZAM_COMPILE_ONLY
 #include <psizam/detail/jit_runtime_helpers.hpp>
@@ -261,9 +262,11 @@ namespace psizam {
 
          pzam_file file;
          file.input_hash = hash_wasm(wasm_bytes);
+         file.metadata = extract_metadata(mod);
 
          // Build a single code section
          pzam_code_section cs;
+         if (mod.execution_profile) cs.execution_profile = mod.execution_profile;
          cs.arch = static_cast<uint8_t>(target_arch);
          cs.instrumentation.softfloat = softfloat_enabled ? 1 : 0;
          cs.instrumentation.gas_metering = mod.gas_metering;
@@ -348,6 +351,7 @@ namespace psizam {
             }
          }
          if (!cs || !pzam_page_layout_compatible(*cs)) return false;
+         if (cs->execution_profile.value_or(0) != mod.execution_profile) return false;
          if (bool(cs->instrumentation.gas_metering) != mod.gas_metering) return false;
 
          // Validate compiler hash

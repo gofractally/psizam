@@ -1717,6 +1717,15 @@ namespace psizam::detail {
             this->emit_pop_raw(rcx);  // count
             this->emit_pop_raw(rax);  // val
             this->emit_pop_raw(rdx);  // dest wasm addr
+            if (is_memory16()) {
+               this->emit_push_raw(rax);
+               this->emit_mov(ecx, ecx);
+               this->emit_mov(edx, eax);
+               this->emit_add(rcx, rax);
+               this->emit_cmp(65536, rax);
+               base::fix_branch(this->emit_branchcc32(base::JA), memory_handler);
+               this->emit_pop_raw(rax);
+            }
             this->emit(base::TEST, ecx, ecx);
             void* nonzero = this->emit_branchcc32(base::JNZ);
             // count == 0: call helper for bounds check only (spec requires trap if dest > mem_size)
@@ -1759,6 +1768,19 @@ namespace psizam::detail {
             this->emit_pop_raw(rcx);  // count
             this->emit_pop_raw(rdx);  // src wasm addr
             this->emit_pop_raw(rax);  // dest wasm addr
+            if (is_memory16()) {
+               this->emit_push_raw(rax);
+               this->emit_mov(ecx, ecx);
+               this->emit_mov(eax, eax);
+               this->emit_add(rcx, rax);
+               this->emit_cmp(65536, rax);
+               base::fix_branch(this->emit_branchcc32(base::JA), memory_handler);
+               this->emit_mov(edx, eax);
+               this->emit_add(rcx, rax);
+               this->emit_cmp(65536, rax);
+               base::fix_branch(this->emit_branchcc32(base::JA), memory_handler);
+               this->emit_pop_raw(rax);
+            }
             this->emit(base::TEST, ecx, ecx);
             void* nonzero = this->emit_branchcc32(base::JNZ);
             // count == 0: call helper for bounds check only

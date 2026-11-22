@@ -2,6 +2,7 @@
 
 #include <psizam/constants.hpp>
 #include <psizam/exceptions.hpp>
+#include <psizam/execution_profile.hpp>
 #include <psizam/detail/span.hpp>
 
 #include <cassert>
@@ -864,6 +865,7 @@ namespace psizam {
       void free(std::size_t = 0) {}
       void free() {}
       wasm_allocator() {}
+      void configure_memory16(bool) {}
       void reset(uint32_t) {}
       void reset() {}
       template <typename T>
@@ -901,6 +903,8 @@ namespace psizam {
       int32_t page      = 0;
       bool    external_ = false;  // true = caller-provided memory, no mmap/mprotect
       bool    pooled_   = false;  // true = from guarded_pool, no mmap/munmap but mprotect ok
+      bool    memory16_ = false;
+      std::size_t reservation_size_ = max_memory;
       uint32_t max_pages_limit_ = max_pages; // for external: power-of-2 limit
 
       void update_stored_mem_size() {
@@ -955,6 +959,43 @@ namespace psizam {
 
       bool is_external() const { return external_; }
       bool is_pooled()   const { return pooled_; }
+      bool is_memory16() const { return memory16_; }
+      std::size_t reservation_size() const { return reservation_size_; }
+
+      // Called before reset and before publishing linear_memory to generated
+      // code. Ordinary wasm32 allocations and instructions are unchanged.
+      void configure_memory16(bool enabled) {
+         if (enabled == memory16_) return;
+         if (external_) {
+            PSIZAM_ASSERT(!enabled || uint64_t(max_pages_limit_) * page_size >= memory16_accessible_bytes,
+                          wasm_bad_alloc, "memory16 external allocation needs padding");
+         } else if (!pooled_) {
+            const auto bytes = enabled ?
+               (memory16_accessible_bytes + syspagesize() - 1) / syspagesize() * syspagesize() : max_memory;
+            char* next = static_cast<char*>(::mmap(nullptr, bytes + prefix_size() + suffix_size(),
+               PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+            PSIZAM_ASSERT(next != MAP_FAILED, wasm_bad_alloc, "memory profile mmap failed");
+            if (::mprotect(next, table_size(), PROT_READ | PROT_WRITE) != 0) {
+               ::munmap(next, bytes + prefix_size() + suffix_size());
+               PSIZAM_THROW(wasm_bad_alloc, "memory profile mprotect failed");
+            }
+            ::munmap(raw - prefix_size(), reservation_size_ + prefix_size() + suffix_size());
+            raw = next + prefix_size();
+            reservation_size_ = bytes;
+         } else {
+            // Pool ownership stays with the pool. Restore its guard region
+            // before changing the number of accessible pages.
+            const auto active_bytes = memory16_ ?
+               (memory16_accessible_bytes + syspagesize() - 1) / syspagesize() * syspagesize() :
+               static_cast<size_t>(std::max(page, 0)) * page_size;
+            if (active_bytes) {
+               int err = ::mprotect(raw, active_bytes, PROT_NONE);
+               PSIZAM_ASSERT(err == 0, wasm_bad_alloc, "pooled memory profile mprotect failed");
+            }
+         }
+         memory16_ = enabled;
+         page = -1;
+      }
       uint32_t max_pages_available() const { return max_pages_limit_; }
 
       // Static accessors for the pool to compute region sizes without
@@ -971,6 +1012,7 @@ namespace psizam {
          if (size == 0) return;
          PSIZAM_ASSERT(page >= 0, wasm_bad_alloc, "require memory to allocate");
          PSIZAM_ASSERT(size + page <= max_pages_limit_, wasm_bad_alloc, "exceeded max number of pages");
+         PSIZAM_ASSERT(!memory16_ || size + page <= 1, wasm_bad_alloc, "memory16 cannot grow");
          if (!external_) {
             int err = mprotect(raw + (page_size * page), (page_size * size), PROT_READ | PROT_WRITE);
             PSIZAM_ASSERT(err == 0, wasm_bad_alloc, "mprotect failed");
@@ -994,13 +1036,17 @@ namespace psizam {
       }
       void free() {
          if (!external_ && !pooled_ && raw) {
-            ::munmap(raw - prefix_size(), max_memory + prefix_size() + suffix_size());
+            ::munmap(raw - prefix_size(), reservation_size_ + prefix_size() + suffix_size());
             raw = nullptr;
          }
       }
       ~wasm_allocator() {
+         // A subsequent pool lease may run guarded wasm32. Do not leave the
+         // memory16 overflow region accessible to that instance.
+         if (pooled_ && memory16_ && raw)
+            ::mprotect(raw, memory16_accessible_bytes, PROT_NONE);
          if (!external_ && !pooled_ && raw)
-            ::munmap(raw - prefix_size(), max_memory + prefix_size() + suffix_size());
+            ::munmap(raw - prefix_size(), reservation_size_ + prefix_size() + suffix_size());
       }
       wasm_allocator(const wasm_allocator&) = delete;
       wasm_allocator& operator=(const wasm_allocator&) = delete;
@@ -1054,6 +1100,19 @@ namespace psizam {
       // \post get_current_page() == new_pages
       // \post all allocated pages are zero-filled.
       void reset(uint32_t new_pages) {
+         if (memory16_) {
+            PSIZAM_ASSERT(new_pages == 1, wasm_bad_alloc, "memory16 requires one page");
+            if (!external_) {
+               int err = ::mprotect(raw, memory16_accessible_bytes, PROT_READ | PROT_WRITE);
+               PSIZAM_ASSERT(err == 0, wasm_bad_alloc, "memory16 mprotect failed");
+               err = ::mprotect(raw - syspagesize(), syspagesize(), PROT_READ);
+               PSIZAM_ASSERT(err == 0, wasm_bad_alloc, "memory16 prefix mprotect failed");
+            }
+            std::memset(raw, 0, memory16_accessible_bytes);
+            page = 1;
+            update_stored_mem_size();
+            return;
+         }
          if (page >= 0) {
             memset(raw, '\0', page_size * page);
          } else if (!external_) {
@@ -1092,15 +1151,15 @@ namespace psizam {
       template <typename T>
       inline T* create_pointer(uint32_t offset) { return reinterpret_cast<T*>(raw + offset); }
       inline int32_t get_current_page() const { return page; }
-      bool is_in_region(char* p) { return p >= raw && p < raw + max_memory; }
+      bool is_in_region(char* p) { return p >= raw && p < raw + reservation_size_; }
       std::span<const char> span() const
       {
-         return { raw - prefix_size(), max_memory + prefix_size() + suffix_size() };
+         return { raw - prefix_size(), reservation_size_ + prefix_size() + suffix_size() };
       }
 
       std::span<std::byte> get_span() const {
          const std::size_t syspagesize = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
-         return {(std::byte*)raw - syspagesize, max_memory + 2*syspagesize};
+         return {(std::byte*)raw - syspagesize, reservation_size_ + 2*syspagesize};
       }
    };
 #endif // !PSIZAM_COMPILE_ONLY

@@ -222,6 +222,7 @@ inline bool install_pzam_code(module& mod, const pzam_code_section& cs,
 
 inline pzam_load_result load_pzam(const pzam_file& pzam)
 {
+   validate_pzam_execution_profiles(pzam);
    PSIZAM_ASSERT(pzam.magic == PZAM_MAGIC && pzam.format_version == PZAM_VERSION,
                  wasm_parse_exception, "pzam_loader: incompatible PZAM format version");
    const pzam_code_section& cs = pick_code_section(pzam);

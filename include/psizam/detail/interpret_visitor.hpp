@@ -2678,6 +2678,8 @@ namespace psizam::detail {
          }
          case atomic_sub::memory_atomic_wait32:
          case atomic_sub::memory_atomic_wait64: {
+            if (context.mem_mode() == mem_safety::memory16)
+               PSIZAM_THROW(wasm_interpreter_exception, "atomic wait requires shared memory");
             context.pop_operand(); // timeout
             context.pop_operand(); // expected
             context.pop_operand(); // addr

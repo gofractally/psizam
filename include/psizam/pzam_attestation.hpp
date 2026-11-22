@@ -64,6 +64,8 @@ namespace psizam {
       feed(&cs.stack_limit_mode, 1);
       feed(&cs.page_size, sizeof(cs.page_size));
       feed(&cs.max_stack, sizeof(cs.max_stack));
+      const auto execution_profile = cs.execution_profile.value_or(0);
+      feed(&execution_profile, sizeof(execution_profile));
 
       // Compiler info
       feed(cs.compiler.compiler_name.data(), cs.compiler.compiler_name.size());

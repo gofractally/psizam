@@ -5094,11 +5094,18 @@ namespace psizam::detail {
 
       void emit_memory_fill() {
          COUNT_INSTR();
-         auto icount = fixed_size_instr(18);
+         auto icount = variable_size_instr(18, is_memory16() ? 80 : 18);
          emit_pop(rcx);
          emit_mov(rdi, r8);
          emit_pop(rax);
          emit_pop(rdi);
+         if (is_memory16()) {
+            emit_mov(ecx, ecx);
+            emit_mov(edi, edx);
+            emit_add(rcx, rdx);
+            emit_cmp(65536, rdx);
+            fix_branch(emit_branchcc32(JA), memory_handler);
+         }
          emit_add(rsi, rdi);
 
          // validate memory
@@ -5112,12 +5119,23 @@ namespace psizam::detail {
       }
       void emit_memory_copy() {
          COUNT_INSTR();
-         auto icount = fixed_size_instr(60);
+         auto icount = variable_size_instr(60, is_memory16() ? 128 : 60);
          emit_pop(rcx);
          emit_mov(rsi, r8);
          emit_mov(rdi, r9);
          emit_pop(rsi);
          emit_pop(rdi);
+         if (is_memory16()) {
+            emit_mov(ecx, ecx);
+            emit_mov(esi, eax);
+            emit_add(rcx, rax);
+            emit_cmp(65536, rax);
+            fix_branch(emit_branchcc32(JA), memory_handler);
+            emit_mov(edi, eax);
+            emit_add(rcx, rax);
+            emit_cmp(65536, rax);
+            fix_branch(emit_branchcc32(JA), memory_handler);
+         }
          emit_add(r8, rsi);
          emit_add(r8, rdi);
 

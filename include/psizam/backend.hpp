@@ -283,7 +283,7 @@ namespace psizam {
       // For non-fast-eligible functions (custom type converters, pointer/reference params),
       // a slow_dispatch closure rebuilds the operand stack and calls through the full
       // type conversion pipeline.
-      static host_function_table build_host_table() {
+      static host_function_table build_host_table(bool memory16) {
          if constexpr (std::is_same_v<HostFunctions, std::nullptr_t>) {
             return {};
          } else {
@@ -298,8 +298,10 @@ namespace psizam {
                entries[idx].module_name = key.first;
                entries[idx].func_name   = key.second;
                entries[idx].signature   = mappings.host_functions[idx];
-               auto fwd = mappings.fast_fwd[idx];
-               auto rev = mappings.fast_rev[idx];
+               auto fwd = memory16 ? mappings.memory16_fwd[idx] : mappings.fast_fwd[idx];
+               auto rev = memory16 ? mappings.memory16_rev[idx] : mappings.fast_rev[idx];
+               entries[idx].memory16_trampoline = reinterpret_cast<host_trampoline_t>(mappings.memory16_fwd[idx]);
+               entries[idx].memory16_rev_trampoline = reinterpret_cast<host_trampoline_t>(mappings.memory16_rev[idx]);
                entries[idx].raw_func_ptr = (idx < mappings.raw_ptrs.size()) ? mappings.raw_ptrs[idx] : nullptr;
                // fast_rev is the JIT-callable trampoline (reverse-order args).
                // For non-fast-eligible host functions, fast_rev now holds a
@@ -315,7 +317,7 @@ namespace psizam {
                   // Non-fast-eligible: build a slow_dispatch that reconstructs
                   // the operand stack and calls through the full type conversion pipeline.
                   entries[idx].trampoline = nullptr;
-                  entries[idx].slow_dispatch = [idx](void* host, native_value* args, char* memory) -> native_value {
+                  entries[idx].slow_dispatch = [idx, memory16](void* host, native_value* args, char* memory) -> native_value {
                      auto& m = HostFunctions::mappings::get();
                      auto& fn = m.functions[idx];
                      auto& sig = m.host_functions[idx];
@@ -326,7 +328,7 @@ namespace psizam {
                         temp_stack.push(i64_const_t{args[i].i64});
                      }
 
-                     execution_interface ei{memory, &temp_stack};
+                     execution_interface ei{memory, &temp_stack, fp_mode::fast, memory16};
                      tc_type tc{static_cast<host_cls*>(host), std::move(ei)};
 
                      fn(static_cast<host_cls*>(host), tc);
@@ -371,7 +373,7 @@ namespace psizam {
          if (ctx.owns) {
             ctx->initialize_globals();
          }
-         _host_table = build_host_table();
+         _host_table = build_host_table(is_memory16_profile(mod->execution_profile));
          ctx->set_host_table(&_host_table);
 
          // Build direct C function pointer and trampoline pointer arrays for JIT host calls.
@@ -401,14 +403,17 @@ namespace psizam {
                if (mapped < _host_table.size()) {
                   auto& entry = _host_table.get_entry(mapped);
                   _direct_ptrs[i] = entry.raw_func_ptr;
+                  const bool memory16 = is_memory16_profile(mod->execution_profile);
+                  auto fwd = memory16 ? entry.memory16_trampoline : entry.trampoline;
+                  auto rev = memory16 ? entry.memory16_rev_trampoline : entry.rev_trampoline;
                   if constexpr (want_rev) {
-                     PSIZAM_ASSERT(entry.rev_trampoline || !entry.trampoline,
+                     PSIZAM_ASSERT(rev || !fwd,
                         wasm_link_exception, "rev trampoline missing — would silently use fwd trampoline with wrong arg order");
-                     _trampoline_ptrs[i] = entry.rev_trampoline ? entry.rev_trampoline : entry.trampoline;
+                     _trampoline_ptrs[i] = rev ? rev : fwd;
                   } else {
-                     PSIZAM_ASSERT(entry.trampoline || !entry.rev_trampoline,
+                     PSIZAM_ASSERT(fwd || !rev,
                         wasm_link_exception, "fwd trampoline missing for host function — would silently use wrong arg order");
-                     _trampoline_ptrs[i] = entry.trampoline ? entry.trampoline : entry.rev_trampoline;
+                     _trampoline_ptrs[i] = fwd ? fwd : rev;
                   }
                } else {
                   _trampoline_ptrs[i] = unresolved_trampoline;
@@ -480,14 +485,17 @@ namespace psizam {
                if (mapped < _host_table.size()) {
                   auto& entry = _host_table.get_entry(mapped);
                   _direct_ptrs[i] = entry.raw_func_ptr;
+                  const bool memory16 = is_memory16_profile(mod->execution_profile);
+                  auto fwd = memory16 ? entry.memory16_trampoline : entry.trampoline;
+                  auto rev = memory16 ? entry.memory16_rev_trampoline : entry.rev_trampoline;
                   if constexpr (want_rev) {
-                     PSIZAM_ASSERT(entry.rev_trampoline || !entry.trampoline,
+                     PSIZAM_ASSERT(rev || !fwd,
                         wasm_link_exception, "rev trampoline missing — would silently use fwd trampoline with wrong arg order");
-                     _trampoline_ptrs[i] = entry.rev_trampoline ? entry.rev_trampoline : entry.trampoline;
+                     _trampoline_ptrs[i] = rev ? rev : fwd;
                   } else {
-                     PSIZAM_ASSERT(entry.trampoline || !entry.rev_trampoline,
+                     PSIZAM_ASSERT(fwd || !rev,
                         wasm_link_exception, "fwd trampoline missing for host function — would silently use wrong arg order");
-                     _trampoline_ptrs[i] = entry.trampoline ? entry.trampoline : entry.rev_trampoline;
+                     _trampoline_ptrs[i] = fwd ? fwd : rev;
                   }
                   // If no fast trampoline but slow_dispatch exists, leave
                   // null — JIT falls back to call_host_function which

@@ -46,7 +46,7 @@ namespace {
          if (auto trampoline = c._host_trampoline_ptrs[func_idx])
             return trampoline(c.get_host_ptr(), args, c.linear_memory()).i64;
       const auto mapped = c.get_module().import_functions[func_idx];
-      return c.get_host_table()->call(c.get_host_ptr(), mapped, args, c.linear_memory()).i64;
+      return c.get_host_table()->call(c.get_host_ptr(), mapped, args, c.linear_memory(), is_memory16_profile(c.get_module().execution_profile)).i64;
    }
 
    // Escape via longjmp with a new exception, or throw if no escape target.

@@ -17,11 +17,12 @@ using namespace psizam::detail;
 
 int main(int argc, char** argv) {
    if (argc < 2) {
-      std::cerr << "Usage: psizam-wasi [--dir=guest:host ...] [--backend=interpreter|jit] <module.wasm> [args...]\n";
+      std::cerr << "Usage: psizam-wasi [--memory16] [--dir=guest:host ...] [--backend=interpreter|jit|jit2|llvm] <module.wasm> [args...]\n";
       return 1;
    }
 
    std::string backend_str = "interpreter";
+   bool memory16 = false;
    std::string wasm_file;
    std::vector<std::pair<std::string, std::string>> dirs;
    std::vector<std::string> wasm_args;
@@ -30,7 +31,9 @@ int main(int argc, char** argv) {
    int i = 1;
    for (; i < argc; i++) {
       std::string arg = argv[i];
-      if (arg.starts_with("--dir=")) {
+      if (arg == "--memory16") {
+         memory16 = true;
+      } else if (arg.starts_with("--dir=")) {
          auto val = arg.substr(6);
          auto colon = val.find(':');
          if (colon != std::string::npos)
@@ -69,9 +72,12 @@ int main(int argc, char** argv) {
 
    // Read the wasm module
    auto code = read_wasm(wasm_file);
+   if (memory16 && !read_execution_profile(code))
+      append_execution_profile(code, memory16_p32_v1);
 
    // Set up WASI host
    wasi_host wasi;
+   wasi.psizam_memory16 = is_memory16_profile(read_execution_profile(code));
    wasi.args = std::move(wasm_args);
 
    // Pass through host environment

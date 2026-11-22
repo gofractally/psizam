@@ -9,18 +9,25 @@ if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
 endif()
 
 find_program(PSIZAM_CARGO cargo REQUIRED)
+set(PSIZAM_WASMTIME_BUILD_ID "$ENV{PSIZAM_WASMTIME_BUILD_ID}" CACHE STRING
+    "Exact Wasmtime source receipt for development path dependencies")
 
 set(_shim_source "${CMAKE_CURRENT_SOURCE_DIR}/shim")
 set(_shim_target "${CMAKE_CURRENT_BINARY_DIR}/cargo")
 set(_shim_library "${_shim_target}/release/libpsizam_wasmtime_shim.a")
+set(_shim_env "CARGO_TARGET_DIR=${_shim_target}")
+if(PSIZAM_WASMTIME_BUILD_ID)
+   list(APPEND _shim_env "PSIZAM_WASMTIME_BUILD_ID=${PSIZAM_WASMTIME_BUILD_ID}")
+endif()
 
 add_custom_command(
    OUTPUT "${_shim_library}"
-   COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${_shim_target}"
+   COMMAND "${CMAKE_COMMAND}" -E env ${_shim_env}
            "${PSIZAM_CARGO}" build --release --locked
    WORKING_DIRECTORY "${_shim_source}"
    DEPENDS "${_shim_source}/Cargo.toml" "${_shim_source}/Cargo.lock"
-           "${_shim_source}/src/lib.rs"
+           "${_shim_source}/build.rs" "${_shim_source}/src/lib.rs"
+           "${_shim_source}/src/stack_meter.rs"
    COMMENT "Building the wasmtime shim with cargo"
    USES_TERMINAL VERBATIM)
 add_custom_target(psizam-wasmtime-shim-build DEPENDS "${_shim_library}")

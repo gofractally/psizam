@@ -2,8 +2,8 @@
 
 // psizam/wasmtime_backend.hpp — wasmtime as a psizam execution engine.
 //
-// Built only with PSIZAM_ENABLE_WASMTIME. The engine is upstream wasmtime
-// (Cranelift) behind a small Rust shim (wasmtime/shim); this header is the
+// Built only with PSIZAM_ENABLE_WASMTIME. The engine is the pinned psizam
+// Wasmtime fork (Cranelift) behind a Rust shim (wasmtime/shim); this header is the
 // C++ side. Host functions are bound with templates: each one gets its own
 // entry point that unpacks its arguments statically, so there is no per-call
 // type dispatch on the C++ side.
@@ -49,6 +49,7 @@ namespace abi {
       uint64_t max_wasm_stack;
       uint64_t native_stack;
       uint8_t  epoch_interruption;
+      uint8_t  memory16;
    };
    struct PzwtError {
       int32_t status;
@@ -105,6 +106,7 @@ namespace abi {
    void             pzwt_interrupter_fire(const PzwtInterrupter*);
    void             pzwt_interrupter_delete(PzwtInterrupter*);
    void        pzwt_context_memory(PzwtContext*, uint8_t** base, size_t* len);
+   void        pzwt_context_memory_storage(PzwtContext*, uint8_t** base, size_t* len);
    void        pzwt_context_set_stack(PzwtContext*, uint32_t bytes);
    uint32_t    pzwt_context_stack(PzwtContext*);
    PzwtLinker* pzwt_linker_new(const PzwtEngine*, const PzwtImport*, size_t, PzwtError*);
@@ -185,6 +187,9 @@ struct engine_options {
    // depends on native frame sizes or on the calling thread's stack.
    uint64_t native_stack       = 0;
    bool     epoch_interruption = true;
+   // Force memory16-v1 with the p32 ABI for untagged modules. Valid module
+   // declarations select their own profile even when this override is false.
+   bool     memory16           = false;
 };
 
 struct instance_limits {
@@ -473,7 +478,7 @@ class runtime {
       abi::PzwtConfig config{options.features, static_cast<uint32_t>(options.fp),
                              options.max_wasm_stack ? options.max_wasm_stack
                                                     : options.native_stack / 2,
-                             options.native_stack, options.epoch_interruption};
+                             options.native_stack, options.epoch_interruption, options.memory16};
       abi::PzwtError  e{};
       auto*           p = abi::pzwt_engine_new(&config, &e);
       if (!p)
@@ -679,6 +684,18 @@ class instance {
       uint8_t* base = nullptr;
       size_t   size = 0;
       abi::pzwt_context_memory(state_->active, &base, &size);
+      return {reinterpret_cast<char*>(base), size};
+   }
+
+   // Complete mutable state for trusted snapshots/restores. In memory16 this
+   // includes the writable padding (131086 bytes total); memory() and host
+   // pointer arguments still expose only the logical 65536 bytes. The span
+   // must not outlive this instance or be used while Wasm is running.
+   std::span<char> memory_storage()
+   {
+      uint8_t* base = nullptr;
+      size_t   size = 0;
+      abi::pzwt_context_memory_storage(state_->active, &base, &size);
       return {reinterpret_cast<char*>(base), size};
    }
 

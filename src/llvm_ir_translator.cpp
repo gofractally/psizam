@@ -285,6 +285,7 @@ namespace psizam::detail {
 
       // ── Checked memory mode helpers ──
 
+      bool is_memory16() const { return opts.mem_mode == mem_safety::memory16; }
       bool is_checked() const { return opts.mem_mode == mem_safety::checked; }
       bool is_checked_strict() const { return opts.checked_kind == checked_mode::strict; }
 
@@ -1481,6 +1482,8 @@ namespace psizam::detail {
             auto* addr = load_vreg(addr_vreg);
             if (!addr) addr = builder.getInt64(0);
             auto* eff_addr = builder.CreateZExt(builder.CreateTrunc(addr, i32_ty), i64_ty);
+            if (is_memory16())
+               eff_addr = builder.CreateAnd(eff_addr, builder.getInt64(0xffff));
             if (offset != 0)
                eff_addr = builder.CreateAdd(eff_addr, builder.getInt64(static_cast<uint64_t>(offset)));
             if (access_size > 0) {
@@ -2195,6 +2198,8 @@ namespace psizam::detail {
 
                   // Compute effective address: mem_ptr + addr + offset
                   llvm::Value* eff_addr = builder.CreateZExt(addr, i64_ty);
+                  if (is_memory16())
+                     eff_addr = builder.CreateAnd(eff_addr, builder.getInt64(0xffff));
                   if (offset != 0) {
                      eff_addr = builder.CreateAdd(eff_addr, builder.getInt64(static_cast<uint64_t>(offset)));
                   }
@@ -2273,6 +2278,8 @@ namespace psizam::detail {
 
                   // Compute effective address
                   llvm::Value* eff_addr = builder.CreateZExt(addr, i64_ty);
+                  if (is_memory16())
+                     eff_addr = builder.CreateAnd(eff_addr, builder.getInt64(0xffff));
                   if (offset != 0) {
                      eff_addr = builder.CreateAdd(eff_addr, builder.getInt64(static_cast<uint64_t>(offset)));
                   }

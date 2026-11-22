@@ -147,13 +147,16 @@ uint64_t __psizam_atomic_rmw(void* ctx, uint8_t sub, uint64_t addr, uint32_t off
    const auto& memories = c.get_module().memories;
    if (memories.empty()) escape_or_throw<wasm_memory_exception>("atomic instruction requires memory");
    if (!memories[0].is_memory64) addr = static_cast<uint32_t>(addr);
-   const uint64_t size = uint64_t(c.current_linear_memory()) * 65536;
+   const bool memory16 = c.mem_mode() == mem_safety::memory16;
+   if (memory16) addr &= memory16_address_mask;
+   const uint64_t size = memory16 ? memory16_accessible_bytes :
+      uint64_t(c.current_linear_memory()) * 65536;
    if (addr > size || offset > size - addr)
       escape_or_throw<wasm_memory_exception>("out of bounds memory access");
    const auto effective = addr + offset;
    if (width > size - effective)
       escape_or_throw<wasm_memory_exception>("out of bounds memory access");
-   if (effective & (width - 1))
+   if (!memory16 && (effective & (width - 1)))
       escape_or_throw<wasm_memory_exception>("unaligned atomic access");
    if (op == atomic_sub::memory_atomic_notify) return 0; // no private-memory waiters
    char* ptr = c.linear_memory() + effective;
