@@ -85,7 +85,15 @@ namespace psizam::detail {
          _enable_backtrace(enable_backtrace), _stack_limit_is_bytes(stack_limit_is_bytes),
          _compile_result(result) {
          _mod.native_guest_abi = psizam::native_guest_abi::jit_callee_cleanup;
-         if (_compile_result) _compile_result->native_guest_abi = _mod.native_guest_abi;
+         if (_compile_result) {
+            _compile_result->native_guest_abi = _mod.native_guest_abi;
+            _compile_result->body_stack_sizes.assign(_mod.code.size(), UINT64_MAX);
+            _compile_result->native_stack_frames_complete = false;
+         }
+         for (auto& body : _mod.code) {
+            body.native_stack_frame_bytes = UINT64_MAX;
+            body.native_stack_frame_complete = false;
+         }
          _code_start = _allocator.alloc<unsigned char>(128);
          _code_end = _code_start + 128;
          code = _code_start;
@@ -348,6 +356,7 @@ namespace psizam::detail {
 
       void emit_prologue(const func_type& /*ft*/, const std::vector<local_entry>& locals, uint32_t funcnum) {
          _tail_stack_immediates.clear();
+         _current_code_index = funcnum;
          _ft = &_mod.types[_mod.functions[funcnum]];
          _params = function_parameters{_ft};
          _locals = function_locals{locals};
@@ -378,10 +387,11 @@ namespace psizam::detail {
             emit_gas_charge(static_cast<int64_t>(_mod.code[funcnum].wasm_body_bytes));
          uint64_t count = 0;
          for(uint32_t i = 0; i < locals.size(); ++i) {
-            count += locals[i].count;
-            if(locals[i].type == types::v128) {
-               count += locals[i].count;
-            }
+            const uint64_t slots = uint64_t(locals[i].count) *
+                                   (locals[i].type == types::v128 ? 2u : 1u);
+            PSIZAM_ASSERT(count <= UINT64_MAX - slots, wasm_parse_exception,
+                          "native local slot count overflow");
+            count += slots;
          }
          _local_count = count;
          if (_local_count > 0) {
@@ -5264,9 +5274,21 @@ namespace psizam::detail {
 
       using fn_type = native_value(*)(void* context, void* memory);
       void finalize(function_body& body) {
+         PSIZAM_ASSERT(_local_count <= (UINT64_MAX - 8) / 8, wasm_parse_exception,
+                       "native fixed frame size overflow");
+         auto& published = _mod.code[_current_code_index];
+         if (!published.native_stack_frame_complete) ++_native_frame_count;
+         body.native_stack_frame_bytes = 8 + _local_count * 8;
+         body.native_stack_frame_complete = true;
+         published.native_stack_frame_bytes = body.native_stack_frame_bytes;
+         published.native_stack_frame_complete = true;
          body.jit_code_size = static_cast<uint32_t>(code - _code_start);
          _allocator.reclaim(code, _code_end - code);
          body.jit_code_offset = _code_start - (unsigned char*)_code_segment_base;
+         if (_compile_result) {
+            _compile_result->body_stack_sizes[_current_code_index] = body.native_stack_frame_bytes;
+            _compile_result->native_stack_frames_complete = _native_frame_count == _mod.code.size();
+         }
       }
 
       // returns the current write address
@@ -6337,6 +6359,8 @@ namespace psizam::detail {
       void* stack_overflow_handler;
       void* memory_handler;
       uint64_t _local_count;
+      uint32_t _current_code_index = 0;
+      size_t _native_frame_count = 0;
       uint32_t _table_element_size;
 
       // Parser hook: set before emit_br/br_if/br_table/return for multi-value

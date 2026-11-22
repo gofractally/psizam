@@ -1,0 +1,12 @@
+(module
+  (import "env" "tick" (func $tick))
+  (memory 1)
+  (func (export "bare") (result i64) (i64.const 1))
+  (func (export "scalar") (result i64) (local i64 i64 i64 i64) (i64.const 1))
+  (func (export "vector") (result i64) (local v128 v128) (i64.const 1))
+  (func (export "params") (param i64 i64 i64 i64) (result i64) (i64.const 1))
+  (func (export "spill") (param i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64) (result i64)
+    (local.get 0) (local.get 1) (local.get 2) (local.get 3) (local.get 4) (local.get 5) (local.get 6) (local.get 7) (local.get 8) (local.get 9) (local.get 10) (local.get 11) (local.get 12) (local.get 13) (local.get 14) (local.get 15) (local.get 16) (local.get 17) (local.get 18) (local.get 19) (local.get 20) (call $tick) i64.add i64.add i64.add i64.add i64.add i64.add i64.add i64.add i64.add i64.add i64.add i64.add i64.add i64.add i64.add i64.add i64.add i64.add i64.add i64.add)
+  (func (export "exception") (result i64)
+    (block $caught (try_table (catch_all $caught) (call $tick))) (i64.const 1))
+)

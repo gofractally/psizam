@@ -421,6 +421,8 @@ namespace psizam::detail {
 
          body.jit_code_offset = code_start - static_cast<unsigned char*>(_code_segment_base);
          body.jit_code_size = static_cast<uint32_t>(code - code_start);
+         body.native_stack_frame_bytes = _native_fixed_frame_bytes;
+         body.native_stack_frame_complete = true;
 
          // Reclaim unused code buffer tail to keep code compact.
          if (code < _code_end) {
@@ -710,16 +712,17 @@ namespace psizam::detail {
          emit_gas_charge(static_cast<int64_t>(_mod.code[func.func_index].wasm_body_bytes)
                          + func.prologue_gas_extra);
 
-         // Count body local slots, accounting for v128 locals using 2 slots (16 bytes)
-         uint32_t body_local_slots = 0;
-         {
-            uint32_t param_count = func.type->param_types.size();
-            const auto& locals = _mod.code[func.func_index].locals;
-            for (uint32_t g = 0; g < locals.size(); ++g) {
-               uint32_t slots_per = (locals[g].type == types::v128) ? 2 : 1;
-               body_local_slots += locals[g].count * slots_per;
-            }
+         // Count in 64 bits before narrowing to the emitter's slot indices.
+         uint64_t body_local_slots64 = 0;
+         for (const auto& local : _mod.code[func.func_index].locals) {
+            const uint64_t slots = uint64_t(local.count) * (local.type == types::v128 ? 2u : 1u);
+            PSIZAM_ASSERT(body_local_slots64 <= UINT64_MAX - slots, wasm_parse_exception,
+                          "native local slot count overflow");
+            body_local_slots64 += slots;
          }
+         PSIZAM_ASSERT(body_local_slots64 <= UINT32_MAX, wasm_parse_exception,
+                       "native local slot count exceeds index range");
+         const uint32_t body_local_slots = static_cast<uint32_t>(body_local_slots64);
          _body_locals = body_local_slots;
 
          // Callee-saved register usage was computed during regalloc
@@ -739,8 +742,13 @@ namespace psizam::detail {
          _checked_r15_save = is_checked() ? 1u : 0u;
 
          // Allocate and zero-initialize: body locals + spill slots + callee-saved + EH saves + checked R15
-         uint32_t total_slots = body_local_slots + _num_spill_slots + _callee_saved_count
-                              + _eh_save_slots + _checked_r15_save;
+         const uint64_t total_slots64 = body_local_slots64 + uint64_t(_num_spill_slots) +
+                                       _callee_saved_count + _eh_save_slots + _checked_r15_save;
+         // Frame-relative loads/stores use signed 32-bit displacements.
+         PSIZAM_ASSERT(total_slots64 <= (uint64_t(INT32_MAX) - 8) / 8, wasm_parse_exception,
+                       "native fixed frame exceeds displacement range");
+         const uint32_t total_slots = static_cast<uint32_t>(total_slots64);
+         _native_fixed_frame_bytes = 8 + total_slots64 * 8;
          if (total_slots > 0) {
             this->emit_xor(eax, eax);
             for (uint32_t i = 0; i < total_slots; ++i) {
@@ -7235,6 +7243,7 @@ namespace psizam::detail {
       uint32_t _num_vregs = 0;
       uint32_t _num_spill_slots = 0;
       uint32_t _body_locals = 0;
+      uint64_t _native_fixed_frame_bytes = UINT64_MAX;
       void* _body_start = nullptr;  // for self-recursive tail calls
       bool _use_regalloc = false;
       uint32_t _callee_saved_used = 0;

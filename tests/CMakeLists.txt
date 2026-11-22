@@ -816,3 +816,17 @@ target_compile_definitions(psizam_jit_worker_policy_tests PRIVATE CATCH_CONFIG_N
    JIT_WORKER_POLICY_WASM="${CMAKE_CURRENT_BINARY_DIR}/jit-worker-policy.wasm")
 add_test(NAME psizam_jit_worker_policy_tests COMMAND psizam_jit_worker_policy_tests)
 set_tests_properties(psizam_jit_worker_policy_tests PROPERTIES TIMEOUT 60 LABELS "execution;quick;policy")
+# Frame-bound metadata must describe actual native slots, not logical Wasm bytes.
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/native-frame-metadata.wasm"
+   COMMAND "${PSIZAM_WAT2WASM}" --enable-exceptions
+      "${CMAKE_CURRENT_SOURCE_DIR}/native-frame-metadata.wat"
+      -o "${CMAKE_CURRENT_BINARY_DIR}/native-frame-metadata.wasm"
+   DEPENDS native-frame-metadata.wat VERBATIM)
+add_executable(psizam_native_frame_metadata_tests native_frame_metadata_tests.cpp
+   "${CMAKE_CURRENT_BINARY_DIR}/native-frame-metadata.wasm")
+target_link_libraries(psizam_native_frame_metadata_tests PRIVATE psizam psizam-exec Catch2::Catch2)
+target_compile_definitions(psizam_native_frame_metadata_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
+   NATIVE_FRAME_METADATA_WASM="${CMAKE_CURRENT_BINARY_DIR}/native-frame-metadata.wasm")
+add_test(NAME psizam_native_frame_metadata_tests COMMAND psizam_native_frame_metadata_tests)
+set_tests_properties(psizam_native_frame_metadata_tests PROPERTIES TIMEOUT 60 LABELS "execution;resource;abi")
+
