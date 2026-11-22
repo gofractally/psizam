@@ -20,6 +20,11 @@ wasmtime = { version = "=51.0.0", default-features = false, features = [
     "threads",
     "parallel-compilation",
     "wat",
+    # externref values. psizam admits them (a module can only ever hold null
+    # ones, since no host function hands any out), so wasmtime must too. The
+    # null collector never collects, which is all that needs.
+    "gc",
+    "gc-null",
 ] }
 
 # Used to rewrite modules for deterministic stack accounting. Must match the

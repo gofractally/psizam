@@ -187,6 +187,7 @@ pub unsafe extern "C" fn pzwt_engine_new(
     c.wasm_wide_arithmetic(false);
     c.wasm_features(WasmFeatures::FUNCTION_REFERENCES, false);
     c.wasm_gc(false);
+    c.collector(Collector::Null);
     c.wasm_features(WasmFeatures::EXCEPTIONS, false);
     c.wasm_features(WasmFeatures::LEGACY_EXCEPTIONS, false);
     c.wasm_stack_switching(false);
