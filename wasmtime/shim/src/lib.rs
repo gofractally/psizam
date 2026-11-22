@@ -826,17 +826,18 @@ pub unsafe extern "C" fn pzwt_linker_new(
                 // been cached, and its memory need not be exported. Resolve
                 // memory16 from the actual caller instance, never the source
                 // override or a previously cached store memory's profile.
-                let actual_memory16 = if needs_memory {
-                    caller.psizam_memory16_memory()
-                } else {
-                    None
+                // The same holds for an ordinary module: its memory is the
+                // caller's memory0 whether or not it is exported.
+                let actual = if needs_memory { caller.psizam_memory0() } else { None };
+                let (memory, actual_memory16) = match actual {
+                    Some((memory, memory16)) => (Some(memory), memory16),
+                    None => (memory, false),
                 };
-                let memory = actual_memory16.or(memory);
                 let (base, len, memory16) = match memory {
                     Some(m) if needs_memory => (
                         m.data_ptr(&caller),
                         m.data_size(&caller),
-                        u8::from(actual_memory16.is_some()),
+                        u8::from(actual_memory16),
                     ),
                     _ => (std::ptr::null_mut(), 0, 0),
                 };
@@ -896,7 +897,7 @@ pub unsafe extern "C" fn pzwt_instantiate(
             let memory = instance
                 .get_memory(&mut *cx, stack_meter::MEMORY_EXPORT)
                 .or_else(|| instance.get_memory(&mut *cx, "memory"))
-                .or_else(|| instance.psizam_memory16_memory(&*cx));
+                .or_else(|| instance.psizam_memory0(&*cx).map(|(memory, _)| memory));
             cx.data_mut().memory = memory;
             let stack = instance.get_global(&mut *cx, stack_meter::STACK_EXPORT);
             cx.data_mut().stack = stack;

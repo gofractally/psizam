@@ -13,7 +13,7 @@ crate-type = ["staticlib"]
 # address lowering and compact allocation belong to the canonical fork;
 # the revision also participates in the compiled-artifact identity.
 [dependencies]
-wasmtime = { git = "https://github.com/gofractally/wasmtime", rev = "888ad2b9c6b2889baa2d316709c26a5cda9c340d", version = "=51.0.0", default-features = false, features = [
+wasmtime = { git = "https://github.com/gofractally/wasmtime", rev = "3bc32a5e2af2b45f4a717813ce7c51f2edcd3327", version = "=51.0.0", default-features = false, features = [
     "runtime",
     "cranelift",
     "std",

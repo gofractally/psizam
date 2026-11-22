@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn locked_source_wins_and_only_path_builds_use_explicit_receipts() {
-        let source = "git+https://github.com/gofractally/wasmtime?rev=888ad2b9c6b2889baa2d316709c26a5cda9c340d#888ad2b9c6b2889baa2d316709c26a5cda9c340d";
+        let source = "git+https://github.com/gofractally/wasmtime?rev=3bc32a5e2af2b45f4a717813ce7c51f2edcd3327#3bc32a5e2af2b45f4a717813ce7c51f2edcd3327";
         let lock = format!("[[package]]\nname = \"wasmtime\"\nsource = \"{source}\"\n");
         for explicit in [None, Some("stale-local-development-receipt"), Some("")] {
             assert_eq!(source_identity(&lock, explicit), Some(source));

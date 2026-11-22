@@ -30,7 +30,7 @@ struct host {
    uint32_t reenter() { return nested(); }
 };
 
-wt::engine_options options(bool force = false) {
+wt::engine_options engine_options_for(bool force = false) {
    wt::engine_options result;
    result.memory16 = force;
    result.features |= wt::feature::threads;
@@ -96,7 +96,7 @@ TEST_CASE("memory16: shipping identity binds the canonical fork and shim ABI", "
    const auto identity = wt::build_identity();
    std::cout << "Wasmtime build identity: " << identity << '\n';
    CHECK(identity.find("git+https://github.com/gofractally/wasmtime") != std::string_view::npos);
-   CHECK(identity.find("888ad2b9c6b2889baa2d316709c26a5cda9c340d") != std::string_view::npos);
+   CHECK(identity.find("3bc32a5e2af2b45f4a717813ce7c51f2edcd3327") != std::string_view::npos);
    CHECK(identity.find(" ABI 3 ") != std::string_view::npos);
    CHECK(identity.find(" memory16-v1;") != std::string_view::npos);
 }
@@ -105,7 +105,7 @@ TEST_CASE("memory16: native and Wasmtime agree on all physical bytes", "[memory1
    for (auto selected : selections) {
       CAPTURE(selected.profile, selected.force);
       auto code = fixture(selected.profile);
-      wt::runtime<host> runtime(options(selected.force));
+      wt::runtime<host> runtime(engine_options_for(selected.force));
       auto module = runtime.compile(code);
       host h;
       wt::instance<host> instance(runtime, module, h);
@@ -126,7 +126,7 @@ TEST_CASE("memory16: native and Wasmtime agree on all physical bytes", "[memory1
 }
 
 TEST_CASE("memory16: complete padding state can be copied and restored privately", "[memory16][snapshot]") {
-   wt::runtime<host> runtime{options()};
+   wt::runtime<host> runtime{engine_options_for()};
    auto module = runtime.compile(fixture());
    host h;
    wt::instance<host> instance(runtime, module, h);
@@ -152,25 +152,25 @@ TEST_CASE("memory16: complete padding state can be copied and restored privately
 TEST_CASE("memory16: marker and runtime override preserve saved module identity", "[memory16][artifact]") {
    for (auto selected : selections) {
       CAPTURE(selected.profile, selected.force);
-      wt::runtime<host> producer(options(selected.force));
+      wt::runtime<host> producer(engine_options_for(selected.force));
       auto module = producer.compile(fixture(selected.profile));
       auto artifact = module.serialize();
       REQUIRE(!artifact.empty());
-      wt::runtime<host> consumer{options()};
+      wt::runtime<host> consumer{engine_options_for()};
       auto loaded = consumer.load(artifact);
       host h;
       wt::instance<host> instance(consumer, loaded, h);
       check(instance);
    }
-   wt::runtime<host> ordinary{options()};
+   wt::runtime<host> ordinary{engine_options_for()};
    auto standard = ordinary.compile(fixture(0)).serialize();
-   wt::runtime<host> forced(options(true));
+   wt::runtime<host> forced(engine_options_for(true));
    CHECK_THROWS(forced.load(standard));
 }
 
 TEST_CASE("memory16: untagged defaults still use ordinary Wasm bounds", "[memory16][off]") {
    auto code = fixture(0);
-   wt::runtime<host> runtime{options()};
+   wt::runtime<host> runtime{engine_options_for()};
    auto module = runtime.compile(code);
    host h;
    wt::instance<host> instance(runtime, module, h);
@@ -185,7 +185,7 @@ TEST_CASE("memory16: untagged defaults still use ordinary Wasm bounds", "[memory
 
 TEST_CASE("memory16: host spans never expose private padding or mask lengths", "[memory16][host]") {
    auto code = fixture(memory16_p32_v1, MEMORY16_PARITY_HOST_WASM);
-   wt::runtime<host> runtime{options()};
+   wt::runtime<host> runtime{engine_options_for()};
    runtime.add<&host::bytes>("env", "span");
    auto module = runtime.compile(code);
    host h;
@@ -207,7 +207,7 @@ TEST_CASE("memory16: host spans never expose private padding or mask lengths", "
 }
 
 TEST_CASE("memory16: malformed profiles and unsupported memory shapes reject", "[memory16][admission]") {
-   wt::runtime<host> runtime{options()};
+   wt::runtime<host> runtime{engine_options_for()};
    auto original = fixture();
    auto rejects = [&](wasm_code code) {
       CHECK_THROWS([&] { auto module = runtime.compile(code); host h; wt::instance<host> instance(runtime, module, h); }());
@@ -240,7 +240,7 @@ TEST_CASE("memory16: malformed profiles and unsupported memory shapes reject", "
    REQUIRE(position != code.end());
    position[3] = 3;
    CHECK_NOTHROW(runtime.compile(code)); // ordinary shared memory is unchanged
-   wt::runtime<host> forced(options(true));
+   wt::runtime<host> forced(engine_options_for(true));
    CHECK_THROWS(forced.compile(code));
    append_execution_profile(code, memory16_p32_v1);
    CHECK_THROWS(runtime.compile(code));
@@ -249,7 +249,7 @@ TEST_CASE("memory16: malformed profiles and unsupported memory shapes reject", "
 TEST_CASE("memory16: unexported start callbacks use actual caller bounds", "[memory16][host][start]") {
    for (auto selected : selections) {
       CAPTURE(selected.profile, selected.force);
-      wt::runtime<host> runtime(options(selected.force));
+      wt::runtime<host> runtime(engine_options_for(selected.force));
       runtime.add<&host::bytes>("env", "span").add<&host::go_far>("env", "go_far")
          .add<&host::reenter>("env", "reenter");
       auto module = runtime.compile(fixture(selected.profile, MEMORY16_PARITY_START_WASM));
@@ -280,7 +280,7 @@ TEST_CASE("memory16: unexported start callbacks use actual caller bounds", "[mem
       CHECK_THROWS_AS((wt::instance<host>(runtime, module, invalid)), wt::host_memory_error);
       CHECK(invalid.calls == 2); // rejected before the third C++ host callback
    }
-   wt::runtime<host> ordinary{options()};
+   wt::runtime<host> ordinary{engine_options_for()};
    ordinary.add<&host::bytes>("env", "span").add<&host::go_far>("env", "go_far")
       .add<&host::reenter>("env", "reenter");
    auto module = ordinary.compile(fixture(0, MEMORY16_PARITY_START_WASM));
@@ -292,7 +292,7 @@ TEST_CASE("memory16: unexported start callbacks use actual caller bounds", "[mem
 }
 
 TEST_CASE("memory16: host reentry restores each actual caller's bounds", "[memory16][host][reentry]") {
-   wt::runtime<host> runtime{options()};
+   wt::runtime<host> runtime{engine_options_for()};
    runtime.add<&host::bytes>("env", "span").add<&host::go_far>("env", "go_far")
       .add<&host::reenter>("env", "reenter");
    auto standard = runtime.compile(fixture(0, MEMORY16_PARITY_START_WASM));

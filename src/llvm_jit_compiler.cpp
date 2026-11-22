@@ -238,6 +238,10 @@ namespace psizam::detail {
       add_sym("__psizam_sf_f64_promote_f32",  reinterpret_cast<void*>(&_psizam_f32_promote));
       add_sym("__psizam_sf_f32_fma",          reinterpret_cast<void*>(&_psizam_f32_fma));
       add_sym("__psizam_sf_f64_fma",          reinterpret_cast<void*>(&_psizam_f64_fma));
+      // Emitted for atomic operators. Without an entry here the JIT resolved
+      // it only where the process exports its own symbols: macOS by default,
+      // Linux not, so on Linux a module with one atomic failed to link.
+      add_sym("__psizam_atomic_rmw",          reinterpret_cast<void*>(&__psizam_atomic_rmw));
 
       if (auto err = jd.define(llvm::orc::absoluteSymbols(std::move(runtime_syms)))) {
          std::string msg;
