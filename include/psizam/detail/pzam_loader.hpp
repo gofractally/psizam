@@ -274,7 +274,36 @@ inline pzam_load_result load_pzam(const pzam_file& pzam)
          out.mod.code[j].jit_code_size   = cs.functions[j].code_size;
          out.mod.code[j].stack_size      = cs.functions[j].stack_size;
       }
+      // Typed guest ABI: calls between bodies, indirect calls and import
+      // calls go to private targets. Rebuild them, and the table entries that
+      // name them, exactly as the compiler published them.
+      out.mod.native_guest_abi = static_cast<native_guest_abi>(cs.guest_abi);
+      if (out.mod.native_guest_abi == native_guest_abi::llvm_tailcc) {
+         const uint32_t num_imports = out.mod.get_imported_functions_size();
+         PSIZAM_ASSERT(cs.import_thunks.size() == num_imports &&
+                          cs.functions.size() == out.mod.code.size(),
+                       wasm_parse_exception, "pzam_loader: incomplete typed guest targets");
+         auto target = [&](uint32_t offset, uint32_t size) -> const void* {
+            PSIZAM_ASSERT(size && uint64_t(offset) + size <= total_code_size,
+                          wasm_parse_exception, "pzam_loader: typed guest target outside code");
+            return static_cast<const char*>(exec_code) + offset;
+         };
+         out.mod.native_function_ptrs.assign(out.mod.get_functions_total(), nullptr);
+         for (uint32_t i = 0; i < num_imports; ++i)
+            out.mod.native_function_ptrs[i] =
+               target(cs.import_thunks[i].offset, cs.import_thunks[i].size);
+         for (std::size_t j = 0; j < cs.functions.size(); ++j)
+            out.mod.native_function_ptrs[num_imports + j] =
+               target(cs.functions[j].body_offset, cs.functions[j].body_size);
+         for (auto& elem_seg : out.mod.elements)
+            for (auto& entry : elem_seg.elems)
+               if (entry.index < out.mod.native_function_ptrs.size())
+                  entry.code_ptr = out.mod.native_function_ptrs[entry.index];
+      }
    }
+   for (std::size_t j = 0; j < cs.functions.size(); ++j)
+      out.mod.code[j].byte_stack_usage = cs.functions[j].byte_stack_usage;
+   out.mod.prepare_native_function_costs();
    out.mod.maximum_stack        = cs.max_stack;
    out.mod.stack_limit_is_bytes = cs.stack_limit_mode != 0;
 

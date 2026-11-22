@@ -29,7 +29,8 @@ namespace psizam {
    // can embed a different inline/indirect layout decision and must be rebuilt.
    // Version 6 also persists the native embedder contract and source ranges.
    // Version 7 stores an element's full canonical type index. Eight bits lost
-   // the null sentinel and aliased type indices above 255.
+   // the null sentinel and aliased type indices above 255. It also persists
+   // the private guest ABI: body and import-thunk targets and logical costs.
    static constexpr uint32_t PZAM_VERSION = 7;
 
    // ---- Architecture ----
@@ -56,8 +57,21 @@ namespace psizam {
       uint32_t code_offset  = 0;  // offset within code blob
       uint32_t code_size    = 0;  // size in bytes
       uint32_t stack_size   = 0;  // operand stack slots needed
+      // Private guest target (LLVM typed ABI); the public entry wrapper is
+      // code_offset. Zero size means the entry is the only target.
+      uint32_t body_offset  = 0;
+      uint32_t body_size    = 0;
+      uint32_t byte_stack_usage = 0;  // logical byte-budget cost of one activation
    };
-   PSIO_REFLECT(pzam_func_entry, code_offset, code_size, stack_size)
+   PSIO_REFLECT(pzam_func_entry, code_offset, code_size, stack_size,
+                body_offset, body_size, byte_stack_usage)
+
+   /// A range within the code blob.
+   struct pzam_code_range {
+      uint32_t offset = 0;
+      uint32_t size   = 0;
+   };
+   PSIO_REFLECT(pzam_code_range, offset, size)
 
    /// Relocation entry for address patching at load time.
    struct pzam_relocation {
@@ -253,10 +267,13 @@ namespace psizam {
       std::vector<pzam_relocation>   relocations;
       std::vector<uint8_t>           code_blob;
       std::optional<native_aot_metadata> native_contract;
+      uint8_t                        guest_abi = 0;         // psizam::native_guest_abi
+      std::vector<pzam_code_range>   import_thunks;         // typed targets, import-indexed
    };
    PSIO_REFLECT(pzam_code_section,
       arch, opt_tier, instrumentation, stack_limit_mode, page_size, max_stack,
-      compiler, attestations, functions, relocations, code_blob, native_contract)
+      compiler, attestations, functions, relocations, code_blob, native_contract,
+      guest_abi, import_thunks)
 
    // ===========================================================================
    // Top-level .pzam file

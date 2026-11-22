@@ -141,6 +141,16 @@ namespace psizam {
             cs.functions[i].code_size = llvm ? result.function_offsets[i].second
                : mod.code[i].jit_code_size;
             cs.functions[i].stack_size = mod.code[i].stack_size;
+            cs.functions[i].byte_stack_usage = mod.code[i].byte_stack_usage;
+            if (llvm && i < result.body_offsets.size()) {
+               cs.functions[i].body_offset = result.body_offsets[i].first;
+               cs.functions[i].body_size = result.body_offsets[i].second;
+            }
+         }
+         if (llvm) {
+            cs.guest_abi = static_cast<uint8_t>(result.native_guest_abi);
+            for (const auto& [offset, size] : result.import_thunk_offsets)
+               cs.import_thunks.push_back({offset, size});
          }
          for (const auto& r : result.relocs)
             cs.relocations.push_back({r.code_offset, static_cast<uint16_t>(r.symbol),
