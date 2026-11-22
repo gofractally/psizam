@@ -1176,15 +1176,17 @@ namespace psizam::detail {
 
       void emit_current_memory() {
          COUNT_INSTR();
-         auto icount = variable_size_instr(17, 35);
+         auto icount = variable_size_instr(30, 48);
          emit_setup_backtrace();
          emit_push(rdi);
          emit_push(rsi);
+         emit_align_stack(rax);
          if (is_memory64())
             emit_mov(&current_memory64, rax);
          else
             emit_mov(&current_memory, rax);
          emit(CALL, rax);
+         emit_restore_stack();
          emit_pop(rsi);
          emit_pop(rdi);
          emit_restore_backtrace();
@@ -1192,11 +1194,12 @@ namespace psizam::detail {
       }
       void emit_grow_memory() {
          COUNT_INSTR();
-         auto icount = variable_size_instr(20, 39);
+         auto icount = variable_size_instr(33, 52);
          emit_pop(rax);
          emit_setup_backtrace();
          emit_push(rdi);
          emit_push(rsi);
+         emit_align_stack(rcx);  // rax still holds the argument
          if (is_memory64()) {
             emit_mov(rax, rsi);  // 64-bit arg
             emit_mov(&grow_memory64, rax);
@@ -1205,6 +1208,7 @@ namespace psizam::detail {
             emit_mov(&grow_memory, rax);
          }
          emit(CALL, rax);
+         emit_restore_stack();
          emit_pop(rsi);
          emit_pop(rdi);
          emit_restore_backtrace();
@@ -1212,7 +1216,7 @@ namespace psizam::detail {
       }
       void emit_memory_init(std::uint32_t x) {
          COUNT_INSTR();
-         auto icount = variable_size_instr(25, 43);
+         auto icount = variable_size_instr(38, 56);
          emit_pop(r8);
          emit_pop(rcx);
          emit_pop(rdx);
@@ -1221,8 +1225,10 @@ namespace psizam::detail {
          emit_push(rsi);
          emit_mov(x, esi);
 
+         emit_align_stack(rax);
          emit_mov(&init_memory, rax);
          emit(CALL, rax);
+         emit_restore_stack();
 
          emit_pop(rsi);
          emit_pop(rdi);
@@ -1230,14 +1236,16 @@ namespace psizam::detail {
       }
       void emit_data_drop(std::uint32_t x) {
          COUNT_INSTR();
-         auto icount = variable_size_instr(21, 39);
+         auto icount = variable_size_instr(34, 52);
          emit_setup_backtrace();
          emit_push(rdi);
          emit_push(rsi);
          emit_mov(x, esi);
 
+         emit_align_stack(rax);
          emit_mov(&drop_data, rax);
          emit(CALL, rax);
+         emit_restore_stack();
 
          emit_pop(rsi);
          emit_pop(rdi);
@@ -1245,15 +1253,17 @@ namespace psizam::detail {
       }
       void emit_table_get(uint32_t table_idx) {
          COUNT_INSTR();
-         auto icount = variable_size_instr(25, 43);
+         auto icount = variable_size_instr(38, 56);
          // Stack: [elem_idx]; table_get_helper(ctx, table_idx, elem_idx) -> result
          emit_pop(rdx);  // elem_idx → arg3
          emit_setup_backtrace();
          emit_push(rdi);
          emit_push(rsi);
          emit_mov(table_idx, esi); // table_idx → arg2
+         emit_align_stack(rax);
          emit_mov(&table_get_helper, rax);
          emit(CALL, rax);
+         emit_restore_stack();
          emit_pop(rsi);
          emit_pop(rdi);
          emit_restore_backtrace();
@@ -1261,7 +1271,7 @@ namespace psizam::detail {
       }
       void emit_table_set(uint32_t table_idx) {
          COUNT_INSTR();
-         auto icount = variable_size_instr(25, 43);
+         auto icount = variable_size_instr(38, 56);
          // Stack: [elem_idx, val]; table_set_helper(ctx, table_idx, elem_idx, val)
          emit_pop(rcx);  // val → arg4
          emit_pop(rdx);  // elem_idx → arg3
@@ -1269,8 +1279,10 @@ namespace psizam::detail {
          emit_push(rdi);
          emit_push(rsi);
          emit_mov(table_idx, esi); // table_idx → arg2
+         emit_align_stack(rax);
          emit_mov(&table_set_helper, rax);
          emit(CALL, rax);
+         emit_restore_stack();
          emit_pop(rsi);
          emit_pop(rdi);
          emit_restore_backtrace();
@@ -1301,7 +1313,7 @@ namespace psizam::detail {
       }
       void emit_table_grow(uint32_t table_idx) {
          COUNT_INSTR();
-         auto icount = variable_size_instr(25, 43);
+         auto icount = variable_size_instr(38, 56);
          // Stack: [init_val, delta]; table_grow_helper(ctx, table_idx, delta, init_val)
          emit_pop(rcx);  // delta
          emit_pop(rax);  // init_val → stash
@@ -1315,8 +1327,10 @@ namespace psizam::detail {
          // Need: rdx=delta(was rcx), rcx=init_val(was rax)
          emit_mov(ecx, edx);  // delta → arg3
          emit_mov(eax, ecx);  // init_val → arg4
+         emit_align_stack(rax);
          emit_mov(&table_grow_helper, rax);
          emit(CALL, rax);
+         emit_restore_stack();
          emit_pop(rsi);
          emit_pop(rdi);
          emit_restore_backtrace();
@@ -1324,13 +1338,15 @@ namespace psizam::detail {
       }
       void emit_table_size(uint32_t table_idx) {
          COUNT_INSTR();
-         auto icount = variable_size_instr(21, 39);
+         auto icount = variable_size_instr(34, 52);
          emit_setup_backtrace();
          emit_push(rdi);
          emit_push(rsi);
          emit_mov(table_idx, esi); // table_idx → arg2
+         emit_align_stack(rax);
          emit_mov(&table_size_helper, rax);
          emit(CALL, rax);
+         emit_restore_stack();
          emit_pop(rsi);
          emit_pop(rdi);
          emit_restore_backtrace();
@@ -1338,7 +1354,7 @@ namespace psizam::detail {
       }
       void emit_table_fill(uint32_t table_idx) {
          COUNT_INSTR();
-         auto icount = variable_size_instr(25, 43);
+         auto icount = variable_size_instr(38, 56);
          // Stack: [i, val, n]; table_fill_helper(ctx, table_idx, i, val, n)
          emit_pop(r8);   // n → arg5
          emit_pop(rcx);  // val → arg4
@@ -1347,8 +1363,10 @@ namespace psizam::detail {
          emit_push(rdi);
          emit_push(rsi);
          emit_mov(table_idx, esi); // table_idx → arg2
+         emit_align_stack(rax);
          emit_mov(&table_fill_helper, rax);
          emit(CALL, rax);
+         emit_restore_stack();
          emit_pop(rsi);
          emit_pop(rdi);
          emit_restore_backtrace();
@@ -1621,7 +1639,7 @@ namespace psizam::detail {
 
       void emit_table_init(std::uint32_t x, std::uint32_t table_idx = 0) {
          COUNT_INSTR();
-         auto icount = variable_size_instr(25, 43);
+         auto icount = variable_size_instr(38, 56);
          emit_pop(r8);   // n
          emit_pop(rcx);  // src
          emit_pop(rdx);  // dest
@@ -1631,8 +1649,10 @@ namespace psizam::detail {
          // Pack elem_idx | (table_idx << 16) into esi for init_table
          emit_mov(x | (table_idx << 16), esi);
 
+         emit_align_stack(rax);
          emit_mov(&init_table, rax);
          emit(CALL, rax);
+         emit_restore_stack();
 
          emit_pop(rsi);
          emit_pop(rdi);
@@ -1640,14 +1660,16 @@ namespace psizam::detail {
       }
       void emit_elem_drop(std::uint32_t x) {
          COUNT_INSTR();
-         auto icount = variable_size_instr(21, 39);
+         auto icount = variable_size_instr(34, 52);
          emit_setup_backtrace();
          emit_push(rdi);
          emit_push(rsi);
          emit_mov(x, esi);
 
+         emit_align_stack(rax);
          emit_mov(&drop_elem, rax);
          emit(CALL, rax);
+         emit_restore_stack();
 
          emit_pop(rsi);
          emit_pop(rdi);
@@ -5180,7 +5202,7 @@ namespace psizam::detail {
          COUNT_INSTR();
          if (dst_table != 0 || src_table != 0) {
             // Non-zero tables: use runtime helper
-            auto icount = variable_size_instr(25, 43);
+            auto icount = variable_size_instr(38, 56);
             emit_pop(r8);   // n
             emit_pop(rcx);  // src
             emit_pop(rdx);  // dest
@@ -5198,8 +5220,10 @@ namespace psizam::detail {
             emit_mov(r8d, ecx);  // n → arg4
             emit_mov(dst_table, r8d); // dst_table → arg5
             emit_mov(src_table, r9d); // src_table → arg6
+            emit_align_stack(rax);
             emit_mov(&__psizam_table_copy, rax);
             emit(CALL, rax);
+            emit_restore_stack();
             emit_pop(rsi);
             emit_pop(rdi);
             emit_restore_backtrace();
