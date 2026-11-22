@@ -759,3 +759,47 @@ target_compile_definitions(psizam_host_tail_reentry_tests PRIVATE CATCH_CONFIG_N
 add_dependencies(psizam_host_tail_reentry_tests psizam_proper_tail_fixture)
 add_test(NAME psizam_host_tail_reentry_tests COMMAND psizam_host_tail_reentry_tests)
 set_tests_properties(psizam_host_tail_reentry_tests PROPERTIES TIMEOUT 60 LABELS "execution;resource;abi")
+
+if(PSIZAM_ENABLE_LLVM)
+   # Correctness matrix reuses identical guest fixtures and state assertions.
+   add_executable(psizam_proper_tail_llvm_tests proper_tail_jit2_tests.cpp
+      "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_returns.wasm")
+   target_link_libraries(psizam_proper_tail_llvm_tests PRIVATE psizam psizam-exec psizam-llvm Catch2::Catch2)
+   target_compile_definitions(psizam_proper_tail_llvm_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
+      PSIZAM_TEST_LLVM_TAIL
+      PROPER_TAIL_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail.wasm"
+      PROPER_TAIL_LARGE_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wasm"
+      PROPER_TAIL_RETURNS_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail_returns.wasm")
+   add_dependencies(psizam_proper_tail_llvm_tests psizam_proper_tail_fixture psizam_proper_tail_large_fixture)
+   add_test(NAME psizam_proper_tail_llvm_tests COMMAND psizam_proper_tail_llvm_tests)
+   set_tests_properties(psizam_proper_tail_llvm_tests PROPERTIES TIMEOUT 180 LABELS "execution;resource;abi;llvm")
+
+   set(_tail_aot_batch "(module (import \"env\" \"sample\" (func))\n")
+   foreach(_tail_aot_index RANGE 0 1024)
+      string(APPEND _tail_aot_batch "(func return_call 0)\n")
+   endforeach()
+   string(APPEND _tail_aot_batch ")\n")
+   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_aot_batch.wat" "${_tail_aot_batch}")
+   foreach(_tail_aot_fixture proper_tail_import_only proper_tail_aot_batch)
+      if(_tail_aot_fixture STREQUAL "proper_tail_import_only")
+         set(_tail_aot_wat "${CMAKE_CURRENT_SOURCE_DIR}/${_tail_aot_fixture}.wat")
+      else()
+         set(_tail_aot_wat "${CMAKE_CURRENT_BINARY_DIR}/${_tail_aot_fixture}.wat")
+      endif()
+      add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${_tail_aot_fixture}.wasm"
+         COMMAND "${PSIZAM_WAT2WASM}" ${PSIZAM_WAT2WASM_FEATURE_FLAGS} "${_tail_aot_wat}"
+            -o "${CMAKE_CURRENT_BINARY_DIR}/${_tail_aot_fixture}.wasm"
+         DEPENDS "${_tail_aot_wat}" VERBATIM)
+   endforeach()
+   add_executable(psizam_proper_tail_aot_tests proper_tail_aot_tests.cpp
+      "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_import_only.wasm"
+      "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_aot_batch.wasm")
+   target_link_libraries(psizam_proper_tail_aot_tests PRIVATE psizam psizam-exec psizam-llvm-aot Catch2::Catch2)
+   target_compile_definitions(psizam_proper_tail_aot_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
+      PROPER_TAIL_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail.wasm"
+      PROPER_TAIL_IMPORT_ONLY_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail_import_only.wasm"
+      PROPER_TAIL_AOT_BATCH_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail_aot_batch.wasm")
+   add_dependencies(psizam_proper_tail_aot_tests psizam_proper_tail_fixture)
+   add_test(NAME psizam_proper_tail_aot_tests COMMAND psizam_proper_tail_aot_tests)
+   set_tests_properties(psizam_proper_tail_aot_tests PROPERTIES TIMEOUT 180 LABELS "compiler;resource;abi;llvm")
+endif()

@@ -25,7 +25,8 @@ namespace psizam::detail {
                                module& mod, growable_allocator& alloc,
                                bool deterministic,
                                mem_safety mem_mode,
-                               checked_mode checked_kind) {
+                               checked_mode checked_kind,
+                               bool enable_backtrace) {
       // Step 1: Translate all IR functions to LLVM IR
       llvm_translate_options topts;
       topts.opt_level          = g_llvm_opt_level;
@@ -36,6 +37,7 @@ namespace psizam::detail {
       topts.nothrow_host_calls = false;  // longjmp via trap_jmp_ptr — same as jit/jit2 backends
       topts.mem_mode           = mem_mode;
       topts.checked_kind       = checked_kind;
+      topts.enable_backtrace   = enable_backtrace;
       llvm_ir_translator translator(mod, topts);
 
       for (uint32_t i = 0; i < num_functions; ++i) {

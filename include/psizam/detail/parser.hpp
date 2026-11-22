@@ -406,6 +406,7 @@ namespace psizam::detail {
          PSIZAM_ASSERT(parse_version(code_ptr) == constants::version, wasm_parse_exception,
                        "version number did not match");
          uint8_t highest_section_id = 0;
+         bool saw_code_section = false;
          constexpr auto order = make_section_order();
          for (;;) {
             if (code_ptr.offset() == sz)
@@ -445,7 +446,10 @@ namespace psizam::detail {
                      normalize_types();
                   parse_section<section_id::element_section>(code_ptr, mod.elements);
                   break;
-               case section_id::code_section: parse_section<section_id::code_section>(code_ptr, mod.code); break;
+               case section_id::code_section:
+                  saw_code_section = true;
+                  parse_section<section_id::code_section>(code_ptr, mod.code);
+                  break;
                case section_id::data_section: parse_section<section_id::data_section>(code_ptr, mod.data); break;
                case section_id::data_count_section: parse_section<section_id::data_count_section>(code_ptr, _datacount); break;
                case section_id::tag_section: parse_section<section_id::tag_section>(code_ptr, mod.tags); break;
@@ -455,6 +459,14 @@ namespace psizam::detail {
          PSIZAM_ASSERT(_mod->code.size() == _mod->functions.size(), wasm_parse_exception, "code section must have the same size as the function section" );
          if (_datacount) {
             PSIZAM_ASSERT(*_datacount == _mod->data.size(), wasm_parse_exception, "data count and data section have inconsistent lengths");
+         }
+         if constexpr (requires { Writer::compile_import_only_module; }) {
+            if (Writer::compile_import_only_module && !saw_code_section && mod.get_imported_functions_size()) {
+               // Imported typed targets still need a canonical compiler unit
+               // when no function/code section exists to own their definitions.
+               if (fast_functions.empty()) normalize_types();
+               write_code_out(_allocator, code_ptr, code_ptr.raw() - code_ptr.offset());
+            }
          }
 
          _mod->stack_limit_is_bytes = has_max_stack_bytes<Options>;

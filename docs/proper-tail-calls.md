@@ -77,13 +77,43 @@ smaller parameter signatures in a cycle. Incoming argument storage, temporary
 staging and native slot inflation need independent physical bounds; the logical
 WASM frame cost is not such a bound.
 
-LLVM bodies will use `tailcc` and `musttail` followed immediately by `ret`.
-Typed import thunks must own their argument buffers after replacing the caller.
-Indirect tails need validated typed-body/import-thunk pointers, not the public
-C argument-array wrappers. Target budget admission must happen before machine
-entry because a check inside LLVM IR runs after its native prologue has already
-allocated a frame. Actual logical debit/refund stays in the separately reviewed
-common byte-stack implementation.
+The LLVM development port uses `tailcc` for private typed bodies, declarations,
+call sites and import thunks. Every guest tail emits `musttail` immediately
+followed by `ret`, with the existing logical refund before the call and no
+frame-dependent data or cleanup afterward. Public argument-array wrappers
+retain the C ABI. Import argument packing now belongs to the target thunk's
+fixed entry allocation. Scalar host results are supported; host vector
+arguments and vector/multivalue results fail explicitly until the maintained
+host API supplies their complete result channels. Guest vector and multivalue
+channels remain distinct and use the existing typed/context representations.
+
+Typed indirect calls reuse the maintained signature/bounds/null resolver and
+obtain the existing table entry's global function index and private target.
+The module owns a readonly derived logical-cost table exposed at native64
+context offset 176. Target offsets are explicit constants, with native64
+layout assertions, and do not depend on a wasm32 compiler host's `offsetof`.
+Byte-mode admission reads this table before entering the target's machine
+prologue; public entry also checks the selected body before its C wrapper.
+Actual body debit/refund remains in the reviewed logical byte-stack code.
+Imported targets have no guest-body cost in this checkpoint: the integrating
+host-reserve contract must add pre-thunk admission and reserve the C++ helper
+continuation before final qualification. The table is built once from validated
+per-body costs at module finalization or explicit loader preparation, before
+sharing the immutable module. Contexts only bind the readonly pointer; they
+reject a missing byte-mode table and never mutate the shared module to lazily
+initialize it. This adds no payload framing.
+
+AOT units declare typed imports everywhere but emit them exactly once, in the
+first serial function or first compilation batch. Import-only modules get a
+dedicated compiler unit even without a code section. Aggregate publication
+requires full, unique import coverage and resolves checked pending body,
+wrapper and import references before publishing native metadata. Import ranges
+and exact extracted fixed frames use the existing additive compile-result
+fields. Artifact persistence, ABI rejection, compiler-free saved-artifact
+execution and integrating physical storage remain separate release gates.
+ORC retains one complete parsed IR module; its inherited native parallel-parse
+hook is intentionally hidden, so a compile-thread option cannot skip parsing
+and present empty IR as compiled code. This does not claim parallel ORC codegen.
 
 New tests in this series are correctness fixtures, not performance workloads.
 Qualification must cover native stack high-water independent of chain length,

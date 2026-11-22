@@ -163,6 +163,7 @@ namespace psizam::detail {
       llvm::Function* rt_elem_drop     = nullptr;
       llvm::Function* rt_table_copy    = nullptr;
       llvm::Function* rt_call_indirect = nullptr;
+      llvm::Function* rt_resolve_indirect_entry = nullptr;
       llvm::Function* rt_table_get     = nullptr;
       llvm::Function* rt_table_set     = nullptr;
       llvm::Function* rt_table_grow    = nullptr;
@@ -489,6 +490,8 @@ namespace psizam::detail {
          //                                         uint32_t table_elem, void* args_buf, uint32_t nargs)
          rt_call_indirect = decl(opts.nothrow_host_calls ? "__psizam_call_indirect_nothrow" : "__psizam_call_indirect",
             llvm::FunctionType::get(i64_ty, {ptr_ty, ptr_ty, i32_ty, i32_ty, ptr_ty, i32_ty}, false));
+         rt_resolve_indirect_entry = decl("__psizam_resolve_indirect_entry",
+            llvm::FunctionType::get(ptr_ty, {ptr_ty, i32_ty, i32_ty, i32_ty}, false));
 
          // uint32_t __psizam_table_get(void* ctx, uint32_t table_idx, uint32_t elem_idx)
          rt_table_get = decl("__psizam_table_get",
@@ -804,13 +807,7 @@ namespace psizam::detail {
          wasm_funcs.resize(total_funcs, nullptr);
       }
 
-      llvm::Function* get_or_declare_wasm_func(uint32_t i) {
-         uint32_t num_imports = wasm_mod.get_imported_functions_size();
-         if (i < num_imports) return nullptr; // imports have no wasm_func_N
-         if (i >= wasm_funcs.size()) return nullptr; // out of range
-         if (wasm_funcs[i]) return wasm_funcs[i];
-
-         const auto& ft = wasm_mod.get_function_type(i);
+      llvm::FunctionType* guest_function_type(const func_type& ft) {
          std::vector<llvm::Type*> params;
          params.push_back(ptr_ty); // ctx
          params.push_back(ptr_ty); // mem
@@ -818,13 +815,19 @@ namespace psizam::detail {
             params.push_back(wasm_type_to_llvm(pt));
          }
          llvm::Type* ret_ty = ft.return_count ? wasm_type_to_llvm(ft.return_type) : void_ty;
-         auto* fn_ty = llvm::FunctionType::get(ret_ty, params, false);
+         return llvm::FunctionType::get(ret_ty, params, false);
+      }
 
-         std::string name = "wasm_func_" + std::to_string(i);
-         auto linkage = opts.per_function
-            ? llvm::Function::ExternalLinkage
-            : llvm::Function::InternalLinkage;
-         auto* fn = llvm::Function::Create(fn_ty, linkage, name, llvm_mod.get());
+      llvm::Function* get_or_declare_wasm_func(uint32_t i) {
+         const auto num_imports = wasm_mod.get_imported_functions_size();
+         if (i >= wasm_funcs.size()) return nullptr;
+         if (wasm_funcs[i]) return wasm_funcs[i];
+         auto* fn_ty = guest_function_type(wasm_mod.get_function_type(i));
+
+         std::string name = (i < num_imports ? "wasm_import_" : "wasm_func_") + std::to_string(i);
+         // Bodies are also addressable private ABI targets for dynamic tables.
+         auto* fn = llvm::Function::Create(fn_ty, llvm::Function::ExternalLinkage, name, llvm_mod.get());
+         fn->setCallingConv(llvm::CallingConv::Tail);
          fn->addFnAttr("probe-stack", "inline-asm");
          fn->addFnAttr("stack-probe-size", "4096");
          fn->addFnAttr(llvm::Attribute::NoRedZone);
@@ -902,6 +905,84 @@ namespace psizam::detail {
                              ctx_ptr, /*isVolatile=*/true);
       }
 
+      void branch_on_valid(llvm::IRBuilder<>& b, llvm::Value* ctx_ptr, llvm::Value* valid,
+                           const char* label, uint32_t trap = 6) {
+         auto* fn = b.GetInsertBlock()->getParent();
+         auto* good = llvm::BasicBlock::Create(*ctx, label, fn);
+         auto* bad = llvm::BasicBlock::Create(*ctx, "native.admission.failed", fn);
+         b.CreateCondBr(valid, good, bad);
+         b.SetInsertPoint(bad);
+         emit_backtrace_set_bottom(b, ctx_ptr);
+         b.CreateCall(rt_trap, {ctx_ptr, b.getInt32(trap)});
+         b.CreateUnreachable();
+         b.SetInsertPoint(good);
+      }
+
+      // Non-mutating quota admission occurs before the target's machine
+      // prologue. The callee retains the authoritative body debit/refund.
+      void emit_native_admission(llvm::IRBuilder<>& b, llvm::Value* ctx_ptr,
+                                 llvm::Value* target_index, uint32_t released_cost = 0) {
+         if (!wasm_mod.stack_limit_is_bytes) return;
+         auto* costs_slot = b.CreateConstGEP1_64(i8_ty, ctx_ptr,
+            native_guest_context_abi::function_costs_offset);
+         auto* costs = b.CreateLoad(ptr_ty, costs_slot, "native.costs");
+         branch_on_valid(b, ctx_ptr, b.CreateIsNotNull(costs), "native.costs.present");
+         auto* cost_slot = b.CreateGEP(i32_ty, costs, target_index);
+         auto* cost = b.CreateLoad(i32_ty, cost_slot, "native.target.cost");
+         auto* cost_valid = b.CreateOr(
+            b.CreateICmpULT(target_index, b.getInt32(wasm_mod.get_imported_functions_size())),
+            b.CreateICmpUGE(cost, b.getInt32(16)));
+         auto* remaining_slot = b.CreateConstGEP1_64(i8_ty, ctx_ptr,
+            native_guest_context_abi::remaining_stack_offset);
+         auto* remaining = b.CreateLoad(i32_ty, remaining_slot);
+         // Widen before adding the caller refund; malformed arithmetic cannot
+         // turn an insufficient budget into an admitted wrapped value.
+         auto* available = b.CreateAdd(b.CreateZExt(remaining, i64_ty), b.getInt64(released_cost));
+         branch_on_valid(b, ctx_ptr, b.CreateAnd(cost_valid,
+                            b.CreateICmpUGE(available, b.CreateZExt(cost, i64_ty))),
+                         "native.target.admitted");
+      }
+
+      void generate_import_thunks() {
+         if (!opts.emit_import_thunks) return;
+         for (uint32_t i = 0; i < wasm_mod.get_imported_functions_size(); ++i) {
+            const auto& ft = wasm_mod.get_function_type(i);
+            // The scalar host trampoline has no full vector/multivalue
+            // channel. Never fabricate missing result bits in a typed thunk.
+            PSIZAM_ASSERT(ft.return_count <= 1 && (!ft.return_count || ft.return_type != types::v128),
+                          wasm_parse_exception, "LLVM typed host result channel is unsupported");
+            for (auto type : ft.param_types)
+               PSIZAM_ASSERT(type != types::v128, wasm_parse_exception,
+                             "LLVM typed host vector argument channel is unsupported");
+            auto* fn = get_or_declare_wasm_func(i);
+            auto* entry = llvm::BasicBlock::Create(*ctx, "entry", fn);
+            llvm::IRBuilder<> b(entry);
+            auto arg = fn->arg_begin();
+            auto* context = &*arg++;
+            ++arg; // Memory is refreshed by the maintained host helper.
+            auto* packed = b.CreateAlloca(i64_ty, b.getInt32(std::max<size_t>(ft.param_types.size(), 1)),
+                                         "host.arguments");
+            for (uint32_t p = 0; p < ft.param_types.size(); ++p, ++arg) {
+               llvm::Value* value = &*arg;
+               if (value->getType() == i32_ty) value = b.CreateZExt(value, i64_ty);
+               else if (value->getType() == f32_ty)
+                  value = b.CreateZExt(b.CreateBitCast(value, i32_ty), i64_ty);
+               else if (value->getType() == f64_ty) value = b.CreateBitCast(value, i64_ty);
+               b.CreateStore(value, b.CreateGEP(i64_ty, packed, b.getInt32(p)));
+            }
+            emit_backtrace_set_bottom(b, context);
+            auto* raw = b.CreateCall(rt_call_host, {context, b.getInt32(i), packed,
+                                                   b.getInt32(ft.param_types.size())});
+            emit_backtrace_clear_bottom(b, context);
+            if (!ft.return_count) b.CreateRetVoid();
+            else if (ft.return_type == types::i32) b.CreateRet(b.CreateTrunc(raw, i32_ty));
+            else if (ft.return_type == types::f32)
+               b.CreateRet(b.CreateBitCast(b.CreateTrunc(raw, i32_ty), f32_ty));
+            else if (ft.return_type == types::f64) b.CreateRet(b.CreateBitCast(raw, f64_ty));
+            else b.CreateRet(raw);
+         }
+      }
+
       void translate(const ir_function& func) {
          uint32_t func_idx = func.func_index + wasm_mod.get_imported_functions_size();
          auto* fn = get_or_declare_wasm_func(func_idx);
@@ -938,7 +1019,7 @@ namespace psizam::detail {
          auto emit_byte_stack_leave = [&](llvm::IRBuilder<>& b) {
             if (!byte_stack) return;
             auto* ptr = b.CreateConstGEP1_64(i8_ty, ctx_ptr,
-               offsetof(frame_info_holder<false>, _remaining_call_depth));
+               native_guest_context_abi::remaining_stack_offset);
             auto* remaining = b.CreateLoad(i32_ty, ptr, "stack.remaining");
             b.CreateStore(b.CreateAdd(remaining, b.getInt32(func.byte_stack_usage)), ptr);
          };
@@ -959,7 +1040,7 @@ namespace psizam::detail {
          };
          if (byte_stack) {
             auto* ptr = builder.CreateConstGEP1_64(i8_ty, ctx_ptr,
-               offsetof(frame_info_holder<false>, _remaining_call_depth));
+               native_guest_context_abi::remaining_stack_offset);
             auto* remaining = builder.CreateLoad(i32_ty, ptr, "stack.remaining");
             auto* enough = builder.CreateICmpUGE(remaining, builder.getInt32(func.byte_stack_usage));
             auto* body = llvm::BasicBlock::Create(*ctx, "stack.available", fn);
@@ -995,6 +1076,10 @@ namespace psizam::detail {
          // reassigning the C++ variable after memory_grow creates a Load in one
          // basic block that doesn't dominate uses in other blocks.
          auto* mem_ptr_alloca = alloca_builder.CreateAlloca(ptr_ty, nullptr, "mem_ptr");
+         // If entry initially had no prologue branch (count mode, gas off),
+         // begin()==end() is not a stable insertion anchor. Keep later scratch
+         // allocas before this first instruction, even after entry terminates.
+         alloca_builder.SetInsertPoint(mem_ptr_alloca);
          builder.CreateStore(mem_arg, mem_ptr_alloca);
          auto load_mem_ptr = [&]() -> llvm::Value* {
             return builder.CreateLoad(ptr_ty, mem_ptr_alloca, "mem");
@@ -1184,63 +1269,6 @@ namespace psizam::detail {
             } else {
                builder.CreateStore(llvm::Constant::getNullValue(lt), locals[i]);
             }
-         }
-
-         // ── Pre-scan: max host call args (for entry-block alloca) ──
-         // The alloca must also fit return values written back by the callee
-         // (e.g. entry wrapper stores v128 return — 2 i64 slots — into args).
-         uint32_t max_host_args = 0;
-         {
-            uint32_t num_imports = wasm_mod.get_imported_functions_size();
-            uint32_t pending_call_args = 0;
-            auto update_for_call = [&](bool uses_args_buf, uint32_t type_idx_or_funcnum, bool is_indirect) {
-               if (uses_args_buf && pending_call_args > max_host_args)
-                  max_host_args = pending_call_args;
-               // Return value can be written back via the args buffer (v128 = 2 slots).
-               const func_type* ft = nullptr;
-               if (is_indirect) {
-                  uint32_t tidx = type_idx_or_funcnum & 0xFFFF;
-                  if (tidx < wasm_mod.types.size())
-                     ft = &wasm_mod.types[tidx];
-               } else if (type_idx_or_funcnum < wasm_mod.get_functions_total()) {
-                  ft = &wasm_mod.get_function_type(type_idx_or_funcnum);
-               }
-               if (ft && ft->return_count > 0 && ft->return_type == types::v128 && max_host_args < 2)
-                  max_host_args = 2;
-            };
-            for (uint32_t i = 0; i < func.inst_count; i++) {
-               const auto& inst = func.insts[i];
-               if (inst.opcode == ir_op::arg) {
-                  pending_call_args += inst.value_type() == types::v128 ? 2 : 1;
-               } else if (inst.opcode == ir_op::call) {
-                  update_for_call(inst.call.index < num_imports, inst.call.index, false);
-                  pending_call_args = 0;
-               } else if (inst.opcode == ir_op::call_indirect) {
-                  update_for_call(true, inst.call.index, true);
-                  pending_call_args = 0;
-               } else if (inst.opcode == ir_op::tail_call) {
-                  update_for_call(inst.call.index < num_imports, inst.call.index, false);
-                  pending_call_args = 0;
-               } else if (inst.opcode == ir_op::tail_call_indirect) {
-                  update_for_call(true, inst.call.index, true);
-                  pending_call_args = 0;
-               }
-            }
-         }
-         llvm::AllocaInst* host_args_alloca = nullptr;
-         llvm::AllocaInst* mem_out_alloca = nullptr;  // For rt_call_host_full's memory output
-         // Always allocate at least 1 slot in the entry block.
-         // Without this, zero-arg host calls (e.g. host_noop()) would fall through
-         // to CreateAlloca inside the loop body, growing the stack on every iteration
-         // until the native stack overflows.
-         {
-            uint32_t alloca_size = max_host_args > 0 ? max_host_args : 1;
-            host_args_alloca = alloca_builder.CreateAlloca(i64_ty,
-               builder.getInt32(alloca_size), "host_args");
-         }
-         // Allocate mem_out in the entry block for any function that might call host
-         if (rt_call_host_full && wasm_mod.get_imported_functions_size() > 0) {
-            mem_out_alloca = alloca_builder.CreateAlloca(ptr_ty, nullptr, "mem_out");
          }
 
          // Checked memory mode: reads use deferred watermark (umax accumulation,
@@ -1455,31 +1483,6 @@ namespace psizam::detail {
 
          // Collect call arguments from 'arg' pseudo-instructions
          std::vector<llvm::Value*> call_args;
-         // Entry wrappers read packed native_value slots, with vectors occupying
-         // [high, low]. Keep following scalar arguments clear of both halves.
-         auto pack_indirect_args = [&]() {
-            uint32_t slot_index = 0;
-            for (auto* v : call_args) {
-               auto store_slot = [&](llvm::Value* value) {
-                  auto* slot = builder.CreateGEP(i64_ty, host_args_alloca,
-                                                builder.getInt32(slot_index++));
-                  builder.CreateStore(value, slot);
-               };
-               if (v->getType() == v128_ty) {
-                  store_slot(builder.CreateExtractElement(v, builder.getInt32(1)));
-                  store_slot(builder.CreateExtractElement(v, builder.getInt32(0)));
-               } else {
-                  if (v->getType() == i32_ty) v = builder.CreateZExt(v, i64_ty);
-                  else if (v->getType() == f32_ty)
-                     v = builder.CreateZExt(builder.CreateBitCast(v, i32_ty), i64_ty);
-                  else if (v->getType() == f64_ty) v = builder.CreateBitCast(v, i64_ty);
-                  store_slot(v);
-               }
-            }
-            call_args.clear();
-         };
-
-
          // Pending v128 result from shuffle (whose immv128 overlay prevents using simd.v_dest)
          llvm::Value* pending_v128_result = nullptr;
 
@@ -2071,358 +2074,79 @@ namespace psizam::detail {
                   break;
                }
 
-               // ──── Function calls ────
-               case ir_op::call: {
-                  uint32_t funcnum = inst.call.index;
-                  uint32_t num_imports = wasm_mod.get_imported_functions_size();
-
-                  if (funcnum < num_imports && mem_out_alloca) {
-                     // Fast path: combined call (depth_dec + host_call + depth_inc + get_memory)
-                     // Reduces 4 extern calls to 1 for host function calls.
-                     uint32_t nargs = static_cast<uint32_t>(call_args.size());
-                     for (uint32_t a = 0; a < nargs; a++) {
-                        llvm::Value* slot = builder.CreateGEP(i64_ty, host_args_alloca,
-                           builder.getInt32(a));
-                        llvm::Value* v = call_args[a];
-                        if (v->getType() == i32_ty)
-                           v = builder.CreateZExt(v, i64_ty);
-                        else if (v->getType() == f32_ty)
-                           v = builder.CreateZExt(builder.CreateBitCast(v, i32_ty), i64_ty);
-                        else if (v->getType() == f64_ty)
-                           v = builder.CreateBitCast(v, i64_ty);
-                        builder.CreateStore(v, slot);
-                     }
-                     call_args.clear();
-
-                     // Checked mode: validate read watermark before host call
-                     emit_watermark_validate(builder, ctx_ptr, load_mem_ptr(), watermark_alloca, mem_size_cache);
-
-                     emit_backtrace_set_bottom(builder, ctx_ptr);
-
-                     llvm::Value* raw = builder.CreateCall(rt_call_host_full,
-                        {ctx_ptr, builder.getInt32(funcnum), host_args_alloca,
-                         builder.getInt32(nargs), mem_out_alloca});
-
-                     emit_backtrace_clear_bottom(builder, ctx_ptr);
-
-                     if (inst.dest != ir_vreg_none) {
-                        llvm::Type* target_ty = ir_type_to_llvm(inst.value_type());
-                        llvm::Value* result;
-                        if (target_ty == i32_ty)
-                           result = builder.CreateTrunc(raw, i32_ty);
-                        else if (target_ty == f32_ty)
-                           result = builder.CreateBitCast(builder.CreateTrunc(raw, i32_ty), f32_ty);
-                        else if (target_ty == f64_ty)
-                           result = builder.CreateBitCast(raw, f64_ty);
-                        else
-                           result = raw;
-                        store_vreg(inst.dest, result);
-                     }
-                     // Load updated memory pointer from the combined call
-                     auto* new_mem = builder.CreateLoad(ptr_ty, mem_out_alloca);
-                     builder.CreateStore(new_mem, mem_ptr_alloca);
-                     if (mem_size_cache) {
-                        const int32_t ms_off = wasm_allocator::mem_size_offset();
-                        auto* ms_ptr = builder.CreateConstGEP1_64(i8_ty, new_mem,
-                           static_cast<int64_t>(ms_off), "host_ms_ptr");
-                        builder.CreateStore(builder.CreateLoad(i64_ty, ms_ptr, "host_ms"), mem_size_cache);
-                     }
-                  } else {
-                     // Standard path: separate call_depth tracking
-                     // Checked mode: validate read watermark before call
-                     emit_watermark_validate(builder, ctx_ptr, load_mem_ptr(), watermark_alloca, mem_size_cache);
-                     if (!byte_stack) builder.CreateCall(rt_call_depth_dec, {ctx_ptr});
-
-                     if (funcnum < num_imports) {
-                        // Host function call — go through runtime helper
-                        uint32_t nargs = static_cast<uint32_t>(call_args.size());
-                        for (uint32_t a = 0; a < nargs; a++) {
-                           llvm::Value* slot = builder.CreateGEP(i64_ty, host_args_alloca,
-                              builder.getInt32(a));
-                           llvm::Value* v = call_args[a];
-                           if (v->getType() == i32_ty)
-                              v = builder.CreateZExt(v, i64_ty);
-                           else if (v->getType() == f32_ty)
-                              v = builder.CreateZExt(builder.CreateBitCast(v, i32_ty), i64_ty);
-                           else if (v->getType() == f64_ty)
-                              v = builder.CreateBitCast(v, i64_ty);
-                           builder.CreateStore(v, slot);
-                        }
-                        call_args.clear();
-
-                        emit_backtrace_set_bottom(builder, ctx_ptr);
-
-                        llvm::Value* raw = builder.CreateCall(rt_call_host,
-                           {ctx_ptr, builder.getInt32(funcnum), host_args_alloca,
-                            builder.getInt32(nargs)});
-
-                        emit_backtrace_clear_bottom(builder, ctx_ptr);
-
-                        if (inst.dest != ir_vreg_none) {
-                           llvm::Type* target_ty = ir_type_to_llvm(inst.value_type());
-                           llvm::Value* result;
-                           if (target_ty == i32_ty)
-                              result = builder.CreateTrunc(raw, i32_ty);
-                           else if (target_ty == f32_ty)
-                              result = builder.CreateBitCast(builder.CreateTrunc(raw, i32_ty), f32_ty);
-                           else if (target_ty == f64_ty)
-                              result = builder.CreateBitCast(raw, f64_ty);
-                           else
-                              result = raw;
-                           store_vreg(inst.dest, result);
-                        }
-                        // Reload mem_ptr after host call (it might have grown memory)
-                        auto* new_mem = builder.CreateCall(rt_get_memory, {ctx_ptr});
-                        builder.CreateStore(new_mem, mem_ptr_alloca);
-                        if (mem_size_cache) {
-                           const int32_t ms_off = wasm_allocator::mem_size_offset();
-                           auto* ms_ptr = builder.CreateConstGEP1_64(i8_ty, new_mem,
-                              static_cast<int64_t>(ms_off), "host_ms_ptr");
-                           builder.CreateStore(builder.CreateLoad(i64_ty, ms_ptr, "host_ms"), mem_size_cache);
-                        }
-                     } else {
-                        // WASM-to-WASM call
-                        std::vector<llvm::Value*> args;
-                        args.push_back(ctx_ptr);
-                        args.push_back(load_mem_ptr());
-
-                        llvm::Function* callee = get_or_declare_wasm_func(funcnum);
-
-                        // Convert each arg to match callee's parameter types
-                        if (callee) {
-                           auto* callee_ty = callee->getFunctionType();
-                           for (uint32_t a = 0; a < call_args.size(); a++) {
-                              uint32_t param_idx = a + 2; // skip ctx, mem
-                              if (param_idx < callee_ty->getNumParams()) {
-                                 call_args[a] = convert_type(call_args[a], callee_ty->getParamType(param_idx));
-                              }
-                           }
-                        }
-
-                        for (auto* a : call_args) args.push_back(a);
-                        call_args.clear();
-
-                        if (callee) {
-                           auto* result = builder.CreateCall(callee, args);
-                           if (inst.dest != ir_vreg_none && !result->getType()->isVoidTy()) {
-                              if (inst.value_type() == types::v128) {
-                                 store_v128(static_cast<uint16_t>(inst.dest), result);
-                              } else {
-                                 store_vreg(inst.dest, result);
-                              }
-                           }
-                           // Reload mem_ptr after WASM-to-WASM call (callee may grow memory)
-                           auto* new_mem = builder.CreateCall(rt_get_memory, {ctx_ptr});
-                           builder.CreateStore(new_mem, mem_ptr_alloca);
-                           if (mem_size_cache) {
-                              const int32_t ms_off = wasm_allocator::mem_size_offset();
-                              auto* ms_ptr = builder.CreateConstGEP1_64(i8_ty, new_mem,
-                                 static_cast<int64_t>(ms_off), "call_ms_ptr");
-                              builder.CreateStore(builder.CreateLoad(i64_ty, ms_ptr, "call_ms"), mem_size_cache);
-                           }
-                        }
-                     }
-                     // Restore call depth after either host or WASM call
-                     if (!byte_stack) builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
-                  }
-                  break;
-               }
-
-               case ir_op::call_indirect: {
-                  uint32_t type_idx = inst.call.index;
-                  // The table index is the last call_arg (condition/index value)
-                  // In the IR, call_indirect's call_args include the table index as the last arg
-                  llvm::Value* table_elem = nullptr;
-                  if (!call_args.empty()) {
-                     table_elem = call_args.back();
+               // ──── Typed guest calls and guaranteed physical tails ────
+               case ir_op::call:
+               case ir_op::call_indirect:
+               case ir_op::tail_call:
+               case ir_op::tail_call_indirect: {
+                  const bool tail = inst.opcode == ir_op::tail_call || inst.opcode == ir_op::tail_call_indirect;
+                  const bool indirect = inst.opcode == ir_op::call_indirect || inst.opcode == ir_op::tail_call_indirect;
+                  llvm::Value* target = nullptr;
+                  llvm::Value* target_index = nullptr;
+                  const func_type* signature = nullptr;
+                  if (indirect) {
+                     PSIZAM_ASSERT(!call_args.empty(), wasm_parse_exception, "missing indirect table element");
+                     auto* element = convert_type(call_args.back(), i32_ty);
                      call_args.pop_back();
+                     const uint32_t type_index = inst.call.index & 0xffff;
+                     const uint32_t table_index = inst.call.index >> 16;
+                     signature = &wasm_mod.types[type_index];
+                     // A single maintained resolver validates bounds, null and
+                     // exact signature, then exposes existing immutable fields.
+                     emit_backtrace_set_bottom(builder, ctx_ptr);
+                     auto* entry = builder.CreateCall(rt_resolve_indirect_entry,
+                        {ctx_ptr, builder.getInt32(type_index), builder.getInt32(table_index), element});
+                     emit_backtrace_clear_bottom(builder, ctx_ptr);
+                     branch_on_valid(builder, ctx_ptr, builder.CreateIsNotNull(entry), "indirect.target.valid", 4);
+                     target_index = builder.CreateLoad(i32_ty, builder.CreateConstGEP1_64(i8_ty, entry,
+                        native_guest_context_abi::table_entry_index_offset));
+                     target = builder.CreateLoad(ptr_ty, builder.CreateConstGEP1_64(i8_ty, entry,
+                        native_guest_context_abi::table_entry_target_offset));
+                  } else {
+                     signature = &wasm_mod.get_function_type(inst.call.index);
+                     target = get_or_declare_wasm_func(inst.call.index);
+                     target_index = builder.getInt32(inst.call.index);
                   }
-                  if (!table_elem) {
-                     call_args.clear();
-                     break;
-                  }
-
-                  uint32_t nargs = static_cast<uint32_t>(call_args.size());
-                  // Use entry-block alloca (avoids stack growth in loops)
-                  pack_indirect_args();
-
-                  // Ensure table_elem is i32. Live paths always feed an i32
-                  // here (WASM validation), but dead paths can produce a
-                  // float/double vreg (merge vregs pre-seeded to the
-                  // function's return type). convert_type bitcasts through
-                  // the matching-size integer so the call's signature is
-                  // satisfied and LLVM verification doesn't fail.
-                  if (table_elem->getType() != i32_ty)
-                     table_elem = convert_type(table_elem, i32_ty);
-
-                  // Checked mode: validate read watermark before indirect call
+                  PSIZAM_ASSERT(target && signature && call_args.size() == signature->param_types.size(),
+                                wasm_parse_exception, "invalid typed guest call");
+                  auto* type = guest_function_type(*signature);
+                  std::vector<llvm::Value*> arguments{ctx_ptr, load_mem_ptr()};
+                  for (uint32_t p = 0; p < call_args.size(); ++p)
+                     arguments.push_back(convert_type(call_args[p], type->getParamType(p + 2)));
+                  call_args.clear();
                   emit_watermark_validate(builder, ctx_ptr, load_mem_ptr(), watermark_alloca, mem_size_cache);
-                  if (!byte_stack) builder.CreateCall(rt_call_depth_dec, {ctx_ptr});
-                  emit_backtrace_set_bottom(builder, ctx_ptr);
-
-                  llvm::Value* raw = builder.CreateCall(rt_call_indirect,
-                     {ctx_ptr, load_mem_ptr(), builder.getInt32(type_idx),
-                      table_elem, host_args_alloca, builder.getInt32(nargs)});
-
-                  emit_backtrace_clear_bottom(builder, ctx_ptr);
-                  if (!byte_stack) builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
-
-                  // Reload mem_ptr after call_indirect (callee may grow memory)
-                  {
+                  emit_native_admission(builder, ctx_ptr, target_index, tail && byte_stack ? func.byte_stack_usage : 0);
+                  if (tail) {
+                     PSIZAM_ASSERT(type->getReturnType() == fn->getReturnType(), wasm_parse_exception,
+                                   "tail result type mismatch");
+                     release_tail_byte_stack();
+                     // No frame-dependent buffer crosses this call. Import
+                     // argument packing belongs to the typed target thunk.
+                     auto* result = builder.CreateCall(type, target, arguments);
+                     result->setCallingConv(llvm::CallingConv::Tail);
+                     result->setTailCallKind(llvm::CallInst::TCK_MustTail);
+                     if (fn->getReturnType()->isVoidTy()) builder.CreateRetVoid();
+                     else builder.CreateRet(result);
+                     if (byte_stack) released_byte_blocks.push_back(builder.GetInsertBlock());
+                  } else {
+                     if (!byte_stack) builder.CreateCall(rt_call_depth_dec, {ctx_ptr});
+                     emit_backtrace_set_top(builder, ctx_ptr);
+                     auto* result = builder.CreateCall(type, target, arguments);
+                     result->setCallingConv(llvm::CallingConv::Tail);
+                     emit_backtrace_clear_top(builder, ctx_ptr);
+                     if (!byte_stack) builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
+                     if (inst.dest != ir_vreg_none && !result->getType()->isVoidTy()) {
+                        if (inst.type == types::v128) store_v128(static_cast<uint16_t>(inst.dest), result);
+                        else store_vreg(inst.dest, result);
+                     }
                      auto* new_mem = builder.CreateCall(rt_get_memory, {ctx_ptr});
                      builder.CreateStore(new_mem, mem_ptr_alloca);
                      if (mem_size_cache) {
-                        const int32_t ms_off = wasm_allocator::mem_size_offset();
-                        auto* ms_ptr = builder.CreateConstGEP1_64(i8_ty, new_mem,
-                           static_cast<int64_t>(ms_off), "calli_ms_ptr");
-                        builder.CreateStore(builder.CreateLoad(i64_ty, ms_ptr, "calli_ms"), mem_size_cache);
+                        const int32_t offset = wasm_allocator::mem_size_offset();
+                        auto* size_ptr = builder.CreateConstGEP1_64(i8_ty, new_mem, static_cast<int64_t>(offset));
+                        builder.CreateStore(builder.CreateLoad(i64_ty, size_ptr), mem_size_cache);
                      }
                   }
-
-                  if (inst.dest != ir_vreg_none && inst.value_type() == types::v128) {
-                     // The entry wrapper returns the low word in the register
-                     // and writes the complete vector back to the argument buffer.
-                     auto* vec = builder.CreateAlignedLoad(v128_ty, host_args_alloca, llvm::Align(8));
-                     store_v128(static_cast<uint16_t>(inst.dest), vec);
-                  } else if (inst.dest != ir_vreg_none) {
-                     llvm::Type* target_ty = ir_type_to_llvm(inst.value_type());
-                     llvm::Value* result;
-                     if (target_ty == i32_ty)
-                        result = builder.CreateTrunc(raw, i32_ty);
-                     else if (target_ty == f32_ty)
-                        result = builder.CreateBitCast(builder.CreateTrunc(raw, i32_ty), f32_ty);
-                     else if (target_ty == f64_ty)
-                        result = builder.CreateBitCast(raw, f64_ty);
-                     else
-                        result = raw;
-                     store_vreg(inst.dest, result);
-                  }
-                  break;
-               }
-
-               // ──── Tail calls (emit as call + return) ────
-               case ir_op::tail_call: {
-                  release_tail_byte_stack();
-                  uint32_t funcnum = inst.call.index;
-                  uint32_t num_imports = wasm_mod.get_imported_functions_size();
-
-                  // Checked mode: validate read watermark before tail call
-                  emit_watermark_validate(builder, ctx_ptr, load_mem_ptr(), watermark_alloca, mem_size_cache);
-                  if (!byte_stack) builder.CreateCall(rt_call_depth_dec, {ctx_ptr});
-
-                  if (funcnum < num_imports) {
-                     // Host function tail call
-                     uint32_t nargs = static_cast<uint32_t>(call_args.size());
-                     for (uint32_t a = 0; a < nargs; a++) {
-                        llvm::Value* slot = builder.CreateGEP(i64_ty, host_args_alloca, builder.getInt32(a));
-                        llvm::Value* v = call_args[a];
-                        if (v->getType() == i32_ty) v = builder.CreateZExt(v, i64_ty);
-                        else if (v->getType() == f32_ty) v = builder.CreateZExt(builder.CreateBitCast(v, i32_ty), i64_ty);
-                        else if (v->getType() == f64_ty) v = builder.CreateBitCast(v, i64_ty);
-                        builder.CreateStore(v, slot);
-                     }
-                     call_args.clear();
-                     emit_backtrace_set_bottom(builder, ctx_ptr);
-                     llvm::Value* raw = builder.CreateCall(rt_call_host,
-                        {ctx_ptr, builder.getInt32(funcnum), host_args_alloca, builder.getInt32(nargs)});
-                     emit_backtrace_clear_bottom(builder, ctx_ptr);
-                     if (!byte_stack) builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
-                     builder.CreateStore(builder.CreateCall(rt_get_memory, {ctx_ptr}), mem_ptr_alloca);
-                     // Return the result
-                     if (fn->getReturnType()->isVoidTy()) {
-                        builder.CreateRetVoid();
-                     } else if (fn->getReturnType() == v128_ty) {
-                        // Host trampoline returns scalar low i64; the full v128
-                        // is not currently written back by host calls. Fall back
-                        // to splatting the low half into the vector so the IR
-                        // typechecks. Host v128 returns are a known gap.
-                        auto* vec = builder.CreateInsertElement(
-                           llvm::UndefValue::get(v128_ty), raw, builder.getInt32(0));
-                        vec = builder.CreateInsertElement(vec,
-                           llvm::ConstantInt::get(i64_ty, 0), builder.getInt32(1));
-                        builder.CreateRet(vec);
-                     } else {
-                        llvm::Value* result = convert_type(raw, fn->getReturnType());
-                        builder.CreateRet(result);
-                     }
-                  } else {
-                     // WASM-to-WASM tail call
-                     std::vector<llvm::Value*> args;
-                     args.push_back(ctx_ptr);
-                     args.push_back(load_mem_ptr());
-                     llvm::Function* callee = get_or_declare_wasm_func(funcnum);
-                     if (callee) {
-                        auto* callee_ty = callee->getFunctionType();
-                        for (uint32_t a = 0; a < call_args.size(); a++) {
-                           uint32_t param_idx = a + 2;
-                           if (param_idx < callee_ty->getNumParams())
-                              call_args[a] = convert_type(call_args[a], callee_ty->getParamType(param_idx));
-                        }
-                     }
-                     for (auto* a : call_args) args.push_back(a);
-                     call_args.clear();
-                     if (callee) {
-                        auto* result = builder.CreateCall(callee, args);
-                        result->setTailCallKind(llvm::CallInst::TCK_Tail);
-                        if (!byte_stack) builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
-                        if (fn->getReturnType()->isVoidTy()) {
-                           builder.CreateRetVoid();
-                        } else if (!result->getType()->isVoidTy()) {
-                           builder.CreateRet(convert_type(result, fn->getReturnType()));
-                        } else {
-                           builder.CreateRetVoid();
-                        }
-                     } else {
-                        if (!byte_stack) builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
-                        builder.CreateRetVoid();
-                     }
-                  }
-                  // Watermark validation can split the block. Mark the actual
-                  // return block after all emission, so the generic return
-                  // pass does not refund an already released tail frame twice.
-                  if (byte_stack) released_byte_blocks.push_back(builder.GetInsertBlock());
-                  break;
-               }
-               case ir_op::tail_call_indirect: {
-                  uint32_t type_idx = inst.call.index;
-                  llvm::Value* table_elem = nullptr;
-                  if (!call_args.empty()) {
-                     table_elem = call_args.back();
-                     call_args.pop_back();
-                  }
-                  if (!table_elem) { call_args.clear(); break; }
-                  release_tail_byte_stack();
-                  uint32_t nargs = static_cast<uint32_t>(call_args.size());
-                  pack_indirect_args();
-                  // See ir_op::call_indirect above for why convert_type.
-                  if (table_elem->getType() != i32_ty)
-                     table_elem = convert_type(table_elem, i32_ty);
-                  // Checked mode: validate read watermark before tail call indirect
-                  emit_watermark_validate(builder, ctx_ptr, load_mem_ptr(), watermark_alloca, mem_size_cache);
-                  if (!byte_stack) builder.CreateCall(rt_call_depth_dec, {ctx_ptr});
-                  emit_backtrace_set_bottom(builder, ctx_ptr);
-                  llvm::Value* raw = builder.CreateCall(rt_call_indirect,
-                     {ctx_ptr, load_mem_ptr(), builder.getInt32(type_idx),
-                      table_elem, host_args_alloca, builder.getInt32(nargs)});
-                  emit_backtrace_clear_bottom(builder, ctx_ptr);
-                  if (!byte_stack) builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
-                  builder.CreateStore(builder.CreateCall(rt_get_memory, {ctx_ptr}), mem_ptr_alloca);
-                  // Return
-                  if (fn->getReturnType()->isVoidTy()) {
-                     builder.CreateRetVoid();
-                  } else if (fn->getReturnType() == v128_ty) {
-                     // Callee's entry wrapper stores the v128 first-return into
-                     // host_args_alloca before returning the scalar low i64.
-                     // Reload the full vector to honor this function's v128 ABI.
-                     auto* vec = builder.CreateAlignedLoad(v128_ty, host_args_alloca, llvm::Align(8));
-                     builder.CreateRet(vec);
-                  } else {
-                     builder.CreateRet(convert_type(raw, fn->getReturnType()));
-                  }
-                  // Watermark validation can split the block. Mark the actual
-                  // return block after all emission, so the generic return
-                  // pass does not refund an already released tail frame twice.
-                  if (byte_stack) released_byte_blocks.push_back(builder.GetInsertBlock());
                   break;
                }
 
@@ -5412,6 +5136,7 @@ namespace psizam::detail {
                b.CreateStore(empty, ctx_arg, /*isVolatile=*/true);
             }
             auto* call_result = b.CreateCall(real_fn, call_args);
+            call_result->setCallingConv(llvm::CallingConv::Tail);
             if (opts.enable_backtrace) {
                b.CreateStore(previous_top, top_slot, /*isVolatile=*/true);
                b.CreateStore(previous_bottom, ctx_arg, /*isVolatile=*/true);
@@ -5459,7 +5184,8 @@ namespace psizam::detail {
    }
 
    void llvm_ir_translator::finalize() {
-      // Generate entry wrappers for all functions
+      _impl->generate_import_thunks();
+      // Public C wrappers call the private typed ABI.
       _impl->generate_entry_wrappers();
 
       // DEBUG: dump IR for specific function(s) pre-optimization.

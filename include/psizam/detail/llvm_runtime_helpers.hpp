@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <exception>
 
+namespace psizam { struct table_entry; }
+
 extern "C" {
    // Global variable access
    int64_t  __psizam_global_get(void* ctx, uint32_t idx);
@@ -67,6 +69,8 @@ extern "C" {
    // Throws wasm_interpreter_exception on error.
    const void* __psizam_resolve_indirect(void* ctx, uint32_t type_idx,
                                           uint32_t table_idx, uint32_t elem_idx);
+   const psizam::table_entry* __psizam_resolve_indirect_entry(void* ctx, uint32_t type_idx,
+                                                             uint32_t table_idx, uint32_t elem_idx);
 
    // Checked private-memory atomics shared by all native engine tiers.
    // The legacy symbol name is retained for generated-code relocations.

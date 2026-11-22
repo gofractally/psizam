@@ -159,6 +159,7 @@ namespace psizam {
       table[static_cast<uint32_t>(reloc_symbol::llvm_table_size)]       = reinterpret_cast<void*>(&__psizam_table_size);
       table[static_cast<uint32_t>(reloc_symbol::llvm_table_fill)]       = reinterpret_cast<void*>(&__psizam_table_fill);
       table[static_cast<uint32_t>(reloc_symbol::llvm_resolve_indirect)] = reinterpret_cast<void*>(&__psizam_resolve_indirect);
+      table[static_cast<uint32_t>(reloc_symbol::llvm_resolve_indirect_entry)] = reinterpret_cast<void*>(&__psizam_resolve_indirect_entry);
       table[static_cast<uint32_t>(reloc_symbol::llvm_atomic_rmw)]       = reinterpret_cast<void*>(&__psizam_atomic_rmw);
       table[static_cast<uint32_t>(reloc_symbol::llvm_call_depth_dec)]   = reinterpret_cast<void*>(&__psizam_call_depth_dec);
       table[static_cast<uint32_t>(reloc_symbol::llvm_call_depth_inc)]   = reinterpret_cast<void*>(&__psizam_call_depth_inc);

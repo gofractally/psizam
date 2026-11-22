@@ -157,17 +157,20 @@ TEST_CASE("WASM loop scratch has complete frame metadata in serial and batch com
    for (auto threads : {0u, 2u}) {
       for (auto target : {"x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"}) {
        for (bool backtrace : {false, true}) {
-         CAPTURE(threads, target, backtrace);
+        for (bool gas : {false, true}) {
+         CAPTURE(threads, target, backtrace, gas);
          psizam::module module;
          psizam::detail::pzam_compile_result result;
          result.target_triple = target;
          result.opt_level = 2;
          auto wasm = psizam::read_wasm(PSIZAM_AOT_PHYSICAL_WASM);
          psizam::detail::null_debug_info debug;
+         auto settings = options{.compile_threads = threads};
+         settings.gas_metering = gas;
          {
             psizam::detail::binary_parser<psizam::detail::ir_writer_llvm_aot, options,
                                          psizam::detail::null_debug_info>
-               parser(module.allocator, options{.compile_threads = threads}, backtrace, false);
+               parser(module.allocator, settings, backtrace, false);
             parser.set_compile_result(&result);
             parser.parse_module(wasm, module, debug);
          }
@@ -178,9 +181,68 @@ TEST_CASE("WASM loop scratch has complete frame metadata in serial and batch com
          CHECK(result.entry_stack_sizes.size() == 2);
          CHECK(result.body_stack_sizes.size() == 2);
          CHECK(result.body_stack_sizes[0] > 0);
+        }
        }
       }
    }
+}
+
+TEST_CASE("AOT native ABI identity requires matching typed call conventions", "[aot-physical][abi]") {
+   for (auto target : {"x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"}) {
+      CAPTURE(target);
+      auto mismatch = frame_fixture();
+      mismatch.ir->getFunction("wasm_func_0")->setCallingConv(llvm::CallingConv::Tail);
+      auto bad = compile(std::move(mismatch), target);
+      CHECK(bad.error.find("mismatched AOT guest call convention") != std::string::npos);
+      CHECK_FALSE(bad.native_stack_frames_complete);
+
+      auto matched = frame_fixture();
+      matched.ir->getFunction("wasm_func_0")->setCallingConv(llvm::CallingConv::Tail);
+      auto* call = llvm::cast<llvm::CallInst>(
+         &matched.ir->getFunction("wasm_entry_0")->getEntryBlock().front());
+      call->setCallingConv(llvm::CallingConv::Tail);
+      auto good = compile(std::move(matched), target);
+      INFO(good.error);
+      REQUIRE(good.error.empty());
+      CHECK(good.native_guest_abi == psizam::native_guest_abi::llvm_tailcc);
+      CHECK(good.native_stack_frames_complete);
+   }
+}
+
+TEST_CASE("Serial and batch AOT preserve the requested checked memory policy", "[aot-physical][policy]") {
+   struct options : psizam::default_options {
+      uint32_t compile_threads = 0;
+      psizam::mem_safety memory_mode = psizam::mem_safety::guarded;
+      psizam::checked_mode checked_kind = psizam::checked_mode::strict;
+   };
+   for (auto target : {"x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"})
+      for (uint32_t threads : {0u, 4u}) {
+         CAPTURE(target, threads);
+         std::vector<uint8_t> guarded_code;
+         for (auto mode : {psizam::mem_safety::guarded, psizam::mem_safety::checked}) {
+            auto wasm = psizam::read_wasm(PSIZAM_AOT_PHYSICAL_WASM);
+            psizam::module module;
+            psizam::detail::pzam_compile_result result;
+            result.target_triple = target;
+            result.opt_level = 2;
+            auto settings = options{.compile_threads = threads};
+            settings.gas_metering = false;
+            settings.memory_mode = mode;
+            settings.checked_kind = psizam::checked_mode::strict;
+            psizam::detail::null_debug_info debug;
+            {
+               psizam::detail::binary_parser<psizam::detail::ir_writer_llvm_aot, options>
+                  parser(module.allocator, settings, false, false);
+               parser.set_compile_result(&result);
+               parser.parse_module(wasm, module, debug);
+            }
+            INFO(result.error);
+            REQUIRE(result.error.empty());
+            REQUIRE(result.native_stack_frames_complete);
+            if (mode == psizam::mem_safety::guarded) guarded_code = result.code_blob;
+            else CHECK(result.code_blob != guarded_code);
+         }
+      }
 }
 
 TEST_CASE("A missing WASM code section does not fabricate compiler measurements",

@@ -656,6 +656,7 @@ namespace psizam::detail {
       void** _host_direct_ptrs = nullptr;         // offset 152: raw C function pointers for direct JIT calls
       host_trampoline_t* _host_trampoline_ptrs = nullptr; // offset 160: trampoline function pointers for JIT slow path
       void* _host_ptr = nullptr;                  // offset 168: host object pointer for inline JIT trampoline calls
+      const uint32_t* _native_function_costs = nullptr; // native64 offset 176
    };
 
    // JIT codegen embeds these offsets as immediates — verify they don't silently change.
@@ -665,6 +666,12 @@ namespace psizam::detail {
                  "frame_info_holder layout changed — update trampoline_ptrs_offset in JIT codegen");
    static_assert(offsetof(frame_info_holder<false>, _host_ptr) == 168,
                  "frame_info_holder layout changed — update host_ptr_offset in JIT codegen");
+#if UINTPTR_MAX == UINT64_MAX
+   static_assert(offsetof(frame_info_holder<false>, _remaining_call_depth) ==
+                    native_guest_context_abi::remaining_stack_offset);
+   static_assert(offsetof(frame_info_holder<false>, _native_function_costs) ==
+                    native_guest_context_abi::function_costs_offset);
+#endif
 
    template<bool EnableBacktrace = false>
    class jit_execution_context : public frame_info_holder<EnableBacktrace>, public execution_context_base<jit_execution_context<EnableBacktrace>, true> {
@@ -745,7 +752,26 @@ namespace psizam::detail {
 
       inline void reset() {
          base_type::reset(*_mod);
+         this->_native_function_costs = _mod->native_function_byte_costs.size() ==
+            uint64_t(_mod->get_imported_functions_size()) + _mod->code.size()
+            ? _mod->native_function_byte_costs.data() : nullptr;
          get_operand_stack().eat(0);
+      }
+
+      // The public entry check precedes the C wrapper's native prologue. Calls
+      // between generated bodies perform the same admission in generated code.
+      void prepare_llvm_entry(uint32_t function_index) {
+         if (_mod->native_guest_abi != native_guest_abi::llvm_tailcc || !_mod->stack_limit_is_bytes)
+            return;
+         PSIZAM_ASSERT(_mod->native_function_byte_costs.size() ==
+                          uint64_t(_mod->get_imported_functions_size()) + _mod->code.size(),
+                       wasm_interpreter_exception, "LLVM native cost table is not prepared");
+         this->_native_function_costs = _mod->native_function_byte_costs.data();
+         if (function_index >= _mod->get_imported_functions_size()) {
+            const uint32_t cost = _mod->native_function_byte_costs.at(function_index);
+            PSIZAM_ASSERT(cost >= 16 && cost <= this->_remaining_call_depth,
+                          wasm_interpreter_exception, "stack overflow");
+         }
       }
 
       std::size_t get_maximum_stack_size()
@@ -788,6 +814,7 @@ namespace psizam::detail {
                                                                uint32_t func_index,
                                                                native_value* args_raw, size_t args_count)
       {
+         prepare_llvm_entry(func_index);
          auto saved_host = _host;
          auto saved_os_size = get_operand_stack().size();
          auto g = scope_guard([&](){ _host = saved_host; this->_host_ptr = saved_host; get_operand_stack().eat(saved_os_size); });
@@ -895,6 +922,7 @@ namespace psizam::detail {
 
       template <typename TC = psizam::type_converter<standalone_function_t>, typename... Args>
       inline std::optional<operand_stack_elem> execute(stack_allocator& alt_stack, void* host, jit_visitor, uint32_t func_index, Args... args) {
+         prepare_llvm_entry(func_index);
          auto saved_host = _host;
          auto saved_os_size = get_operand_stack().size();
          auto g = scope_guard([&](){ _host = saved_host; this->_host_ptr = saved_host; get_operand_stack().eat(saved_os_size); });

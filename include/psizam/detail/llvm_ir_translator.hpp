@@ -52,6 +52,7 @@ namespace psizam::detail {
       bool enable_backtrace  = false; // Enable async backtrace support
       int  opt_level         = 2;     // LLVM optimization level (0-3)
       bool per_function      = false; // Per-function compilation: external linkage for all decls
+      bool emit_import_thunks = true; // The first AOT unit owns all typed import definitions
       bool nothrow_host_calls = false; // Use nothrow host call helpers (JIT path with .eh_frame)
 
       // Memory safety mode: guarded (OS guard pages), checked (IR-level bounds

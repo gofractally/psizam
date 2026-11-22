@@ -12,9 +12,15 @@
 #include <cstdint>
 #include <cstdlib>
 
+namespace psizam { struct table_entry; }
+
 extern "C" {
 
 const void* __psizam_resolve_indirect(void*, uint32_t, uint32_t, uint32_t) {
+   __builtin_trap();
+}
+
+const psizam::table_entry* __psizam_resolve_indirect_entry(void*, uint32_t, uint32_t, uint32_t) {
    __builtin_trap();
 }
 

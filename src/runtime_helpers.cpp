@@ -34,6 +34,27 @@ namespace {
       else f();
    }
 
+   struct indirect_target_result {
+      const table_entry* entry;
+      const char* error;
+   };
+
+   // Shared authority for both the legacy null-return API and the typed LLVM
+   // entry API. The latter preserves its existing detailed trap diagnostics.
+   indirect_target_result resolve_indirect_entry(ctx_t& c, uint32_t type_idx,
+                                                  uint32_t table_idx, uint32_t elem_idx) {
+      auto& mod = c.get_module();
+      if (table_idx >= mod.tables.size() || elem_idx >= c.get_table_size(table_idx))
+         return {nullptr, "undefined element"};
+      const auto* entry = c.get_table_base(table_idx) + elem_idx;
+      if (entry->type == UINT32_MAX || entry->index >= mod.get_functions_total())
+         return {nullptr, "undefined element"};
+      if (type_idx >= mod.types.size() || !(mod.get_function_type(entry->index) == mod.types[type_idx]))
+         return {nullptr, "indirect call type mismatch"};
+      if (!entry->code_ptr) return {nullptr, "undefined element"};
+      return {entry, nullptr};
+   }
+
    void invoke_gas_handler(gas_state& gas) {
       // Custom handlers may throw (timeouts, exhausted pools, scheduler
       // failures). Never unwind through generated code. The helper leaves
@@ -49,31 +70,15 @@ extern "C" {
 
 const void* __psizam_resolve_indirect(void* ctx, uint32_t type_idx,
                                        uint32_t table_idx, uint32_t elem_idx) {
-   auto& c = as_ctx(ctx);
-   auto& mod = c.get_module();
+   auto result = resolve_indirect_entry(as_ctx(ctx), type_idx, table_idx, elem_idx);
+   return result.entry ? result.entry->code_ptr : nullptr;
+}
 
-   if (table_idx >= mod.tables.size())
-      return nullptr; // triggers trap in caller
-   uint32_t table_size = c.get_table_size(table_idx);
-   if (elem_idx >= table_size)
-      return nullptr; // triggers trap in caller
-
-   auto* table_base = c.get_table_base(table_idx);
-   auto& entry = table_base[elem_idx];
-
-   // Null/uninitialized check (0xFFFFFFFF is the sentinel)
-   if (entry.type == UINT32_MAX || entry.index == UINT32_MAX)
-      return nullptr; // triggers trap in caller
-
-   // Type check
-   const auto& expected_type = mod.types[type_idx];
-   const auto& actual_type = mod.get_function_type(entry.index);
-   if (!(actual_type == expected_type))
-      return nullptr; // triggers trap in caller
-
-   // For imported functions, code_ptr points to the JIT-generated import thunk.
-   // For WASM functions, code_ptr points to the JIT-compiled function body.
-   return entry.code_ptr;
+const psizam::table_entry* __psizam_resolve_indirect_entry(void* ctx, uint32_t type_idx,
+                                                           uint32_t table_idx, uint32_t elem_idx) {
+   auto result = resolve_indirect_entry(as_ctx(ctx), type_idx, table_idx, elem_idx);
+   if (result.error) escape_or_throw<wasm_interpreter_exception>(result.error);
+   return result.entry;
 }
 
 void __psizam_table_copy(void* ctx, uint32_t dest, uint32_t src, uint32_t n,

@@ -26,12 +26,21 @@ struct byte_options : psizam::default_options {
 };
 struct traced_options : byte_options {};
 struct parallel_options : byte_options { parallel_options() { compile_threads = 4; } };
-struct traced_jit2 : psizam::jit2 {
+#ifdef PSIZAM_TEST_LLVM_TAIL
+#define TAIL_BACKEND_NAME "LLVM"
+using ordinary_impl = psizam::jit_llvm;
+inline constexpr auto expected_abi = psizam::native_guest_abi::llvm_tailcc;
+#else
+#define TAIL_BACKEND_NAME "JIT2"
+using ordinary_impl = psizam::jit2;
+inline constexpr auto expected_abi = psizam::native_guest_abi::jit_callee_cleanup;
+#endif
+struct traced_jit2 : ordinary_impl {
    using context = psizam::detail::jit_execution_context<true>;
    static constexpr bool enable_backtrace = true;
 };
 template<class Options>
-using impl_for = std::conditional_t<std::is_same_v<Options,traced_options>,traced_jit2,psizam::jit2>;
+using impl_for = std::conditional_t<std::is_same_v<Options,traced_options>,traced_jit2,ordinary_impl>;
 
 struct observations {
    uintptr_t low = UINTPTR_MAX, high = 0;
@@ -71,13 +80,13 @@ std::vector<uint8_t> fixture(const char* path) {
 }
 }
 
-TEMPLATE_TEST_CASE("JIT2 proper tails replace complete activations", "[proper-tail][jit2][resource]",
+TEMPLATE_TEST_CASE(TAIL_BACKEND_NAME " proper tails replace complete activations", "[proper-tail][jit2][resource]",
                    count_options, byte_options, traced_options, parallel_options) {
    register_functions();
    psizam::wasm_allocator allocator;
    psizam::backend<functions,impl_for<TestType>,TestType> vm(fixture(PROPER_TAIL_WASM),&allocator,TestType{});
    functions::resolve(vm.get_module());
-   CHECK(vm.get_module().native_guest_abi == psizam::native_guest_abi::jit_callee_cleanup);
+   CHECK(vm.get_module().native_guest_abi == expected_abi);
    observations seen;
    seen.remaining = [&] { return vm.get_context().get_remaining_call_depth(); };
    observe_scope scope(seen);
@@ -104,13 +113,21 @@ TEMPLATE_TEST_CASE("JIT2 proper tails replace complete activations", "[proper-ta
    CHECK_THROWS_AS(vm.call_with_return("env","host_tail",23u),std::runtime_error);
    seen.nested = {};
    for (auto index : {1u,2u,65535u}) CHECK_THROWS(vm.call_with_return("env","indirect_bad",index));
+#ifdef PSIZAM_TEST_LLVM_TAIL
+   CHECK_THROWS_WITH(vm.call_with_return("env","indirect_bad",1u), "indirect call type mismatch");
+   CHECK_THROWS_WITH(vm.call_with_return("env","indirect_bad",65535u), "undefined element");
+#endif
    vm.call("env","set_fail",1u);
    CHECK_THROWS(vm.call_with_return("env","cycle",10000u));
    vm.call("env","set_fail",0u);
+   const auto saved_budget = vm.get_context().get_remaining_call_depth();
+   CHECK(vm.call_with_return("env","mixed_cycle",1u)->to_ui64() == 43);
+   CHECK_THROWS_AS(vm.call_with_return("env","mixed_cycle",100000u),psizam::wasm_interpreter_exception);
+   CHECK(vm.get_context().get_remaining_call_depth() == saved_budget);
    CHECK(vm.call_with_return("env","ordinary")->to_ui64() == 3155);
 }
 
-TEMPLATE_TEST_CASE("JIT2 logical byte boundary matches the interpreter", "[proper-tail][jit2][byte-boundary]",
+TEMPLATE_TEST_CASE(TAIL_BACKEND_NAME " logical byte boundary matches the interpreter", "[proper-tail][jit2][byte-boundary]",
                    byte_options, traced_options, parallel_options) {
    register_functions();
    psizam::wasm_allocator reference_allocator;
@@ -135,7 +152,7 @@ TEMPLATE_TEST_CASE("JIT2 logical byte boundary matches the interpreter", "[prope
    CHECK(exact.call_with_return("env","cycle",1u)->to_ui64() == UINT64_C(0x123456789abce54));
 }
 
-TEMPLATE_TEST_CASE("JIT2 returns preserve channels and ordinary caller budgets", "[proper-tail][jit2][returns]",
+TEMPLATE_TEST_CASE(TAIL_BACKEND_NAME " returns preserve channels and ordinary caller budgets", "[proper-tail][jit2][returns]",
                    count_options,byte_options,traced_options,parallel_options) {
    register_functions();
    psizam::wasm_allocator allocator;
@@ -161,7 +178,7 @@ TEMPLATE_TEST_CASE("JIT2 returns preserve channels and ordinary caller budgets",
    }
 }
 
-TEMPLATE_TEST_CASE("JIT2 large tail signatures preserve ordinary continuations", "[proper-tail][jit2][large-args]",
+TEMPLATE_TEST_CASE(TAIL_BACKEND_NAME " large tail signatures preserve ordinary continuations", "[proper-tail][jit2][large-args]",
                    byte_options,traced_options,parallel_options) {
    register_functions();
    psizam::wasm_allocator allocator;
@@ -228,8 +245,13 @@ std::vector<uint8_t> wide_cleanup_fixture() {
 }
 struct wide_options : byte_options { wide_options() { max_stack_bytes = 2*1024*1024; } };
 }
+#ifdef PSIZAM_TEST_LLVM_TAIL
+TEMPLATE_TEST_CASE("Private cleanup exceeds RET imm16 without changing public ABI", "[proper-tail][wide-cleanup]",
+                   psizam::jit_llvm,traced_jit2) {
+#else
 TEMPLATE_TEST_CASE("Private cleanup exceeds RET imm16 without changing public ABI", "[proper-tail][wide-cleanup]",
                    psizam::jit,psizam::jit_profile,psizam::jit2,traced_jit2) {
+#endif
    auto wasm = wide_cleanup_fixture();
    psizam::wasm_allocator allocator;
    psizam::backend<std::nullptr_t,TestType,wide_options> vm(wasm,&allocator,wide_options{});
@@ -237,3 +259,23 @@ TEMPLATE_TEST_CASE("Private cleanup exceeds RET imm16 without changing public AB
       for (unsigned i=0;i<3;++i)
          CHECK(vm.call_with_return("env",name)->to_ui64() == UINT64_C(0x123456789abce54));
 }
+
+#ifdef PSIZAM_TEST_LLVM_TAIL
+TEST_CASE("LLVM entries require a prepared immutable cost table", "[proper-tail][metadata]") {
+   register_functions();
+   psizam::wasm_allocator allocator;
+   psizam::backend<functions,psizam::jit_llvm,byte_options> vm(fixture(PROPER_TAIL_WASM),&allocator,byte_options{});
+   functions::resolve(vm.get_module());
+   auto& module = vm.get_module();
+   REQUIRE(!module.native_function_byte_costs.empty());
+   module.native_function_byte_costs.clear();
+   vm.get_context().reset();
+   CHECK(module.native_function_byte_costs.empty());
+   CHECK_THROWS_WITH(vm.call_with_return("env","ordinary"), "LLVM native cost table is not prepared");
+   CHECK(module.native_function_byte_costs.empty());
+   // Explicit owner preparation happens before publishing or using the image.
+   module.prepare_native_function_costs();
+   vm.get_context().reset();
+   CHECK(vm.call_with_return("env","ordinary")->to_ui64() == 3155);
+}
+#endif

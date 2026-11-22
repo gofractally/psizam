@@ -21,7 +21,8 @@ namespace psizam::detail {
                                module& mod, growable_allocator& alloc,
                                bool deterministic = false,
                                mem_safety mem_mode = mem_safety::guarded,
-                               checked_mode checked_kind = checked_mode::strict);
+                               checked_mode checked_kind = checked_mode::strict,
+                               bool enable_backtrace = false);
 
    // Set/get LLVM optimization level (0-3). Default is 2.
    void     set_llvm_opt_level(int level);
@@ -33,6 +34,7 @@ namespace psizam::detail {
 
    class ir_writer_llvm : public ir_writer {
     public:
+      static constexpr bool compile_import_only_module = true;
       ir_writer_llvm(growable_allocator& alloc, std::size_t source_bytes, module& mod,
                      bool enable_backtrace = false, bool stack_limit_is_bytes = false,
                      uint32_t compile_threads = 0, bool deterministic = true)
@@ -62,7 +64,7 @@ namespace psizam::detail {
          try {
             llvm_compile_functions(get_functions(), get_num_functions(),
                                    get_ir_module(), get_ir_allocator(),
-                                   _deterministic, _mem_mode, _checked_kind);
+                                   _deterministic, _mem_mode, _checked_kind, _enable_backtrace);
          } catch (...) {
             // Cannot throw from destructor; defer for rethrow after parser destructs
             llvm_deferred_exception = std::current_exception();
@@ -70,6 +72,10 @@ namespace psizam::detail {
       }
 
     private:
+      // ORC retains and compiles the complete parsed IR module. The native
+      // writer's deferred parallel-parse callback does not populate that IR.
+      // AOT has its own real batch implementation and keeps the public hook.
+      using ir_writer::set_parse_callback;
       bool         _deterministic = false;
       fp_mode      _fp            = fp_mode::fast;
       mem_safety   _mem_mode      = mem_safety::guarded;

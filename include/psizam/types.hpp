@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -206,6 +207,10 @@ namespace psizam {
       // The code writer is responsible for filling this field
       const void*   code_ptr;
    };
+#if UINTPTR_MAX == UINT64_MAX
+   static_assert(offsetof(table_entry, index) == native_guest_context_abi::table_entry_index_offset);
+   static_assert(offsetof(table_entry, code_ptr) == native_guest_context_abi::table_entry_target_offset);
+#endif
 
    struct memory_type {
       resizable_limits limits;
@@ -395,10 +400,24 @@ namespace psizam {
       // Private guest ABI targets, indexed by global function index. Public
       // entry wrappers remain in code[].jit_code_offset for LLVM execution.
       std::vector<const void*> native_function_ptrs;
+      // Readonly during execution; rebuilt from validated per-body logical
+      // costs after native compilation/load. Imported targets have no guest body.
+      std::vector<uint32_t> native_function_byte_costs;
       psizam::native_guest_abi native_guest_abi = psizam::native_guest_abi::legacy_caller_cleanup;
+
+      void prepare_native_function_costs() {
+         const auto imports_count = get_imported_functions_size();
+         const uint64_t total = uint64_t(imports_count) + code.size();
+         PSIZAM_ASSERT(total <= UINT32_MAX, wasm_parse_exception,
+                       "native function cost count overflow");
+         native_function_byte_costs.assign(static_cast<size_t>(total), 0);
+         for (size_t i = 0; i < code.size(); ++i)
+            native_function_byte_costs[imports_count + i] = code[i].byte_stack_usage;
+      }
 
       void finalize() {
          import_functions.resize(get_imported_functions_size());
+         prepare_native_function_costs();
          allocator.finalize();
       }
       uint32_t get_imported_functions_size() const {

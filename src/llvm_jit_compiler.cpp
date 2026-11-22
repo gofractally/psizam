@@ -173,6 +173,7 @@ namespace psizam::detail {
       add_sym("__psizam_table_copy",     reinterpret_cast<void*>(&__psizam_table_copy));
       add_sym("__psizam_call_indirect",          reinterpret_cast<void*>(&__psizam_call_indirect));
       add_sym("__psizam_call_indirect_nothrow",  reinterpret_cast<void*>(&__psizam_call_indirect_nothrow));
+      add_sym("__psizam_resolve_indirect_entry", reinterpret_cast<void*>(&__psizam_resolve_indirect_entry));
       add_sym("__psizam_get_memory",    reinterpret_cast<void*>(&__psizam_get_memory));
       add_sym("__psizam_table_get",    reinterpret_cast<void*>(&__psizam_table_get));
       add_sym("__psizam_table_set",    reinterpret_cast<void*>(&__psizam_table_set));
@@ -253,18 +254,34 @@ namespace psizam::detail {
       // Look up each entry wrapper and register in the module.
       // Entry wrappers have uniform signature: i64(*)(ptr, ptr, ptr)
       uint32_t num_imports = mod.get_imported_functions_size();
+      mod.native_function_ptrs.assign(mod.get_functions_total(), nullptr);
+      auto private_target = [&](const std::string& name) {
+         auto symbol = _impl->jit->lookup(name);
+         if (!symbol)
+            throw std::runtime_error("Missing typed LLVM target: " + name + ": " +
+                                     llvm::toString(symbol.takeError()));
+         return symbol->toPtr<const void*>();
+      };
+      for (uint32_t i = 0; i < num_imports; ++i)
+         mod.native_function_ptrs[i] = private_target("wasm_import_" + std::to_string(i));
       for (uint32_t i = 0; i < mod.code.size(); i++) {
          std::string name = "wasm_entry_" + std::to_string(num_imports + i);
          auto sym = _impl->jit->lookup(name);
          if (!sym) {
-            // Function wasn't compiled (e.g., unreachable)
-            continue;
+            throw std::runtime_error("Missing LLVM public entry: " + name + ": " +
+                                     llvm::toString(sym.takeError()));
          }
          auto addr = sym->toPtr<void*>();
          // Store the function pointer as the jit_code_offset
          // (for LLVM backend, this is an absolute address, not a relative offset)
          mod.code[i].jit_code_offset = reinterpret_cast<std::size_t>(addr);
+         mod.native_function_ptrs[num_imports + i] = private_target("wasm_func_" + std::to_string(num_imports + i));
       }
+      for (auto& segment : mod.elements)
+         for (auto& entry : segment.elems)
+            entry.code_ptr = entry.index < mod.native_function_ptrs.size()
+               ? mod.native_function_ptrs[entry.index] : nullptr;
+      mod.native_guest_abi = native_guest_abi::llvm_tailcc;
       _impl->pages->publish(mod.allocator);
    }
 

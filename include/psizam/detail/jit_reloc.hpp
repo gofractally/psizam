@@ -140,6 +140,9 @@ namespace psizam::detail {
       libm_f32_fma,
       libm_f64_fma,
 
+      // Additive: existing relocation symbol identities remain unchanged.
+      llvm_resolve_indirect_entry,
+
       NUM_SYMBOLS
    };
 

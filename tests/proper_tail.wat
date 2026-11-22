@@ -122,4 +122,14 @@
   (func (export "multi_tail") (param i32) (result i64) (local i64 i32)
     (call $multi_small (local.get 0)) (local.set 1) (local.set 2)
     (i64.xor (local.get 1) (i64.extend_i32_u (local.get 2))))
+  ;; Ordinary activations remain live while each large-signature callee is
+  ;; replaced by a small-signature tail target. These cycles must spend quota.
+  (func $mixed_a (export "mixed_cycle") (param $n i32) (result i64)
+    (if (result i64) (i32.eqz (local.get $n))
+      (then (i64.const 42))
+      (else (i64.add (i64.const 1)
+        (call $mixed_b (i64.const 123) (i32.sub (local.get $n) (i32.const 1))
+          (f64.const -0) (i64.const 456))))))
+  (func $mixed_b (type $large) (param i64 i32 f64 i64) (result i64)
+    (return_call $mixed_a (local.get 1)))
 )

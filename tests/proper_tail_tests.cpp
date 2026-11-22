@@ -161,6 +161,10 @@ TEMPLATE_TEST_CASE("AArch64 JIT1 proper tails replace signatures without native 
    CHECK_THROWS(vm.call_with_return("env", "cycle", 10000u));
    vm.call("env", "set_fail", 0u);
    CHECK(vm.call_with_return("env", "cycle", 0u)->to_ui64() == UINT64_C(0x123456789abce54));
+   const auto saved_budget = vm.get_context().get_remaining_call_depth();
+   CHECK(vm.call_with_return("env", "mixed_cycle", 1u)->to_ui64() == 43);
+   CHECK_THROWS_AS(vm.call_with_return("env", "mixed_cycle", 100000u), psizam::wasm_interpreter_exception);
+   CHECK(vm.get_context().get_remaining_call_depth() == saved_budget);
 }
 }
 

@@ -23,6 +23,7 @@ namespace psizam::detail {
 
    class ir_writer_llvm_aot : public ir_writer {
     public:
+      static constexpr bool compile_import_only_module = true;
       ir_writer_llvm_aot(growable_allocator& alloc, std::size_t source_bytes, module& mod,
                          bool enable_backtrace = false, bool stack_limit_is_bytes = false,
                          uint32_t compile_threads = 0)
@@ -66,13 +67,19 @@ namespace psizam::detail {
          }
 
 #if !defined(__wasi__)
-         if (_compile_threads > 1 && _parse_callback) {
+         if (_num_functions && _compile_threads > 1 && _parse_callback) {
             parallel_llvm_compile_all();
             return;
          }
 #endif
 
+         if (!_num_functions && _mod.get_imported_functions_size()) {
+            compile_current_function(true);
+            if (_had_error) return;
+         }
+
          resolve_cross_function_relocs();
+         if (_had_error) return;
          finish_native_frames();
          if (_had_error) return;
 
@@ -83,6 +90,35 @@ namespace psizam::detail {
       }
 
     private:
+
+      void record_import_thunks(const auto& result, uint32_t base, bool owner) {
+         const auto count = _mod.get_imported_functions_size();
+         if (result.native_guest_abi != psizam::native_guest_abi::llvm_tailcc ||
+             result.import_thunk_offsets.size() != count || result.import_thunk_stack_sizes.size() != count ||
+             (owner && _import_unit_present)) {
+            _compile_result->error = "invalid LLVM typed import unit";
+            _had_error = true;
+            return;
+         }
+         if (owner) {
+            _import_thunk_offsets.resize(count);
+            _import_thunk_stack_sizes.resize(count);
+         }
+         for (uint32_t i = 0; i < count; ++i) {
+            const auto [offset, size] = result.import_thunk_offsets[i];
+            if ((!owner && size) || (owner && (!size || result.import_thunk_stack_sizes[i] == UINT64_MAX)) ||
+                uint64_t(base) + offset + size > uint64_t(INT32_MAX)) {
+               _compile_result->error = "incomplete or duplicate LLVM typed import coverage";
+               _had_error = true;
+               return;
+            }
+            if (owner) {
+               _import_thunk_offsets[i] = {base + offset, size};
+               _import_thunk_stack_sizes[i] = result.import_thunk_stack_sizes[i];
+            }
+         }
+         if (owner) _import_unit_present = true;
+      }
 
       void record_native_frames(const auto& result, uint32_t index) {
          if (!result.native_stack_frames_complete || result.native_stack_probe_size != 4096 ||
@@ -101,6 +137,11 @@ namespace psizam::detail {
       }
 
       void finish_native_frames() {
+         if (_mod.get_imported_functions_size() && !_import_unit_present) {
+            _compile_result->error = "missing LLVM typed import unit";
+            _had_error = true;
+            return;
+         }
          for (uint32_t index = 0; index < _num_functions; ++index) {
             if (index >= _native_frame_presence.size() || !_native_frame_presence[index] ||
                 index >= _function_offsets.size() || !_function_offsets[index].second ||
@@ -118,6 +159,10 @@ namespace psizam::detail {
          _compile_result->body_stack_sizes = std::move(_body_stack_sizes);
          _compile_result->native_stack_probe_size = 4096;
          _compile_result->native_stack_frames_complete = true;
+         _compile_result->native_guest_abi = psizam::native_guest_abi::llvm_tailcc;
+         _mod.native_guest_abi = psizam::native_guest_abi::llvm_tailcc;
+         _compile_result->import_thunk_offsets = std::move(_import_thunk_offsets);
+         _compile_result->import_thunk_stack_sizes = std::move(_import_thunk_stack_sizes);
       }
 
       void resolve_cross_function_relocs() {
@@ -128,20 +173,33 @@ namespace psizam::detail {
          uint32_t code_count = static_cast<uint32_t>(_function_offsets.size());
          for (auto& r : _accumulated_relocs) {
             if (r.symbol == reloc_symbol::code_blob_self && r.addend < 0) {
-               uint32_t neg_val = static_cast<uint32_t>(-r.addend);
+               uint64_t neg_val = static_cast<uint64_t>(-int64_t(r.addend));
+               uint64_t resolved = UINT64_MAX;
                if (neg_val <= code_count) {
                   // Body ref: -(code_idx + 1), resolve to wasm_func_N offset
                   uint32_t code_idx = neg_val - 1;
                   if (code_idx < _func_body_offsets.size()) {
-                     r.addend = static_cast<int32_t>(_func_body_offsets[code_idx].first);
+                     if (_func_body_offsets[code_idx].second)
+                        resolved = _func_body_offsets[code_idx].first;
                   }
-               } else if (neg_val <= 2 * code_count) {
+               } else if (neg_val <= uint64_t{2} * code_count) {
                   // Entry ref: -(code_idx + 1 + code_count), resolve to wasm_entry_N offset
                   uint32_t code_idx = neg_val - 1 - code_count;
                   if (code_idx < _function_offsets.size()) {
-                     r.addend = static_cast<int32_t>(_function_offsets[code_idx].first);
+                     if (_function_offsets[code_idx].second)
+                        resolved = _function_offsets[code_idx].first;
                   }
+               } else {
+                  const auto import = neg_val - uint64_t{2} * code_count - 1;
+                  if (import < _import_thunk_offsets.size() && _import_thunk_offsets[import].second)
+                     resolved = _import_thunk_offsets[import].first;
                }
+               if (resolved > uint64_t(INT32_MAX)) {
+                  _compile_result->error = "unresolved LLVM typed function relocation";
+                  _had_error = true;
+                  return;
+               }
+               r.addend = static_cast<int32_t>(resolved);
             }
          }
       }
@@ -187,6 +245,9 @@ namespace psizam::detail {
             std::vector<std::pair<uint32_t, uint32_t>> body_offsets;
             std::vector<uint64_t> entry_stack_sizes;
             std::vector<uint64_t> body_stack_sizes;
+            std::vector<std::pair<uint32_t, uint32_t>> import_thunk_offsets;
+            std::vector<uint64_t> import_thunk_stack_sizes;
+            psizam::native_guest_abi native_guest_abi = psizam::native_guest_abi::legacy_caller_cleanup;
             uint32_t native_stack_probe_size = 0;
             bool native_stack_frames_complete = false;
             uint32_t blob_offset = 0;  // set during between phase
@@ -213,6 +274,8 @@ namespace psizam::detail {
          // later patches to the final merged-blob offsets.
          topts.per_function     = true;
          topts.enable_backtrace = _compile_result->backtrace;
+         topts.mem_mode = _mem_mode;
+         topts.checked_kind = _checked_kind;
          const std::string& target_triple = _compile_result->target_triple;
 
          auto& reactor = get_compile_reactor(N);
@@ -255,7 +318,9 @@ namespace psizam::detail {
                // then compile once. ELF emission + parse + TargetMachine cost
                // is amortized across `end - start` functions.
                auto do_compile = [&]() {
-                  llvm_ir_translator translator(get_ir_module(), topts);
+                  auto local_options = topts;
+                  local_options.emit_import_thunks = batch_idx == 0;
+                  llvm_ir_translator translator(get_ir_module(), local_options);
 
                   for (uint32_t func_idx = start; func_idx < end; ++func_idx) {
                      ir_writer_impl worker_writer(_mod, _functions, _num_functions,
@@ -289,6 +354,9 @@ namespace psizam::detail {
                   batch_results[batch_idx].body_offsets = std::move(result.body_offsets);
                   batch_results[batch_idx].entry_stack_sizes = std::move(result.entry_stack_sizes);
                   batch_results[batch_idx].body_stack_sizes = std::move(result.body_stack_sizes);
+                  batch_results[batch_idx].import_thunk_offsets = std::move(result.import_thunk_offsets);
+                  batch_results[batch_idx].import_thunk_stack_sizes = std::move(result.import_thunk_stack_sizes);
+                  batch_results[batch_idx].native_guest_abi = result.native_guest_abi;
                   batch_results[batch_idx].native_stack_probe_size = result.native_stack_probe_size;
                   batch_results[batch_idx].native_stack_frames_complete = result.native_stack_frames_complete;
                };
@@ -328,6 +396,11 @@ namespace psizam::detail {
                   total_size += align_pad;
                   batch_results[b].blob_offset = static_cast<uint32_t>(total_size);
                   total_size += batch_results[b].code.size();
+                  if (total_size > uint64_t(INT32_MAX)) {
+                     _compile_result->error = "LLVM merged native code exceeds relocation range";
+                     _had_error = true;
+                     return;
+                  }
                }
 
                // Pre-allocate merged code blob
@@ -338,6 +411,8 @@ namespace psizam::detail {
                   uint32_t blob_offset = batch_results[b].blob_offset;
                   uint32_t batch_start = b * batch_size;
                   uint32_t batch_end = std::min(batch_start + batch_size, _num_functions);
+                  record_import_thunks(batch_results[b], blob_offset, b == 0);
+                  if (_had_error) return;
                   for (uint32_t f = batch_start; f < batch_end; ++f) {
                      if (f < batch_results[b].function_offsets.size()) {
                         auto [entry_off, entry_sz] = batch_results[b].function_offsets[f];
@@ -396,6 +471,7 @@ namespace psizam::detail {
 
          // Resolve cross-function relocations (negative-addend → final blob offset)
          resolve_cross_function_relocs();
+         if (_had_error) return;
          finish_native_frames();
          if (_had_error) return;
 
@@ -406,7 +482,7 @@ namespace psizam::detail {
       }
 #endif // !__wasi__
 
-      void compile_current_function() {
+      void compile_current_function(bool imports_only = false) {
          if (_compile_result->target_triple.empty()) {
             _compile_result->error = "ir_writer_llvm_aot: target_triple not set";
             _had_error = true;
@@ -426,10 +502,13 @@ namespace psizam::detail {
                                                              : fp_mode::hw_deterministic;
          topts.per_function     = true;
          topts.enable_backtrace = _compile_result->backtrace;
+         topts.mem_mode = _mem_mode;
+         topts.checked_kind = _checked_kind;
+         topts.emit_import_thunks = imports_only || _func->func_index == 0;
 
          auto do_compile = [&]() {
             llvm_ir_translator translator(get_ir_module(), topts);
-            translator.translate_function(*_func);
+            if (!imports_only) translator.translate_function(*_func);
             translator.finalize();
 
             auto llvm_mod = translator.take_module();
@@ -449,9 +528,16 @@ namespace psizam::detail {
                _accumulated_code.resize(_accumulated_code.size() + align_pad, 0x00);
             }
             uint32_t blob_offset = static_cast<uint32_t>(_accumulated_code.size());
+            if (uint64_t(blob_offset) + func_result.code.size() > uint64_t(INT32_MAX)) {
+               _compile_result->error = "LLVM merged native code exceeds relocation range";
+               _had_error = true;
+               return;
+            }
 
             _accumulated_code.insert(_accumulated_code.end(),
                                       func_result.code.begin(), func_result.code.end());
+            record_import_thunks(func_result, blob_offset, topts.emit_import_thunks);
+            if (_had_error) return;
 
             // Adjust relocation offsets and addends relative to merged blob
             for (auto& reloc : func_result.relocations) {
@@ -468,6 +554,7 @@ namespace psizam::detail {
             // Record this function's entry wrapper and body offsets in the merged blob.
             // llvm_aot_compile returns per-function offsets relative to .text;
             // add blob_offset to get the absolute position in the merged blob.
+            if (imports_only) return;
             uint32_t code_idx = _func->func_index;
             if (code_idx < _function_offsets.size() &&
                 code_idx < func_result.function_offsets.size()) {
@@ -504,6 +591,9 @@ namespace psizam::detail {
       std::vector<uint64_t> _entry_stack_sizes;
       std::vector<uint64_t> _body_stack_sizes;
       std::vector<uint8_t> _native_frame_presence;
+      std::vector<std::pair<uint32_t, uint32_t>> _import_thunk_offsets;
+      std::vector<uint64_t> _import_thunk_stack_sizes;
+      bool _import_unit_present = false;
       bool _had_error = false;
    };
 

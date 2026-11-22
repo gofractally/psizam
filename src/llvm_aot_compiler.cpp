@@ -9,6 +9,7 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/CallingConv.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/Object/ELFObjectFile.h>
 #include <llvm/Object/ObjectFile.h>
@@ -42,6 +43,41 @@ extern "C" {
 #include <unordered_map>
 
 namespace psizam::detail {
+
+   enum class wasm_native_kind { other, body, entry, import_thunk };
+   struct wasm_native_ref {
+      wasm_native_kind kind = wasm_native_kind::other;
+      uint32_t index = 0; // global function index; imports occupy the initial prefix
+   };
+
+   static llvm::Expected<wasm_native_ref>
+   parse_wasm_native_ref(llvm::StringRef name, const module& mod) {
+      wasm_native_ref result;
+      llvm::StringRef suffix;
+      if (name.consume_front("wasm_func_")) {
+         result.kind = wasm_native_kind::body;
+         suffix = name;
+      } else if (name.consume_front("wasm_entry_")) {
+         result.kind = wasm_native_kind::entry;
+         suffix = name;
+      } else if (name.consume_front("wasm_import_")) {
+         result.kind = wasm_native_kind::import_thunk;
+         suffix = name;
+      } else {
+         return result;
+      }
+      if (suffix.getAsInteger(10, result.index) ||
+          suffix != std::to_string(result.index))
+         return llvm::createStringError("invalid AOT function index");
+      const uint32_t imports = mod.get_imported_functions_size();
+      if (result.kind == wasm_native_kind::import_thunk) {
+         if (result.index >= imports)
+            return llvm::createStringError("invalid AOT import index");
+      } else if (result.index < imports || uint64_t(result.index) - imports >= mod.code.size()) {
+         return llvm::createStringError("invalid AOT function index");
+      }
+      return result;
+   }
 
    // ELF stack-size records use relocations to identify their function. A
    // section symbol plus addend is common, so names alone are insufficient.
@@ -148,6 +184,7 @@ namespace psizam::detail {
          {"__psizam_table_size",       reloc_symbol::llvm_table_size},
          {"__psizam_table_fill",       reloc_symbol::llvm_table_fill},
          {"__psizam_resolve_indirect", reloc_symbol::llvm_resolve_indirect},
+         {"__psizam_resolve_indirect_entry", reloc_symbol::llvm_resolve_indirect_entry},
          {"__psizam_atomic_rmw",       reloc_symbol::llvm_atomic_rmw},
          {"__psizam_call_depth_dec",   reloc_symbol::llvm_call_depth_dec},
          {"__psizam_call_depth_inc",   reloc_symbol::llvm_call_depth_inc},
@@ -258,20 +295,40 @@ namespace psizam::detail {
       bool is_x86_64 = triple.getArch() == llvm::Triple::x86_64;
       if (!is_x86_64 && triple.getArch() != llvm::Triple::aarch64)
          return llvm_aot_result{.error = "native frame metadata requires X86-64 or AArch64"};
+      const uint32_t num_imports = mod.get_imported_functions_size();
+      // Pending code_blob_self references use strictly negative int32 addends.
+      // Keep INT32_MIN out of the encoding so resolving them can negate safely.
+      if (mod.code.size() > uint64_t(INT32_MAX) / 2 ||
+          uint64_t(mod.code.size()) * 2 + num_imports > uint64_t(INT32_MAX))
+         return llvm_aot_result{.error = "AOT function reference index exceeds relocation range"};
       std::set<std::string> expected_functions;
       std::vector<uint8_t> expected_presence(mod.code.size());
+      bool guest_c_abi = false;
+      bool guest_tail_abi = false;
       for (auto& function : *llvm_mod) {
+         auto reference = parse_wasm_native_ref(function.getName(), mod);
+         if (!reference)
+            return llvm_aot_result{.error = llvm::toString(reference.takeError()) + ": " + function.getName().str()};
+         if (reference->kind == wasm_native_kind::body || reference->kind == wasm_native_kind::import_thunk) {
+            if (function.getCallingConv() == llvm::CallingConv::Tail)
+               guest_tail_abi = true;
+            else if (function.getCallingConv() == llvm::CallingConv::C)
+               guest_c_abi = true;
+            else
+               return llvm_aot_result{.error = "unsupported AOT guest calling convention: " + function.getName().str()};
+            if (reference->kind == wasm_native_kind::import_thunk &&
+                function.getCallingConv() != llvm::CallingConv::Tail)
+               return llvm_aot_result{.error = "AOT typed import requires tailcc: " + function.getName().str()};
+         } else if (reference->kind == wasm_native_kind::entry &&
+                    function.getCallingConv() != llvm::CallingConv::C) {
+            return llvm_aot_result{.error = "AOT entry wrapper requires C calling convention: " + function.getName().str()};
+         }
          if (function.isDeclaration()) continue;
-         if (!function.getName().starts_with("wasm_func_") &&
-             !function.getName().starts_with("wasm_entry_"))
+         if (reference->kind == wasm_native_kind::other)
             return llvm_aot_result{.error = "unsupported AOT helper definition: " + function.getName().str()};
-         const bool entry = function.getName().starts_with("wasm_entry_");
-         uint32_t index = 0;
-         if (function.getName().drop_front(entry ? 11 : 10).getAsInteger(10, index) ||
-             index < mod.get_imported_functions_size() ||
-             uint64_t(index) - mod.get_imported_functions_size() >= mod.code.size())
-            return llvm_aot_result{.error = "invalid AOT function index: " + function.getName().str()};
-         expected_presence[index - mod.get_imported_functions_size()] |= entry ? 1 : 2;
+         if (reference->kind != wasm_native_kind::import_thunk)
+            expected_presence[reference->index - num_imports] |=
+               reference->kind == wasm_native_kind::entry ? 1 : 2;
          if (function.hasFnAttribute("no-stack-arg-probe"))
             return llvm_aot_result{.error = "conflicting native stack probe attribute"};
          if (function.hasFnAttribute(llvm::Attribute::Naked) ||
@@ -282,17 +339,31 @@ namespace psizam::detail {
          function.addFnAttr("stack-probe-size", "4096");
          function.addFnAttr(llvm::Attribute::NoRedZone);
          for (const auto& block : function)
-            for (const auto& instruction : block)
+            for (const auto& instruction : block) {
+               if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
+                  if (const auto* callee = call->getCalledFunction()) {
+                     auto target_ref = parse_wasm_native_ref(callee->getName(), mod);
+                     if (!target_ref)
+                        return llvm_aot_result{.error = llvm::toString(target_ref.takeError())};
+                     if ((target_ref->kind == wasm_native_kind::body ||
+                          target_ref->kind == wasm_native_kind::import_thunk) &&
+                         call->getCallingConv() != callee->getCallingConv())
+                        return llvm_aot_result{.error = "mismatched AOT guest call convention: " + callee->getName().str()};
+                  }
+               }
                if (auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(&instruction)) {
                   if (!alloca->isStaticAlloca())
                      return llvm_aot_result{.error = "unbounded native stack allocation in " + function.getName().str()};
                   if (alloca->getAlign().value() > 16)
                      return llvm_aot_result{.error = "unsupported native stack alignment in " + function.getName().str()};
                }
+            }
       }
       for (auto presence : expected_presence)
          if (presence && presence != 3)
             return llvm_aot_result{.error = "missing AOT body or entry wrapper"};
+      if (guest_c_abi && guest_tail_abi)
+         return llvm_aot_result{.error = "mixed AOT guest calling conventions"};
 
       // Look up the target
       std::string error;
@@ -381,6 +452,8 @@ namespace psizam::detail {
       // accessible from the code at runtime. We append .rodata after .text with
       // alignment, and emit code_blob_self relocations for cross-section references.
       llvm_aot_result result;
+      if (guest_tail_abi)
+         result.native_guest_abi = psizam::native_guest_abi::llvm_tailcc;
       std::optional<llvm::object::SectionRef> text_section;
 
       // Track section index → blob offset for resolving internal relocations
@@ -515,68 +588,79 @@ namespace psizam::detail {
                // the final operand value is independent of where the batch
                // sits in the merged blob. Patch the code bytes directly and
                // skip emitting an output relocation.
-               if (sym_name.starts_with("wasm_entry_") || sym_name.starts_with("wasm_func_")) {
-                  bool is_entry = sym_name.starts_with("wasm_entry_");
-                  std::string idx_str = is_entry ? sym_name.substr(11) : sym_name.substr(10);
-                  uint32_t func_idx = std::stoul(idx_str);
-                  uint32_t num_imports_val = mod.get_imported_functions_size();
-                  if (func_idx >= num_imports_val) {
-                     auto known_type = map_elf_reloc_type(reloc.getType(), is_x86_64);
-                     if (!known_type) return unsupported_relocation(reloc.getType(), is_x86_64);
-                     const reloc_type mapped_type = *known_type;
-                     uint32_t reloc_off = reloc_offset;
+               auto reference = parse_wasm_native_ref(sym_name, mod);
+               if (!reference)
+                  return llvm_aot_result{.error = llvm::toString(reference.takeError()) + ": " + sym_name};
+               if (reference->kind != wasm_native_kind::other) {
+                  auto known_type = map_elf_reloc_type(reloc.getType(), is_x86_64);
+                  if (!known_type) return unsupported_relocation(reloc.getType(), is_x86_64);
+                  const reloc_type mapped_type = *known_type;
+                  uint32_t reloc_off = reloc_offset;
 
-                     // Same-batch + PC-relative → resolve at compile time.
-                     // `is_internal_code` means the symbol is defined in this
-                     // object's .text section (batch-local).
-                     bool pc_relative_intra_text =
-                        is_internal_code &&
-                        (mapped_type == reloc_type::aarch64_call26 ||
-                         mapped_type == reloc_type::x86_64_pc32);
+                  // Same-batch + PC-relative → resolve at compile time.
+                  // `is_internal_code` means the symbol is defined in this
+                  // object's .text section (batch-local).
+                  bool pc_relative_intra_text =
+                     is_internal_code &&
+                     (mapped_type == reloc_type::aarch64_call26 ||
+                      mapped_type == reloc_type::x86_64_pc32);
 
-                     if (pc_relative_intra_text) {
-                        auto sym_addr_or_err = sym_it->getAddress();
-                        auto elf_addend_or_err = llvm::object::ELFRelocationRef(reloc).getAddend();
-                        if (sym_addr_or_err && reloc_off + 4 <= result.code.size()) {
-                           int64_t target = static_cast<int64_t>(*sym_addr_or_err);
-                           int64_t addend = elf_addend_or_err ? *elf_addend_or_err : 0;
-                           int64_t pc = static_cast<int64_t>(reloc_off);
+                  if (pc_relative_intra_text) {
+                     auto sym_addr_or_err = sym_it->getAddress();
+                     if (!sym_addr_or_err)
+                        return llvm_aot_result{.error = llvm::toString(sym_addr_or_err.takeError())};
+                     auto elf_addend_or_err = llvm::object::ELFRelocationRef(reloc).getAddend();
+                     if (!elf_addend_or_err)
+                        return llvm_aot_result{.error = llvm::toString(elf_addend_or_err.takeError())};
+                     if (uint64_t(reloc_off) + 4 <= result.code.size()) {
+                        int64_t target = static_cast<int64_t>(*sym_addr_or_err);
+                        int64_t addend = *elf_addend_or_err;
+                        int64_t pc = static_cast<int64_t>(reloc_off);
 
-                           if (mapped_type == reloc_type::aarch64_call26) {
-                              // BL/B imm26: (target - pc + addend) >> 2
-                              const int64_t distance = target - pc + addend;
-                              if ((distance & 3) || distance < -(1LL << 27) || distance >= (1LL << 27))
-                                 return llvm_aot_result{.error = "AArch64 intra-batch branch exceeds range"};
-                              int64_t offset = distance >> 2;
-                              uint32_t insn;
-                              std::memcpy(&insn, result.code.data() + reloc_off, 4);
-                              insn = (insn & 0xFC000000u) |
-                                     (static_cast<uint32_t>(offset) & 0x03FFFFFFu);
-                              std::memcpy(result.code.data() + reloc_off, &insn, 4);
-                           } else {
-                              // x86_64 CALL/JMP rel32: target - pc + addend
-                              int32_t rel32 = static_cast<int32_t>(target - pc + addend);
-                              std::memcpy(result.code.data() + reloc_off, &rel32, 4);
-                           }
-                           continue; // no output reloc needed
+                        if (mapped_type == reloc_type::aarch64_call26) {
+                           // BL/B imm26: (target - pc + addend) >> 2
+                           const int64_t distance = target - pc + addend;
+                           if ((distance & 3) || distance < -(1LL << 27) || distance >= (1LL << 27))
+                              return llvm_aot_result{.error = "AArch64 intra-batch branch exceeds range"};
+                           int64_t offset = distance >> 2;
+                           uint32_t insn;
+                           std::memcpy(&insn, result.code.data() + reloc_off, 4);
+                           insn = (insn & 0xFC000000u) |
+                                  (static_cast<uint32_t>(offset) & 0x03FFFFFFu);
+                           std::memcpy(result.code.data() + reloc_off, &insn, 4);
+                        } else {
+                           // x86_64 CALL/JMP rel32: target - pc + addend
+                           const int64_t distance = target - pc + addend;
+                           if (distance < INT32_MIN || distance > INT32_MAX)
+                              return llvm_aot_result{.error = "x86 intra-batch branch exceeds range"};
+                           int32_t rel32 = static_cast<int32_t>(distance);
+                           std::memcpy(result.code.data() + reloc_off, &rel32, 4);
                         }
+                        continue; // no output reloc needed
                      }
-
-                     code_relocation cr;
-                     cr.code_offset = reloc_off;
-                     cr.symbol = reloc_symbol::code_blob_self;
-                     cr.type = mapped_type;
-                     uint32_t code_idx = func_idx - num_imports_val;
-                     // Negative addend = pending function ref
-                     // Body refs:  -(code_idx + 1)             [range -1..-N]
-                     // Entry refs: -(code_idx + 1 + code_count) [range -(N+1)..-(2N)]
-                     int32_t encoded = -static_cast<int32_t>(code_idx + 1);
-                     if (is_entry) {
-                        encoded -= static_cast<int32_t>(mod.code.size());
-                     }
-                     cr.addend = encoded;
-                     result.relocations.push_back(cr);
                   }
+
+                  code_relocation cr;
+                  cr.code_offset = reloc_off;
+                  cr.symbol = reloc_symbol::code_blob_self;
+                  cr.type = mapped_type;
+                  // Negative addend = pending function ref
+                  // Body refs:  -(code_idx + 1)             [range -1..-N]
+                  // Entry refs: -(code_idx + 1 + code_count) [range -(N+1)..-(2N)]
+                  // Imports:    -(2 * code_count + import_idx + 1)
+                  //              [range -(2N+1)..-(2N+I)]
+                  uint64_t pending_index;
+                  if (reference->kind == wasm_native_kind::import_thunk)
+                     pending_index = uint64_t(mod.code.size()) * 2 + reference->index + 1;
+                  else {
+                     pending_index = uint64_t(reference->index) - num_imports + 1;
+                     if (reference->kind == wasm_native_kind::entry)
+                        pending_index += mod.code.size();
+                  }
+                  if (!pending_index || pending_index > uint64_t(INT32_MAX))
+                     return llvm_aot_result{.error = "AOT function reference exceeds relocation range"};
+                  cr.addend = -static_cast<int32_t>(pending_index);
+                  result.relocations.push_back(cr);
                   continue;
                }
 
@@ -639,10 +723,12 @@ namespace psizam::detail {
          }
       }
 
-      // Find function offsets by looking up wasm_entry_* and wasm_func_* symbols
-      uint32_t num_imports = mod.get_imported_functions_size();
+      // Sparse vectors are indexed by the complete WASM module. A declaration
+      // in another compilation unit has no range here and no proven frame.
       result.function_offsets.resize(mod.code.size(), {0, 0});
       result.body_offsets.resize(mod.code.size(), {0, 0});
+      result.import_thunk_offsets.resize(num_imports, {0, 0});
+      result.import_thunk_stack_sizes.resize(num_imports, UINT64_MAX);
       result.entry_stack_sizes.resize(mod.code.size());
       result.body_stack_sizes.resize(mod.code.size());
       std::set<std::string> covered_functions;
@@ -686,26 +772,22 @@ namespace psizam::detail {
             continue;
          }
 
-         if (name.starts_with("wasm_entry_")) {
-            uint32_t func_idx = std::stoul(name.substr(11));
-            if (func_idx >= num_imports) {
-               uint32_t code_idx = func_idx - num_imports;
-               if (code_idx < result.function_offsets.size()) {
-                  result.entry_stack_sizes[code_idx] = native_frame;
-                  result.function_offsets[code_idx] = {static_cast<uint32_t>(native_offset),
-                                                      static_cast<uint32_t>(native_size)};
-               }
-            }
-         } else if (name.starts_with("wasm_func_")) {
-            uint32_t func_idx = std::stoul(name.substr(10));
-            if (func_idx >= num_imports) {
-               uint32_t code_idx = func_idx - num_imports;
-               if (code_idx < result.body_offsets.size()) {
-                  result.body_stack_sizes[code_idx] = native_frame;
-                  result.body_offsets[code_idx] = {static_cast<uint32_t>(native_offset),
-                                                  static_cast<uint32_t>(native_size)};
-               }
-            }
+         auto reference = parse_wasm_native_ref(name, mod);
+         if (!reference)
+            return llvm_aot_result{.error = llvm::toString(reference.takeError()) + ": " + name};
+         const std::pair<uint32_t, uint32_t> range{
+            static_cast<uint32_t>(native_offset), static_cast<uint32_t>(native_size)};
+         if (reference->kind == wasm_native_kind::import_thunk) {
+            result.import_thunk_offsets[reference->index] = range;
+            result.import_thunk_stack_sizes[reference->index] = native_frame;
+         } else if (reference->kind == wasm_native_kind::entry) {
+            const auto code_index = reference->index - num_imports;
+            result.entry_stack_sizes[code_index] = native_frame;
+            result.function_offsets[code_index] = range;
+         } else if (reference->kind == wasm_native_kind::body) {
+            const auto code_index = reference->index - num_imports;
+            result.body_stack_sizes[code_index] = native_frame;
+            result.body_offsets[code_index] = range;
          }
       }
 
