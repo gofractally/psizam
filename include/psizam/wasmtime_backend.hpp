@@ -164,7 +164,8 @@ namespace feature {
 
 // Both profiles are deterministic. They differ only in relaxed madd/nmadd:
 // performance fuses (one rounding), strict follows the WebAssembly
-// deterministic profile (two roundings). Strict needs the wasmtime fork.
+// deterministic profile (two roundings). wasmtime has no setting for the
+// strict form, so under it modules are rewritten before they are compiled.
 enum class float_profile : uint32_t { performance = 0, strict = 1 };
 
 struct engine_options {

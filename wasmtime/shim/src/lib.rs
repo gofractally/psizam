@@ -30,7 +30,8 @@ pub const PZWT_FEATURE_SATURATING_FLOAT_TO_INT: u32 = 1 << 8;
 
 /// Deterministic float profiles. `Performance` is wasmtime's own deterministic
 /// behaviour (fused relaxed madd). `Strict` is the WebAssembly deterministic
-/// profile (unfused relaxed madd) and needs the psizam fork of wasmtime.
+/// profile (unfused relaxed madd); modules are rewritten before compiling to
+/// get it, since wasmtime has no setting for it.
 pub const PZWT_FLOAT_PERFORMANCE: u32 = 0;
 pub const PZWT_FLOAT_STRICT: u32 = 1;
 
@@ -141,6 +142,7 @@ pub struct PzwtEngine {
     engine: Engine,
     epoch_interruption: bool,
     native_stack: usize,
+    strict_float: bool,
 }
 
 #[no_mangle]
@@ -149,13 +151,8 @@ pub unsafe extern "C" fn pzwt_engine_new(
     error: *mut PzwtError,
 ) -> *mut PzwtEngine {
     let config = &*config;
-    if config.float_profile != PZWT_FLOAT_PERFORMANCE {
-        set_error(
-            error,
-            PZWT_ERROR,
-            0,
-            "the strict float profile (unfused relaxed madd) needs the psizam wasmtime fork".into(),
-        );
+    if config.float_profile > PZWT_FLOAT_STRICT {
+        set_error(error, PZWT_ERROR, 0, "unknown float profile".into());
         return std::ptr::null_mut();
     }
     let has = |bit: u32| config.features & bit != 0;
@@ -210,6 +207,7 @@ pub unsafe extern "C" fn pzwt_engine_new(
             engine,
             epoch_interruption: config.epoch_interruption != 0,
             native_stack: config.native_stack as usize,
+            strict_float: config.float_profile == PZWT_FLOAT_STRICT,
         })),
         Err(e) => {
             report(error, &e);
@@ -265,7 +263,7 @@ pub unsafe extern "C" fn pzwt_module_new_metered(
 ) -> *mut PzwtModule {
     let bytes = std::slice::from_raw_parts(bytes, len);
     let costs = std::slice::from_raw_parts(costs, costs_len);
-    let metered = match stack_meter::add_stack_accounting(bytes, costs) {
+    let metered = match stack_meter::rewrite(bytes, Some(costs), (*engine).strict_float) {
         Ok(m) => m,
         Err(e) => {
             set_error(error, PZWT_ERROR, 0, format!("stack accounting: {e}"));
@@ -289,6 +287,27 @@ pub unsafe extern "C" fn pzwt_module_new(
     error: *mut PzwtError,
 ) -> *mut PzwtModule {
     let bytes = std::slice::from_raw_parts(bytes, len);
+    // The strict profile is a rewrite of the module. Text is assembled first.
+    let rewritten;
+    let bytes = if (*engine).strict_float {
+        let binary = match wat::parse_bytes(bytes) {
+            Ok(b) => b,
+            Err(e) => {
+                set_error(error, PZWT_ERROR, 0, e.to_string());
+                return std::ptr::null_mut();
+            }
+        };
+        rewritten = match stack_meter::rewrite(&binary, None, true) {
+            Ok(m) => m,
+            Err(e) => {
+                set_error(error, PZWT_ERROR, 0, format!("strict float profile: {e}"));
+                return std::ptr::null_mut();
+            }
+        };
+        rewritten.as_slice()
+    } else {
+        bytes
+    };
     match Module::new(&(*engine).engine, bytes) {
         Ok(m) => Box::into_raw(Box::new(PzwtModule(m))),
         Err(e) => {

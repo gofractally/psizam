@@ -37,7 +37,12 @@ pub const MEMORY_EXPORT: &str = "psizam:memory";
 pub const OVERFLOW_SENTINEL: u32 = u32::MAX;
 
 struct Meter<'a> {
-    costs: &'a [u32],
+    /// Per-function byte costs, or `None` to leave stack use unmetered.
+    costs: Option<&'a [u32]>,
+    /// Replace relaxed multiply-add with a separate multiply and add.
+    unfuse_madd: bool,
+    /// Parameter count of each defined function, in code-section order.
+    params: Vec<u32>,
     /// Result types of each defined function, in code-section order.
     results: Vec<Vec<wasmparser::ValType>>,
     stack_global: u32,
@@ -122,9 +127,11 @@ impl Reencode for Meter<'_> {
         section: wasmparser::GlobalSectionReader<'_>,
     ) -> Result<(), Error<String>> {
         wasm_encoder::reencode::utils::parse_global_section(self, globals, section)?;
-        let (ty, init) = self.counter_global();
-        globals.global(ty, &init);
-        self.added_global = true;
+        if self.costs.is_some() {
+            let (ty, init) = self.counter_global();
+            globals.global(ty, &init);
+            self.added_global = true;
+        }
         Ok(())
     }
 
@@ -134,7 +141,9 @@ impl Reencode for Meter<'_> {
         section: wasmparser::ExportSectionReader<'_>,
     ) -> Result<(), Error<String>> {
         wasm_encoder::reencode::utils::parse_export_section(self, exports, section)?;
-        self.add_exports(exports);
+        if self.costs.is_some() {
+            self.add_exports(exports);
+        }
         Ok(())
     }
 
@@ -144,6 +153,9 @@ impl Reencode for Meter<'_> {
         _after: Option<SectionId>,
         before: Option<SectionId>,
     ) -> Result<(), Error<String>> {
+        if self.costs.is_none() {
+            return Ok(());
+        }
         // A module with no global or export section still needs the counter:
         // add the missing section where it belongs.
         let next = match before {
@@ -175,44 +187,79 @@ impl Reencode for Meter<'_> {
     ) -> Result<(), Error<String>> {
         let index = self.next_function;
         self.next_function += 1;
-        let cost = *self
-            .costs
-            .get(index)
-            .ok_or_else(|| Error::UserError("fewer stack costs than functions".to_string()))?;
-        if cost >= 1 << 31 {
-            return Err(Error::UserError("function stack cost is too large".to_string()));
+
+        // Locals, plus two v128 scratch locals if a multiply-add is rewritten.
+        let mut locals = Vec::new();
+        let mut local_count = *self.params.get(index).unwrap_or(&0);
+        for entry in func.get_locals_reader()? {
+            let (count, ty) = entry?;
+            local_count = local_count
+                .checked_add(count)
+                .ok_or_else(|| Error::UserError("too many locals".to_string()))?;
+            locals.push((count, self.val_type(ty)?));
         }
-        let cost = cost as i32;
-        let results = self.results.get(index).cloned().unwrap_or_default();
-        let block = match results.as_slice() {
-            [] => BlockType::Empty,
-            [one] => BlockType::Result(self.val_type(*one)?),
-            _ => BlockType::FunctionType(self.block_types[index].ok_or_else(|| {
-                Error::UserError("missing block type for a multi-result function".to_string())
-            })?),
+        let mut scratch = None;
+        if self.unfuse_madd {
+            let mut reader = func.get_operators_reader()?;
+            while !reader.eof() {
+                if matches!(
+                    reader.read()?,
+                    Operator::F32x4RelaxedMadd
+                        | Operator::F32x4RelaxedNmadd
+                        | Operator::F64x2RelaxedMadd
+                        | Operator::F64x2RelaxedNmadd
+                ) {
+                    scratch = Some(local_count);
+                    locals.push((2, ValType::V128));
+                    break;
+                }
+            }
+        }
+        let mut f = wasm_encoder::Function::new(locals);
+
+        let metered = match self.costs {
+            Some(costs) => {
+                let cost = *costs.get(index).ok_or_else(|| {
+                    Error::UserError("fewer stack costs than functions".to_string())
+                })?;
+                if cost >= 1 << 31 {
+                    return Err(Error::UserError("function stack cost is too large".to_string()));
+                }
+                Some(cost as i32)
+            }
+            None => None,
         };
         let g = self.stack_global;
-
-        let mut f = self.new_function_with_parsed_locals(&func)?;
-        // if remaining < cost: mark the counter and trap
-        f.instruction(&Instruction::GlobalGet(g));
-        f.instruction(&Instruction::I32Const(cost));
-        f.instruction(&Instruction::I32LtU);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::I32Const(OVERFLOW_SENTINEL as i32));
-        f.instruction(&Instruction::GlobalSet(g));
-        f.instruction(&Instruction::Unreachable);
-        f.instruction(&Instruction::End);
-        // remaining -= cost
-        f.instruction(&Instruction::GlobalGet(g));
-        f.instruction(&Instruction::I32Const(cost));
-        f.instruction(&Instruction::I32Sub);
-        f.instruction(&Instruction::GlobalSet(g));
-        // The original body runs inside one block, so that every way of
-        // leaving it normally arrives at the code that gives the bytes back.
-        // A branch to the function's own label already lands there, because
-        // the block takes that label's place; `return` is turned into one.
-        f.instruction(&Instruction::Block(block));
+        if let Some(cost) = metered {
+            let results = self.results.get(index).cloned().unwrap_or_default();
+            let block = match results.as_slice() {
+                [] => BlockType::Empty,
+                [one] => BlockType::Result(self.val_type(*one)?),
+                _ => BlockType::FunctionType(self.block_types[index].ok_or_else(|| {
+                    Error::UserError("missing block type for a multi-result function".to_string())
+                })?),
+            };
+            // if remaining < cost: mark the counter and trap
+            f.instruction(&Instruction::GlobalGet(g));
+            f.instruction(&Instruction::I32Const(cost));
+            f.instruction(&Instruction::I32LtU);
+            f.instruction(&Instruction::If(BlockType::Empty));
+            f.instruction(&Instruction::I32Const(OVERFLOW_SENTINEL as i32));
+            f.instruction(&Instruction::GlobalSet(g));
+            f.instruction(&Instruction::Unreachable);
+            f.instruction(&Instruction::End);
+            // remaining -= cost
+            f.instruction(&Instruction::GlobalGet(g));
+            f.instruction(&Instruction::I32Const(cost));
+            f.instruction(&Instruction::I32Sub);
+            f.instruction(&Instruction::GlobalSet(g));
+            // The original body runs inside one block, so that every way of
+            // leaving it normally arrives at the code that gives the bytes
+            // back. A branch to the function's own label already lands there,
+            // because the block takes that label's place; `return` is turned
+            // into one.
+            f.instruction(&Instruction::Block(block));
+        }
 
         let mut reader = func.get_operators_reader()?;
         let mut depth: u32 = 0;
@@ -226,27 +273,55 @@ impl Reencode for Meter<'_> {
                 | Operator::TryTable { .. }
                 | Operator::Try { .. } => depth += 1,
                 Operator::End if depth == 0 => {
-                    // End of the function: close the block, give the bytes back.
-                    f.instruction(&Instruction::End);
-                    f.instruction(&Instruction::GlobalGet(g));
-                    f.instruction(&Instruction::I32Const(cost));
-                    f.instruction(&Instruction::I32Add);
-                    f.instruction(&Instruction::GlobalSet(g));
+                    if let Some(cost) = metered {
+                        // End of the function: close the block, give the bytes back.
+                        f.instruction(&Instruction::End);
+                        f.instruction(&Instruction::GlobalGet(g));
+                        f.instruction(&Instruction::I32Const(cost));
+                        f.instruction(&Instruction::I32Add);
+                        f.instruction(&Instruction::GlobalSet(g));
+                    }
                     f.instruction(&Instruction::End);
                     closed = true;
                     continue;
                 }
                 Operator::End => depth -= 1,
-                Operator::Return => {
+                Operator::Return if metered.is_some() => {
                     f.instruction(&Instruction::Br(depth));
                     continue;
                 }
                 Operator::ReturnCall { .. }
                 | Operator::ReturnCallIndirect { .. }
-                | Operator::ReturnCallRef { .. } => {
+                | Operator::ReturnCallRef { .. }
+                    if metered.is_some() =>
+                {
                     return Err(Error::UserError(
                         "stack accounting does not support tail calls".to_string(),
                     ))
+                }
+                // relaxed_madd(a, b, c) = a*b + c and relaxed_nmadd = (-a)*b + c,
+                // each as two separately rounded operations. The operands
+                // arrive as a, b, c with c on top.
+                Operator::F32x4RelaxedMadd | Operator::F64x2RelaxedMadd if scratch.is_some() => {
+                    let t = scratch.unwrap();
+                    let wide = matches!(op, Operator::F64x2RelaxedMadd);
+                    f.instruction(&Instruction::LocalSet(t));
+                    f.instruction(if wide { &Instruction::F64x2Mul } else { &Instruction::F32x4Mul });
+                    f.instruction(&Instruction::LocalGet(t));
+                    f.instruction(if wide { &Instruction::F64x2Add } else { &Instruction::F32x4Add });
+                    continue;
+                }
+                Operator::F32x4RelaxedNmadd | Operator::F64x2RelaxedNmadd if scratch.is_some() => {
+                    let t = scratch.unwrap();
+                    let wide = matches!(op, Operator::F64x2RelaxedNmadd);
+                    f.instruction(&Instruction::LocalSet(t));
+                    f.instruction(&Instruction::LocalSet(t + 1));
+                    f.instruction(if wide { &Instruction::F64x2Neg } else { &Instruction::F32x4Neg });
+                    f.instruction(&Instruction::LocalGet(t + 1));
+                    f.instruction(if wide { &Instruction::F64x2Mul } else { &Instruction::F32x4Mul });
+                    f.instruction(&Instruction::LocalGet(t));
+                    f.instruction(if wide { &Instruction::F64x2Add } else { &Instruction::F32x4Add });
+                    continue;
                 }
                 _ => {}
             }
@@ -295,10 +370,17 @@ fn strip_start(wasm: &[u8]) -> Result<(Vec<u8>, Option<u32>), String> {
     Ok((out, start))
 }
 
-/// Returns `wasm` with stack accounting added. `costs` has one entry per
-/// defined function, in order.
-pub fn add_stack_accounting(wasm: &[u8], costs: &[u32]) -> Result<Vec<u8>, String> {
-    let (stripped, start) = strip_start(wasm)?;
+/// Returns `wasm` rewritten. With `costs` (one entry per defined function, in
+/// order) stack accounting is added. With `unfuse_madd`, relaxed multiply-add
+/// becomes a multiply followed by an add, which is the WebAssembly
+/// deterministic profile's definition; without it the engine's own (fused)
+/// behaviour stands.
+pub fn rewrite(wasm: &[u8], costs: Option<&[u32]>, unfuse_madd: bool) -> Result<Vec<u8>, String> {
+    let (stripped, start) = if costs.is_some() {
+        strip_start(wasm)?
+    } else {
+        (wasm.to_vec(), None)
+    };
     let wasm = stripped.as_slice();
     // (parameter count, results) of every type, by index.
     let mut signatures: Vec<(usize, Vec<wasmparser::ValType>)> = Vec::new();
@@ -356,13 +438,19 @@ pub fn add_stack_accounting(wasm: &[u8], costs: &[u32]) -> Result<Vec<u8>, Strin
             _ => {}
         }
     }
-    if costs.len() != function_types.len() {
-        return Err(format!(
-            "{} stack costs for {} functions",
-            costs.len(),
-            function_types.len()
-        ));
+    if let Some(costs) = costs {
+        if costs.len() != function_types.len() {
+            return Err(format!(
+                "{} stack costs for {} functions",
+                costs.len(),
+                function_types.len()
+            ));
+        }
     }
+    let params = function_types
+        .iter()
+        .map(|t| signatures.get(*t as usize).map_or(0, |(params, _)| *params as u32))
+        .collect();
     let results: Vec<Vec<wasmparser::ValType>> = function_types
         .iter()
         .map(|t| types.get(*t as usize).cloned().unwrap_or_default())
@@ -373,7 +461,7 @@ pub fn add_stack_accounting(wasm: &[u8], costs: &[u32]) -> Result<Vec<u8>, Strin
     let block_types = results
         .iter()
         .map(|r| {
-            if r.len() < 2 {
+            if r.len() < 2 || costs.is_none() {
                 return None;
             }
             if let Some(i) = signatures.iter().position(|(params, res)| *params == 0 && res == r) {
@@ -389,6 +477,8 @@ pub fn add_stack_accounting(wasm: &[u8], costs: &[u32]) -> Result<Vec<u8>, Strin
 
     let mut meter = Meter {
         costs,
+        unfuse_madd,
+        params,
         results,
         stack_global: globals,
         next_function: 0,
@@ -405,7 +495,7 @@ pub fn add_stack_accounting(wasm: &[u8], costs: &[u32]) -> Result<Vec<u8>, Strin
     meter
         .parse_core_module(&mut module, Parser::new(0), wasm)
         .map_err(|e| e.to_string())?;
-    if !meter.added_global || !meter.added_export {
+    if costs.is_some() && (!meter.added_global || !meter.added_export) {
         return Err("could not place the stack counter in the module".to_string());
     }
     Ok(module.finish())

@@ -259,11 +259,46 @@ TEST_CASE("wasmtime: only the proposals the options name are accepted")
    CHECK_NOTHROW(wide.compile("(module (func (result i32 i32) (i32.const 1) (i32.const 2)))"));
 }
 
-TEST_CASE("wasmtime: the strict float profile is refused until the fork provides it")
+TEST_CASE("wasmtime: the two float profiles differ exactly in how relaxed madd rounds")
 {
-   wt::engine_options options;
-   options.fp = wt::float_profile::strict;
-   CHECK_THROWS_AS(wt::runtime<host>(options), wt::error);
+   // (1+ulp)^2 - (1+2ulp): the exact product is 1+2ulp+ulp^2. Rounding the
+   // product first loses ulp^2 and the sum is zero; a fused multiply-add
+   // keeps it.
+   constexpr std::string_view text = R"((module
+     (func (export "madd") (param i32 i32 i32) (result i32)
+       (i32x4.extract_lane 0 (f32x4.relaxed_madd (i32x4.splat (local.get 0))
+         (i32x4.splat (local.get 1)) (i32x4.splat (local.get 2)))))
+     (func (export "nmadd") (param i32 i32 i32) (result i32)
+       (i32x4.extract_lane 0 (f32x4.relaxed_nmadd (i32x4.splat (local.get 0))
+         (i32x4.splat (local.get 1)) (i32x4.splat (local.get 2)))))
+     (func (export "madd64") (param i64 i64 i64) (result i64)
+       (i64x2.extract_lane 0 (f64x2.relaxed_madd (i64x2.splat (local.get 0))
+         (i64x2.splat (local.get 1)) (i64x2.splat (local.get 2)))))
+   ))";
+   struct none {};
+   none n;
+   auto run = [&](wt::float_profile profile) {
+      wt::engine_options options;
+      options.fp = profile;
+      wt::runtime<none>  rt(options);
+      wt::instance<none> inst(rt, rt.compile(text), n);
+      return std::tuple{
+          inst.call<uint32_t, uint32_t, uint32_t, uint32_t>("madd", 0x3f800001u, 0x3f800001u,
+                                                           0xbf800002u),
+          inst.call<uint32_t, uint32_t, uint32_t, uint32_t>("nmadd", 0x3f800001u, 0x3f800001u,
+                                                            0x3f800002u),
+          inst.call<uint64_t, uint64_t, uint64_t, uint64_t>("madd64", 0x3ff0000000000001ull,
+                                                           0x3ff0000000000001ull,
+                                                           0xbff0000000000002ull)};
+   };
+   auto [strict_madd, strict_nmadd, strict_madd64] = run(wt::float_profile::strict);
+   CHECK(strict_madd == 0u);
+   CHECK(strict_nmadd == 0u);
+   CHECK(strict_madd64 == 0ull);
+   auto [fused_madd, fused_nmadd, fused_madd64] = run(wt::float_profile::performance);
+   CHECK(fused_madd == 0x28800000u);              // 2^-46
+   CHECK(fused_nmadd == 0xa8800000u);             // -2^-46
+   CHECK(fused_madd64 == 0x3970000000000000ull);  // 2^-104
 }
 
 TEST_CASE("wasmtime: a compiled module survives serialize and load")
@@ -290,43 +325,60 @@ struct float_options {
 //    profile) like regular min/max.
 //  - relaxed_madd/nmadd: psizam is unfused (the profile's choice); wasmtime is
 //    fused. This is the one point where the two float profiles differ.
-const std::set<std::string> known_differences = {
-    "f32_demote",          "f64_promote",         "f32x4_demote",       "f64x2_promote",
-    "f32x4_relaxed_min",   "f32x4_relaxed_max",   "f64x2_relaxed_min",  "f64x2_relaxed_max",
-    "f32x4_relaxed_madd",  "f32x4_relaxed_nmadd", "f64x2_relaxed_madd", "f64x2_relaxed_nmadd",
+const std::set<std::string> rounding_differences = {
+    "f32x4_relaxed_madd", "f32x4_relaxed_nmadd", "f64x2_relaxed_madd", "f64x2_relaxed_nmadd",
+};
+const std::set<std::string> other_differences = {
+    "f32_demote",        "f64_promote",       "f32x4_demote",      "f64x2_promote",
+    "f32x4_relaxed_min", "f32x4_relaxed_max", "f64x2_relaxed_min", "f64x2_relaxed_max",
 };
 }  // namespace
 
 TEST_CASE("wasmtime: float and SIMD results agree bit for bit with psizam")
 {
    auto code = psizam::read_wasm(FLOAT_PARITY_WASM);
-
+   psizam::wasm_allocator                                      wa;
+   psizam::backend<std::nullptr_t, psizam::jit, float_options> reference(code, &wa,
+                                                                         float_options{});
    struct none {};
-   wt::runtime<none>  rt;
-   none               n;
-   wt::instance<none> wasmtime(rt, rt.compile(std::span<const uint8_t>(code)), n);
-
-   psizam::wasm_allocator                                          wa;
-   psizam::backend<std::nullptr_t, psizam::jit, float_options>     reference(code, &wa,
-                                                                             float_options{});
-
-   size_t checked = 0, still_different = 0;
-   for (const char* op : float_parity_ops)
+   none n;
+   // psizam's relaxed madd is unfused today, which is the strict profile. So
+   // under strict the madd operations must match it too, and under
+   // performance they must not.
+   for (auto profile : {wt::float_profile::strict, wt::float_profile::performance})
    {
-      auto ours   = wasmtime.call<uint64_t>(op);
-      auto theirs = reference.call_with_return("env", op)->to_ui64();
-      if (known_differences.count(op))
+      const bool strict = profile == wt::float_profile::strict;
+      INFO((strict ? "strict profile" : "performance profile"));
+      wt::engine_options options;
+      options.fp = profile;
+      wt::runtime<none>  rt(options);
+      wt::instance<none> wasmtime(rt, rt.compile(std::span<const uint8_t>(code)), n);
+
+      size_t checked = 0, still_different = 0;
+      for (const char* op : float_parity_ops)
       {
-         still_different += ours != theirs;
-         continue;
+         auto ours   = wasmtime.call<uint64_t>(op);
+         auto theirs = reference.call_with_return("env", op)->to_ui64();
+         if (other_differences.count(op))
+         {
+            still_different += ours != theirs;
+            continue;
+         }
+         INFO("operation " << op);
+         if (rounding_differences.count(op) && !strict)
+         {
+            CHECK(ours != theirs);
+            continue;
+         }
+         CHECK(ours == theirs);
+         ++checked;
       }
-      INFO("operation " << op);
-      CHECK(ours == theirs);
-      ++checked;
+      CHECK(checked == std::size(float_parity_ops) - other_differences.size() -
+                           (strict ? 0 : rounding_differences.size()));
+      WARN((strict ? "strict: " : "performance: ")
+           << still_different << " of " << other_differences.size()
+           << " operations psizam is known to define differently still differ");
    }
-   CHECK(checked == std::size(float_parity_ops) - known_differences.size());
-   WARN(still_different << " of " << known_differences.size()
-                        << " known-different operations still differ from psizam");
 }
 
 // ── deterministic stack accounting ──────────────────────────────────────────
