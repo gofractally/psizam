@@ -264,6 +264,13 @@ namespace detail {
       }
    };
 
+   // Whether loading a T looks at linear memory. Spans do; a value_traits
+   // specialization for another pointer-like type says so with
+   // `static constexpr bool reads_memory = true`.
+   template <typename T>
+   inline constexpr bool reads_memory =
+       requires { requires value_traits<T>::reads_memory; } || value_traits<T>::types.size() > 1;
+
    template <typename... Args>
    constexpr auto param_types()
    {
@@ -300,8 +307,7 @@ namespace detail {
       static constexpr auto params  = param_types<Args...>();
       static constexpr auto results = result_types<R>();
       // Only functions with a pointer argument need linear memory looked up.
-      static constexpr bool needs_memory =
-          ((value_traits<std::decay_t<Args>>::types.size() > 1) || ...);
+      static constexpr bool needs_memory = (reads_memory<std::decay_t<Args>> || ...);
 
       static int32_t invoke(void*, abi::PzwtContext* context, void* host, uint8_t* memory,
                             size_t memory_len, abi::PzwtValue* values) noexcept
@@ -452,6 +458,10 @@ class runtime {
       linker_.reset();
       return *this;
    }
+
+   // Builds the import table now. Call once the host functions are added and
+   // before instances are created from several threads.
+   void link() const { (void)linker(); }
 
    // Compiles wasm (binary or text). Validation here is wasmtime's; the
    // embedder's own admission rules must already have passed.
