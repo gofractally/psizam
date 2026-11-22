@@ -122,4 +122,57 @@
     i64.const 28
     i64.shr_u
     i32.wrap_i64)
+
+  ;; A shuffle's sixteen lane indices are an immediate. Read as operand
+  ;; registers they name the scalar values below, which then reach the call
+  ;; from vector storage that was never written.
+  (func $weigh3 (param i32 i32 i32) (result i32)
+    (i32.add (i32.mul (local.get 0) (i32.const 10000))
+      (i32.add (i32.mul (local.get 1) (i32.const 100)) (local.get 2))))
+  (func (export "shuffle-lanes-are-immediate") (param i32) (result i32)
+    (call $weigh3
+      (i32.add (local.get 0) (i32.const 1))
+      (i32.add (local.get 0) (i32.const 2))
+      (i32.add (local.get 0) (i32.const 3)))
+    (i8x16.extract_lane_u 0
+      (i8x16.shuffle 0 0 0 0 0 0 0 0 0 0 0 0 1 0 2 0
+        (v128.const i8x16 7 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (v128.const i8x16 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9)))
+    i32.add
+    (i8x16.extract_lane_u 0
+      (i8x16.shuffle 0 0 0 0 0 0 0 0 0 0 3 0 4 0 5 0
+        (v128.const i8x16 7 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (v128.const i8x16 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9)))
+    i32.add
+    (i8x16.extract_lane_u 0
+      (i8x16.shuffle 0 0 0 0 0 0 0 0 0 0 6 0 7 0 8 0
+        (v128.const i8x16 7 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (v128.const i8x16 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9)))
+    i32.add
+    (i8x16.extract_lane_u 0
+      (i8x16.shuffle 0 0 0 0 0 0 0 0 0 0 9 0 10 0 11 0
+        (v128.const i8x16 7 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (v128.const i8x16 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9)))
+    i32.add
+    (i8x16.extract_lane_u 0
+      (i8x16.shuffle 0 0 0 0 0 0 0 0 0 0 12 0 13 0 14 0
+        (v128.const i8x16 7 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (v128.const i8x16 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9)))
+    i32.add
+    (i8x16.extract_lane_u 0
+      (i8x16.shuffle 0 0 0 0 0 0 0 0 0 0 15 0 16 0 17 0
+        (v128.const i8x16 7 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (v128.const i8x16 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9)))
+    i32.add
+    (i8x16.extract_lane_u 0
+      (i8x16.shuffle 0 0 0 0 0 0 0 0 0 0 18 0 19 0 20 0
+        (v128.const i8x16 7 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (v128.const i8x16 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9)))
+    i32.add
+    (i8x16.extract_lane_u 0
+      (i8x16.shuffle 0 0 0 0 0 0 0 0 0 0 21 0 22 0 23 0
+        (v128.const i8x16 7 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (v128.const i8x16 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9)))
+    i32.add
+)
 )

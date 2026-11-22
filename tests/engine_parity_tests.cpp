@@ -185,6 +185,10 @@ void matches_or_refuses(Run&& run) {
    CHECK(actual == wide_simd_expected);
 }
 }
+TEST_CASE("Shuffle lane indices are never taken for operand registers", "[parity][simd]") {
+   expect_parity(ENGINE_PARITY_WASM, {{"shuffle-lanes-are-immediate", 0}, {"shuffle-lanes-are-immediate", 4}},
+                 {value(10203 + 8 * 7), value(50607 + 8 * 7)});
+}
 TEST_CASE("JIT1 runs a function with more than 65535 values and SIMD", "[parity][simd]") {
    CHECK(native<jit>(ENGINE_PARITY_WIDE_SIMD_WASM, wide_simd_calls) == wide_simd_expected);
 }

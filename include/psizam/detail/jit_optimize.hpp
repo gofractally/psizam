@@ -299,6 +299,9 @@ namespace psizam::detail {
                break;
             case ir_op::v128_op: {
                auto sub = static_cast<simd_sub>(inst.dest);
+               // Shuffle's mask bytes overlay these fields; its operands are
+               // counted through the arg instructions that precede it.
+               if (sub == simd_sub::i8x16_shuffle) break;
                // For scalar-producing ops, addr is a DEST vreg, not a source.
                // For bitselect, addr holds a v128 mask vreg (not a GP use).
                if (!simd_produces_scalar(sub) && sub != simd_sub::v128_bitselect

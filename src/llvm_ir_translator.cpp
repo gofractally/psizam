@@ -1166,6 +1166,11 @@ namespace psizam::detail {
                   if (sinst.dest < func.next_vreg) is_v128[sinst.dest] = true;
                } else if (sinst.opcode == ir_op::v128_op) {
                   auto ssub = static_cast<simd_sub>(sinst.dest);
+                  // i8x16_shuffle keeps its 16 mask bytes in immv128, which
+                  // overlays the simd operand fields: they are not vregs. Its
+                  // operands arrive as v128 args and its result through the
+                  // nop marker that follows, both handled below.
+                  if (ssub == simd_sub::i8x16_shuffle) continue;
                   if (sinst.simd.v_src1 < func.next_vreg) is_v128[sinst.simd.v_src1] = true;
                   if (sinst.simd.v_src2 < func.next_vreg && sinst.simd.v_src2 != 0xFFFF)
                      is_v128[sinst.simd.v_src2] = true;
