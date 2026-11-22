@@ -559,6 +559,13 @@ namespace psizam::detail {
 
       void* emit_error_handler(void (*handler)(), reloc_symbol sym) {
          void* result = code;
+         if (_enable_backtrace) {
+            // Give a trap observer a frame to walk from: host C++ built without
+            // frame pointers has no chain back into generated code.
+            this->emit_bytes(0xe8); this->emit_operand32(0); // callq next
+            this->emit_bytes(0x55);                           // pushq %rbp
+            this->emit_bytes(0x48, 0x89, 0x27);               // movq %rsp, (%rdi)
+         }
          this->emit_bytes(0x48, 0x83, 0xe4, 0xf0); // andq $-16, %rsp
          this->emit_bytes(0x48, 0xb8);
          emit_reloc(sym);
