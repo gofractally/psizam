@@ -64,6 +64,7 @@ TEMPLATE_TEST_CASE("AArch64 JIT1 proper tails replace signatures without native 
    using impl = std::conditional_t<std::is_same_v<TestType, traced_tail_byte_options>, psizam::jit_profile, psizam::jit>;
    psizam::backend<functions, impl, TestType> vm(fixture(), &allocator, TestType{});
    functions::resolve(vm.get_module());
+   CHECK(vm.get_module().native_guest_abi == psizam::native_guest_abi::jit_callee_cleanup);
    observations observed;
    observed.remaining = [&] { return vm.get_context().get_remaining_call_depth(); };
    struct scope {

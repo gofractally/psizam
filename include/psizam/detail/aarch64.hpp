@@ -120,6 +120,10 @@ namespace psizam::detail {
          _enable_backtrace(enable_backtrace), _stack_limit_is_bytes(stack_limit_is_bytes),
          _compile_result(result) {
 
+         _mod.native_guest_abi = psizam::native_guest_abi::jit_callee_cleanup;
+         if (_compile_result)
+            _compile_result->native_guest_abi = _mod.native_guest_abi;
+
          // Scale veneer island capacity with function count
          uint32_t num_funcs = mod.get_functions_total();
          _veneer_island_slots = std::max(uint32_t(2048), num_funcs * 2);
