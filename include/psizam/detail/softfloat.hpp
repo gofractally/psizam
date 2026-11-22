@@ -764,19 +764,19 @@ inline v128_t _psizam_f32x4_sqrt(v128_t a) {
 }
 
 inline v128_t _psizam_f32x4_add(v128_t a, v128_t b) {
-   return apply_f32x4(a, b, ::f32_add);
+   return apply_f32x4(a, b, _psizam_f32_add);
 }
 
 inline v128_t _psizam_f32x4_sub(v128_t a, v128_t b) {
-   return apply_f32x4(a, b, ::f32_sub);
+   return apply_f32x4(a, b, _psizam_f32_sub);
 }
 
 inline v128_t _psizam_f32x4_mul(v128_t a, v128_t b) {
-   return apply_f32x4(a, b, ::f32_mul);
+   return apply_f32x4(a, b, _psizam_f32_mul);
 }
 
 inline v128_t _psizam_f32x4_div(v128_t a, v128_t b) {
-   return apply_f32x4(a, b, ::f32_div);
+   return apply_f32x4(a, b, _psizam_f32_div);
 }
 
 inline v128_t _psizam_f32x4_min(v128_t a, v128_t b) {
@@ -902,19 +902,19 @@ inline v128_t _psizam_f64x2_sqrt(v128_t a) {
 }
 
 inline v128_t _psizam_f64x2_add(v128_t a, v128_t b) {
-   return apply_f64x2(a, b, ::f64_add);
+   return apply_f64x2(a, b, _psizam_f64_add);
 }
 
 inline v128_t _psizam_f64x2_sub(v128_t a, v128_t b) {
-   return apply_f64x2(a, b, ::f64_sub);
+   return apply_f64x2(a, b, _psizam_f64_sub);
 }
 
 inline v128_t _psizam_f64x2_mul(v128_t a, v128_t b) {
-   return apply_f64x2(a, b, ::f64_mul);
+   return apply_f64x2(a, b, _psizam_f64_mul);
 }
 
 inline v128_t _psizam_f64x2_div(v128_t a, v128_t b) {
-   return apply_f64x2(a, b, ::f64_div);
+   return apply_f64x2(a, b, _psizam_f64_div);
 }
 
 inline v128_t _psizam_f64x2_min(v128_t a, v128_t b) {
@@ -1044,15 +1044,15 @@ inline v128_t _psizam_i16x8_relaxed_dot_i8x16_i7x16_s(v128_t a, v128_t b) {
 
 inline v128_t _psizam_i32x4_relaxed_dot_i8x16_i7x16_add_s(v128_t a, v128_t b, v128_t c) {
    std::int8_t va[16], vb[16];
-   std::int32_t vc[4];
+   std::uint32_t vc[4];
    std::memcpy(va, &a, 16);
    std::memcpy(vb, &b, 16);
    std::memcpy(vc, &c, 16);
-   std::int32_t r[4];
+   std::uint32_t r[4];
    for (int i = 0; i < 4; ++i) {
-      int32_t sum = vc[i];
+      uint32_t sum = vc[i];
       for (int j = 0; j < 4; ++j)
-         sum += static_cast<int32_t>(va[4*i+j]) * static_cast<int32_t>(vb[4*i+j]);
+         sum += static_cast<uint32_t>(static_cast<int32_t>(va[4*i+j]) * static_cast<int32_t>(vb[4*i+j]));
       r[i] = sum;
    }
    v128_t res;

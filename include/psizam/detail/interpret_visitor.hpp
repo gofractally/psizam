@@ -2591,18 +2591,32 @@ namespace psizam::detail {
       }
       // Relaxed SIMD ops
       [[gnu::always_inline]] inline void operator()(const f32x4_relaxed_madd_t&) {
-         // fma: a*b+c
-         v128_ternop<float[4]>([](float a, float b, float c) -> float { return a * b + c; });
+         v128_ternop<float[4]>([this](float a, float b, float c) -> float {
+            if (context.fp() != fp_mode::fast)
+               return _psizam_f32_add(_psizam_f32_mul(a, b), c);
+            return a * b + c;
+         });
       }
       [[gnu::always_inline]] inline void operator()(const f32x4_relaxed_nmadd_t&) {
-         // nfma: -a*b+c
-         v128_ternop<float[4]>([](float a, float b, float c) -> float { return -(a * b) + c; });
+         v128_ternop<float[4]>([this](float a, float b, float c) -> float {
+            if (context.fp() != fp_mode::fast)
+               return _psizam_f32_add(_psizam_f32_neg(_psizam_f32_mul(a, b)), c);
+            return -(a * b) + c;
+         });
       }
       [[gnu::always_inline]] inline void operator()(const f64x2_relaxed_madd_t&) {
-         v128_ternop<double[2]>([](double a, double b, double c) -> double { return a * b + c; });
+         v128_ternop<double[2]>([this](double a, double b, double c) -> double {
+            if (context.fp() != fp_mode::fast)
+               return _psizam_f64_add(_psizam_f64_mul(a, b), c);
+            return a * b + c;
+         });
       }
       [[gnu::always_inline]] inline void operator()(const f64x2_relaxed_nmadd_t&) {
-         v128_ternop<double[2]>([](double a, double b, double c) -> double { return -(a * b) + c; });
+         v128_ternop<double[2]>([this](double a, double b, double c) -> double {
+            if (context.fp() != fp_mode::fast)
+               return _psizam_f64_add(_psizam_f64_neg(_psizam_f64_mul(a, b)), c);
+            return -(a * b) + c;
+         });
       }
       [[gnu::always_inline]] inline void operator()(const i16x8_relaxed_dot_i8x16_i7x16_s_t&) {
          // Dot product: for each i16 lane, sum of pairwise products of i8 lanes
@@ -2628,15 +2642,15 @@ namespace psizam::detail {
          v128_t c2 = context.pop_operand().to_v128(); // b
          v128_t c1 = context.pop_operand().to_v128(); // a
          std::int8_t a[16], b[16];
-         std::int32_t c[4];
+         std::uint32_t c[4];
          std::memcpy(a, &c1, 16);
          std::memcpy(b, &c2, 16);
          std::memcpy(c, &c3, 16);
-         std::int32_t r[4];
+         std::uint32_t r[4];
          for (int i = 0; i < 4; ++i) {
-            int32_t sum = c[i];
+            uint32_t sum = c[i];
             for (int j = 0; j < 4; ++j) {
-               sum += static_cast<int32_t>(a[4*i+j]) * static_cast<int32_t>(b[4*i+j]);
+               sum += static_cast<uint32_t>(static_cast<int32_t>(a[4*i+j]) * static_cast<int32_t>(b[4*i+j]));
             }
             r[i] = sum;
          }
@@ -3104,9 +3118,7 @@ namespace psizam::detail {
          uint32_t table_idx = op.index;
          PSIZAM_ASSERT(idx < context.get_table_size(table_idx), wasm_interpreter_exception, "table index out of range");
          auto* base = context.get_table_base(table_idx);
-         base[idx].index = val;
-         base[idx].type = UINT32_MAX;  // externref entries don't have function types
-         base[idx].code_ptr = nullptr;
+         base[idx] = context.make_table_entry(table_idx, val);
          context.inc_pc();
       }
       [[gnu::always_inline]] inline void operator()(const ref_null_t& /*op*/) {
@@ -3125,10 +3137,7 @@ namespace psizam::detail {
       [[gnu::always_inline]] inline void operator()(const table_grow_t& op) {
          auto delta = context.pop_operand().to_ui32();
          auto init_val = context.pop_operand().to_ui32();
-         table_entry te;
-         te.type = UINT32_MAX;
-         te.index = init_val;
-         te.code_ptr = nullptr;
+         auto te = context.make_table_entry(op.index, init_val);
          uint32_t result = context.table_grow(op.index, delta, te);
          context.push_operand(i32_const_t{result});
          context.inc_pc();
@@ -3141,10 +3150,7 @@ namespace psizam::detail {
          auto n = context.pop_operand().to_ui32();
          auto val = context.pop_operand().to_ui32();
          auto i = context.pop_operand().to_ui32();
-         table_entry te;
-         te.type = UINT32_MAX;
-         te.index = val;
-         te.code_ptr = nullptr;
+         auto te = context.make_table_entry(op.index, val);
          context.table_fill(op.index, i, te, n);
          context.inc_pc();
       }

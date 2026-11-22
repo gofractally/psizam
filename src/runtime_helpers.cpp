@@ -28,12 +28,10 @@ namespace {
       throw E{msg};
    }
 
-   [[noreturn]] void escape_exception(std::exception_ptr eptr) {
-      if (trap_jmp_ptr) {
-         saved_exception = std::move(eptr);
-         siglongjmp(*trap_jmp_ptr, -1);
-      }
-      std::rethrow_exception(eptr);
+   template <typename F>
+   void invoke_or_escape(F&& f) {
+      if (trap_jmp_ptr) longjmp_on_exception([&] { f(); });
+      else f();
    }
 
    void invoke_gas_handler(gas_state& gas) {
@@ -80,25 +78,21 @@ const void* __psizam_resolve_indirect(void* ctx, uint32_t type_idx,
 
 void __psizam_table_copy(void* ctx, uint32_t dest, uint32_t src, uint32_t n,
                           uint32_t dst_table, uint32_t src_table) {
-   try {
+   invoke_or_escape([&] {
       auto& c = as_ctx(ctx);
       auto* s = c.get_table_ptr(src, n, src_table);
       auto* d = c.get_table_ptr(dest, n, dst_table);
       if (n > 0)
          std::memmove(d, s, n * sizeof(table_entry));
-   } catch (...) {
-      escape_exception(std::current_exception());
-   }
+   });
 }
 
 void __psizam_table_init(void* ctx, uint32_t elem_idx,
                           uint32_t dest, uint32_t src, uint32_t n,
                           uint32_t table_idx) {
-   try {
+   invoke_or_escape([&] {
       as_ctx(ctx).init_table(elem_idx, dest, src, n, table_idx);
-   } catch (...) {
-      escape_exception(std::current_exception());
-   }
+   });
 }
 
 uint32_t __psizam_table_get(void* ctx, uint32_t table_idx, uint32_t elem_idx) {
@@ -112,18 +106,12 @@ void __psizam_table_set(void* ctx, uint32_t table_idx, uint32_t elem_idx, uint32
    auto& c = as_ctx(ctx);
    if (elem_idx >= c.get_table_size(table_idx))
       escape_or_throw<wasm_interpreter_exception>("table index out of range");
-   auto& entry = c.get_table_base(table_idx)[elem_idx];
-   entry.index = val;
-   entry.type = UINT32_MAX;
-   entry.code_ptr = nullptr;
+   c.get_table_base(table_idx)[elem_idx] = c.make_table_entry(table_idx, val);
 }
 
 uint32_t __psizam_table_grow(void* ctx, uint32_t table_idx, uint32_t delta, uint32_t init_val) {
    auto& c = as_ctx(ctx);
-   table_entry te;
-   te.type = UINT32_MAX;
-   te.index = init_val;
-   te.code_ptr = nullptr;
+   auto te = c.make_table_entry(table_idx, init_val);
    return c.table_grow(table_idx, delta, te);
 }
 
@@ -132,16 +120,11 @@ uint32_t __psizam_table_size(void* ctx, uint32_t table_idx) {
 }
 
 void __psizam_table_fill(void* ctx, uint32_t table_idx, uint32_t i, uint32_t val, uint32_t n) {
-   try {
+   invoke_or_escape([&] {
       auto& c = as_ctx(ctx);
-      table_entry te;
-      te.type = UINT32_MAX;
-      te.index = val;
-      te.code_ptr = nullptr;
+      auto te = c.make_table_entry(table_idx, val);
       c.table_fill(table_idx, i, te, n);
-   } catch (...) {
-      escape_exception(std::current_exception());
-   }
+   });
 }
 
 // Private-memory atomic semantics. All engine tiers delegate here so alignment,

@@ -2090,7 +2090,6 @@ namespace psizam::detail {
                      // Checked mode: validate read watermark before host call
                      emit_watermark_validate(builder, ctx_ptr, load_mem_ptr(), watermark_alloca, mem_size_cache);
 
-                     emit_backtrace_set_top(builder, ctx_ptr);
                      emit_backtrace_set_bottom(builder, ctx_ptr);
 
                      llvm::Value* raw = builder.CreateCall(rt_call_host_full,
@@ -2098,7 +2097,6 @@ namespace psizam::detail {
                          builder.getInt32(nargs), mem_out_alloca});
 
                      emit_backtrace_clear_bottom(builder, ctx_ptr);
-                     emit_backtrace_clear_top(builder, ctx_ptr);
 
                      if (inst.dest != ir_vreg_none) {
                         llvm::Type* target_ty = ir_type_to_llvm(inst.value_type());
@@ -2145,7 +2143,6 @@ namespace psizam::detail {
                         }
                         call_args.clear();
 
-                        emit_backtrace_set_top(builder, ctx_ptr);
                         emit_backtrace_set_bottom(builder, ctx_ptr);
 
                         llvm::Value* raw = builder.CreateCall(rt_call_host,
@@ -2153,7 +2150,6 @@ namespace psizam::detail {
                             builder.getInt32(nargs)});
 
                         emit_backtrace_clear_bottom(builder, ctx_ptr);
-                        emit_backtrace_clear_top(builder, ctx_ptr);
 
                         if (inst.dest != ir_vreg_none) {
                            llvm::Type* target_ty = ir_type_to_llvm(inst.value_type());
@@ -2200,9 +2196,7 @@ namespace psizam::detail {
                         call_args.clear();
 
                         if (callee) {
-                           emit_backtrace_set_top(builder, ctx_ptr);
                            auto* result = builder.CreateCall(callee, args);
-                           emit_backtrace_clear_top(builder, ctx_ptr);
                            if (inst.dest != ir_vreg_none && !result->getType()->isVoidTy()) {
                               if (inst.value_type() == types::v128) {
                                  store_v128(static_cast<uint16_t>(inst.dest), result);
@@ -2257,7 +2251,6 @@ namespace psizam::detail {
                   // Checked mode: validate read watermark before indirect call
                   emit_watermark_validate(builder, ctx_ptr, load_mem_ptr(), watermark_alloca, mem_size_cache);
                   if (!byte_stack) builder.CreateCall(rt_call_depth_dec, {ctx_ptr});
-                  emit_backtrace_set_top(builder, ctx_ptr);
                   emit_backtrace_set_bottom(builder, ctx_ptr);
 
                   llvm::Value* raw = builder.CreateCall(rt_call_indirect,
@@ -2265,7 +2258,6 @@ namespace psizam::detail {
                       table_elem, host_args_alloca, builder.getInt32(nargs)});
 
                   emit_backtrace_clear_bottom(builder, ctx_ptr);
-                  emit_backtrace_clear_top(builder, ctx_ptr);
                   if (!byte_stack) builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
 
                   // Reload mem_ptr after call_indirect (callee may grow memory)
@@ -2323,12 +2315,10 @@ namespace psizam::detail {
                         builder.CreateStore(v, slot);
                      }
                      call_args.clear();
-                     emit_backtrace_set_top(builder, ctx_ptr);
                      emit_backtrace_set_bottom(builder, ctx_ptr);
                      llvm::Value* raw = builder.CreateCall(rt_call_host,
                         {ctx_ptr, builder.getInt32(funcnum), host_args_alloca, builder.getInt32(nargs)});
                      emit_backtrace_clear_bottom(builder, ctx_ptr);
-                     emit_backtrace_clear_top(builder, ctx_ptr);
                      if (!byte_stack) builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
                      builder.CreateStore(builder.CreateCall(rt_get_memory, {ctx_ptr}), mem_ptr_alloca);
                      // Return the result
@@ -2365,10 +2355,8 @@ namespace psizam::detail {
                      for (auto* a : call_args) args.push_back(a);
                      call_args.clear();
                      if (callee) {
-                        emit_backtrace_set_top(builder, ctx_ptr);
                         auto* result = builder.CreateCall(callee, args);
                         result->setTailCallKind(llvm::CallInst::TCK_Tail);
-                        emit_backtrace_clear_top(builder, ctx_ptr);
                         if (!byte_stack) builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
                         if (fn->getReturnType()->isVoidTy()) {
                            builder.CreateRetVoid();
@@ -2405,13 +2393,11 @@ namespace psizam::detail {
                   // Checked mode: validate read watermark before tail call indirect
                   emit_watermark_validate(builder, ctx_ptr, load_mem_ptr(), watermark_alloca, mem_size_cache);
                   if (!byte_stack) builder.CreateCall(rt_call_depth_dec, {ctx_ptr});
-                  emit_backtrace_set_top(builder, ctx_ptr);
                   emit_backtrace_set_bottom(builder, ctx_ptr);
                   llvm::Value* raw = builder.CreateCall(rt_call_indirect,
                      {ctx_ptr, load_mem_ptr(), builder.getInt32(type_idx),
                       table_elem, host_args_alloca, builder.getInt32(nargs)});
                   emit_backtrace_clear_bottom(builder, ctx_ptr);
-                  emit_backtrace_clear_top(builder, ctx_ptr);
                   if (!byte_stack) builder.CreateCall(rt_call_depth_inc, {ctx_ptr});
                   builder.CreateStore(builder.CreateCall(rt_get_memory, {ctx_ptr}), mem_ptr_alloca);
                   // Return
@@ -5037,36 +5023,73 @@ namespace psizam::detail {
 
                   // ── Relaxed SIMD ──
                   case simd_sub::f32x4_relaxed_madd: {
-                     // relaxed_madd: a * b + c. Third operand c is in addr.
                      auto* a = load_v128(inst.simd.v_src1, v4xf32_ty);
                      auto* b = load_v128(inst.simd.v_src2, v4xf32_ty);
                      auto* c = load_v128(static_cast<uint16_t>(inst.simd.addr), v4xf32_ty);
-                     auto* fn = llvm::Intrinsic::getOrInsertDeclaration(llvm_mod.get(), llvm::Intrinsic::fma, {v4xf32_ty});
-                     store_v128(inst.simd.v_dest, builder.CreateBitCast(builder.CreateCall(fn, {a, b, c}), v128_ty));
+                     llvm::Value* r;
+                     if (opts.fp != fp_mode::fast) {
+                        // DET profile: independently rounded multiplication and
+                        // addition, using the same canonical-NaN helpers as JITs.
+                        llvm::Value* product = simd_sf_f32x4_binop(builder, sf_f32_mul, a, b);
+                        r = simd_sf_f32x4_binop(builder, sf_f32_add, product, c);
+                     } else {
+                        auto* fn = llvm::Intrinsic::getOrInsertDeclaration(llvm_mod.get(), llvm::Intrinsic::fma, {v4xf32_ty});
+                        r = builder.CreateCall(fn, {a, b, c});
+                     }
+                     store_v128(inst.simd.v_dest, builder.CreateBitCast(r, v128_ty));
                      break;
                   }
                   case simd_sub::f32x4_relaxed_nmadd: {
                      auto* a = load_v128(inst.simd.v_src1, v4xf32_ty);
                      auto* b = load_v128(inst.simd.v_src2, v4xf32_ty);
                      auto* c = load_v128(static_cast<uint16_t>(inst.simd.addr), v4xf32_ty);
-                     auto* fn = llvm::Intrinsic::getOrInsertDeclaration(llvm_mod.get(), llvm::Intrinsic::fma, {v4xf32_ty});
-                     store_v128(inst.simd.v_dest, builder.CreateBitCast(builder.CreateCall(fn, {builder.CreateFNeg(a), b, c}), v128_ty));
+                     llvm::Value* r;
+                     if (opts.fp != fp_mode::fast) {
+                        // DET profile: independently rounded multiplication and
+                        // addition, using the same canonical-NaN helpers as JITs.
+                        llvm::Value* product = simd_sf_f32x4_binop(builder, sf_f32_mul, a, b);
+                        product = builder.CreateFNeg(product);
+                        r = simd_sf_f32x4_binop(builder, sf_f32_add, product, c);
+                     } else {
+                        auto* fn = llvm::Intrinsic::getOrInsertDeclaration(llvm_mod.get(), llvm::Intrinsic::fma, {v4xf32_ty});
+                        r = builder.CreateCall(fn, {builder.CreateFNeg(a), b, c});
+                     }
+                     store_v128(inst.simd.v_dest, builder.CreateBitCast(r, v128_ty));
                      break;
                   }
                   case simd_sub::f64x2_relaxed_madd: {
                      auto* a = load_v128(inst.simd.v_src1, v2xf64_ty);
                      auto* b = load_v128(inst.simd.v_src2, v2xf64_ty);
                      auto* c = load_v128(static_cast<uint16_t>(inst.simd.addr), v2xf64_ty);
-                     auto* fn = llvm::Intrinsic::getOrInsertDeclaration(llvm_mod.get(), llvm::Intrinsic::fma, {v2xf64_ty});
-                     store_v128(inst.simd.v_dest, builder.CreateBitCast(builder.CreateCall(fn, {a, b, c}), v128_ty));
+                     llvm::Value* r;
+                     if (opts.fp != fp_mode::fast) {
+                        // DET profile: independently rounded multiplication and
+                        // addition, using the same canonical-NaN helpers as JITs.
+                        llvm::Value* product = simd_sf_f64x2_binop(builder, sf_f64_mul, a, b);
+                        r = simd_sf_f64x2_binop(builder, sf_f64_add, product, c);
+                     } else {
+                        auto* fn = llvm::Intrinsic::getOrInsertDeclaration(llvm_mod.get(), llvm::Intrinsic::fma, {v2xf64_ty});
+                        r = builder.CreateCall(fn, {a, b, c});
+                     }
+                     store_v128(inst.simd.v_dest, builder.CreateBitCast(r, v128_ty));
                      break;
                   }
                   case simd_sub::f64x2_relaxed_nmadd: {
                      auto* a = load_v128(inst.simd.v_src1, v2xf64_ty);
                      auto* b = load_v128(inst.simd.v_src2, v2xf64_ty);
                      auto* c = load_v128(static_cast<uint16_t>(inst.simd.addr), v2xf64_ty);
-                     auto* fn = llvm::Intrinsic::getOrInsertDeclaration(llvm_mod.get(), llvm::Intrinsic::fma, {v2xf64_ty});
-                     store_v128(inst.simd.v_dest, builder.CreateBitCast(builder.CreateCall(fn, {builder.CreateFNeg(a), b, c}), v128_ty));
+                     llvm::Value* r;
+                     if (opts.fp != fp_mode::fast) {
+                        // DET profile: independently rounded multiplication and
+                        // addition, using the same canonical-NaN helpers as JITs.
+                        llvm::Value* product = simd_sf_f64x2_binop(builder, sf_f64_mul, a, b);
+                        product = builder.CreateFNeg(product);
+                        r = simd_sf_f64x2_binop(builder, sf_f64_add, product, c);
+                     } else {
+                        auto* fn = llvm::Intrinsic::getOrInsertDeclaration(llvm_mod.get(), llvm::Intrinsic::fma, {v2xf64_ty});
+                        r = builder.CreateCall(fn, {builder.CreateFNeg(a), b, c});
+                     }
+                     store_v128(inst.simd.v_dest, builder.CreateBitCast(r, v128_ty));
                      break;
                   }
                   case simd_sub::i16x8_relaxed_dot_i8x16_i7x16_s: {
@@ -5074,8 +5097,8 @@ namespace psizam::detail {
                      auto* a = load_v128(inst.simd.v_src1, v16xi8_ty);
                      auto* b = load_v128(inst.simd.v_src2, v16xi8_ty);
                      auto* wa = builder.CreateSExt(a, llvm::FixedVectorType::get(i16_ty, 16));
-                     // b is unsigned (i7x16)
-                     auto* wb = builder.CreateZExt(b, llvm::FixedVectorType::get(i16_ty, 16));
+                     // DET profile: signed interpretation, including high-bit bytes.
+                     auto* wb = builder.CreateSExt(b, llvm::FixedVectorType::get(i16_ty, 16));
                      auto* prod = builder.CreateMul(wa, wb);
                      llvm::Value* result = llvm::Constant::getNullValue(v8xi16_ty);
                      for (int j = 0; j < 8; j++) {
@@ -5091,12 +5114,12 @@ namespace psizam::detail {
                      break;
                   }
                   case simd_sub::i32x4_relaxed_dot_i8x16_i7x16_add_s: {
-                     // Relaxed: multiply i8*u8 pairwise to i16, then add pairs to i32, then add accumulator (c)
+                     // DET profile: signed byte products, modular i32 accumulation
                      auto* a = load_v128(inst.simd.v_src1, v16xi8_ty);
                      auto* b = load_v128(inst.simd.v_src2, v16xi8_ty);
                      auto* c = load_v128(static_cast<uint16_t>(inst.simd.addr), v4xi32_ty);
                      auto* wa = builder.CreateSExt(a, llvm::FixedVectorType::get(i32_ty, 16));
-                     auto* wb = builder.CreateZExt(b, llvm::FixedVectorType::get(i32_ty, 16));
+                     auto* wb = builder.CreateSExt(b, llvm::FixedVectorType::get(i32_ty, 16));
                      auto* prod = builder.CreateMul(wa, wb);
                      llvm::Value* result = llvm::Constant::getNullValue(v4xi32_ty);
                      for (int j = 0; j < 4; j++) {
@@ -5114,8 +5137,8 @@ namespace psizam::detail {
                   }
 
                   default:
-                     // Unhandled SIMD sub-opcode — no-op
-                     break;
+                     throw std::runtime_error("LLVM: unsupported SIMD IR opcode " +
+                                              std::to_string(static_cast<int>(sub)));
                   } // end switch(sub)
                   break;
                } // end case ir_op::v128_op
@@ -5251,8 +5274,8 @@ namespace psizam::detail {
                }
 
                default:
-                  // Unknown operation — skip
-                  break;
+                  throw std::runtime_error("LLVM: unsupported IR opcode " +
+                                           std::to_string(static_cast<int>(inst.opcode)));
             }
          }
 
@@ -5367,7 +5390,25 @@ namespace psizam::detail {
                }
             }
 
+            llvm::Value* previous_top = nullptr;
+            llvm::Value* previous_bottom = nullptr;
+            llvm::Value* top_slot = nullptr;
+            if (opts.enable_backtrace) {
+               entry_fn->addFnAttr("frame-pointer", "all");
+               top_slot = b.CreateGEP(i8_ty, ctx_arg, b.getInt64(8));
+               previous_top = b.CreateLoad(ptr_ty, top_slot, "previous.top");
+               previous_bottom = b.CreateLoad(ptr_ty, ctx_arg, "previous.bottom");
+               auto* fp = b.CreateCall(frameaddress_intrinsic, {b.getInt32(0)});
+               auto* empty = llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ptr_ty));
+               auto* top = b.CreateSelect(b.CreateICmpEQ(previous_top, empty), fp, previous_top);
+               b.CreateStore(top, top_slot, /*isVolatile=*/true);
+               b.CreateStore(empty, ctx_arg, /*isVolatile=*/true);
+            }
             auto* call_result = b.CreateCall(real_fn, call_args);
+            if (opts.enable_backtrace) {
+               b.CreateStore(previous_top, top_slot, /*isVolatile=*/true);
+               b.CreateStore(previous_bottom, ctx_arg, /*isVolatile=*/true);
+            }
 
             // Convert return value to i64
             if (ft.return_count == 0) {

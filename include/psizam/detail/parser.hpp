@@ -200,6 +200,9 @@ namespace psizam::detail {
    PARSER_OPTION(parse_custom_section_name, false, bool);
 
    PARSER_OPTION(enable_simd, true, bool)
+   PARSER_OPTION(enable_relaxed_simd, true, bool)
+   PARSER_OPTION(enable_atomics, true, bool)
+   PARSER_OPTION(enable_tail_calls, true, bool)
    PARSER_OPTION(enable_bulk_memory, true, bool)
    PARSER_OPTION(enable_sign_ext, true, bool)
    PARSER_OPTION(enable_nontrapping_fptoint, true, bool)
@@ -1885,6 +1888,7 @@ namespace psizam::detail {
                }
                // Tail calls: optimized frame reuse (no stack growth)
                case 0x12: { // return_call
+                  PSIZAM_ASSERT(get_enable_tail_calls(_options), wasm_parse_exception, "tail calls not enabled");
                   check_in_bounds();
                   uint32_t funcnum = parse_varuint32(code);
                   PSIZAM_ASSERT(funcnum < _mod->get_imported_functions_size() + _mod->functions.size(),
@@ -1919,6 +1923,7 @@ namespace psizam::detail {
                   op_stack.start_unreachable();
                } break;
                case 0x13: { // return_call_indirect
+                  PSIZAM_ASSERT(get_enable_tail_calls(_options), wasm_parse_exception, "tail calls not enabled");
                   check_in_bounds();
                   uint32_t functypeidx = parse_varuint32(code);
                   const func_type& target_ft = _mod->types.at(functypeidx);
@@ -2471,7 +2476,10 @@ namespace psizam::detail {
 
                case opcodes::vector_prefix: {
                   PSIZAM_ASSERT(get_enable_simd(_options), wasm_parse_exception, "SIMD not enabled");
-                  switch(parse_varuint32(code))
+                  const auto simd_opcode = parse_varuint32(code);
+                  PSIZAM_ASSERT(simd_opcode < 0x100 || get_enable_relaxed_simd(_options),
+                                wasm_parse_exception, "relaxed SIMD not enabled");
+                  switch(simd_opcode)
                   {
 #define opcodes vec_opcodes
                      LOAD_OP(v128_load, 4, v128)
@@ -3120,6 +3128,7 @@ namespace psizam::detail {
                   }
                } break;
                case opcodes::atomic_prefix: {
+                  PSIZAM_ASSERT(get_enable_atomics(_options), wasm_parse_exception, "atomics not enabled");
                   const auto sub = parse_varuint32(code);
                   PSIZAM_ASSERT(sub <= 3 || (sub >= 0x10 && sub <= 0x4e),
                                 wasm_parse_exception, "Illegal atomic instruction");

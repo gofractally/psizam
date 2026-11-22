@@ -3586,6 +3586,21 @@ namespace psizam::detail {
             }
          }
 
+         // Preserve every guest target, including ref.func values which did
+         // not appear in an element segment at parse time.
+         _mod.native_function_ptrs.assign(_mod.get_functions_total(), nullptr);
+         const auto imported_count = _mod.get_imported_functions_size();
+         for (uint32_t index = 0; index < _mod.get_functions_total(); ++index) {
+            if (index < imported_count) {
+               if (void* thunk = workers[0].codegen->get_func_addr(index)) {
+                  auto offset = static_cast<char*>(thunk) - static_cast<char*>(workers[0].code_base);
+                  _mod.native_function_ptrs[index] = _mod.allocator._code_base + workers[0].final_offset + offset;
+               }
+            } else {
+               _mod.native_function_ptrs[index] = _mod.allocator._code_base + _mod.code[index - imported_count].jit_code_offset;
+            }
+         }
+
          // Patch element table entries
          uint32_t num_imported = _mod.get_imported_functions_size();
          uint32_t num_functions_total = _mod.get_functions_total();

@@ -143,6 +143,13 @@ namespace psizam::detail {
       ~machine_code_writer_t() {
          _allocator.end_code<true>(_code_segment_base);
          auto num_functions = _mod.get_functions_total();
+         _mod.native_function_ptrs.assign(num_functions, nullptr);
+         for (uint32_t index = 0; index < num_functions && index < _function_relocations.size(); ++index) {
+            if (auto* target = std::get_if<void*>(&_function_relocations[index])) {
+               auto offset = static_cast<char*>(*target) - static_cast<char*>(_code_segment_base);
+               _mod.native_function_ptrs[index] = _mod.allocator._code_base + offset;
+            }
+         }
          if (num_functions <= _function_relocations.size()) {
             for (auto& elem : _mod.elements) {
                for (auto& entry : elem.elems) {
@@ -7661,18 +7668,12 @@ namespace psizam::detail {
          auto* context = static_cast<jit_execution_context<false>*>(ctx);
          if (elem_idx >= context->get_table_size(table_idx))
             signal_throw<wasm_interpreter_exception>("table index out of range");
-         auto& entry = context->get_table_base(table_idx)[elem_idx];
-         entry.index = val;
-         entry.type = UINT32_MAX;
-         entry.code_ptr = nullptr;
+         context->get_table_base(table_idx)[elem_idx] = context->make_table_entry(table_idx, val);
       }
 
       static uint32_t table_grow_helper(void* ctx, uint32_t table_idx, uint32_t delta, uint32_t init_val) {
          auto* context = static_cast<jit_execution_context<false>*>(ctx);
-         table_entry te;
-         te.type = UINT32_MAX;
-         te.index = init_val;
-         te.code_ptr = nullptr;
+         auto te = context->make_table_entry(table_idx, init_val);
          return context->table_grow(table_idx, delta, te);
       }
 
@@ -7682,10 +7683,7 @@ namespace psizam::detail {
 
       static void table_fill_helper(void* ctx, uint32_t table_idx, uint32_t i, uint32_t val, uint32_t n) {
          auto* context = static_cast<jit_execution_context<false>*>(ctx);
-         table_entry te;
-         te.type = UINT32_MAX;
-         te.index = val;
-         te.code_ptr = nullptr;
+         auto te = context->make_table_entry(table_idx, val);
          context->table_fill(table_idx, i, te, n);
       }
 

@@ -8,6 +8,7 @@
 #include <psizam/detail/guarded_ptr.hpp>
 #include <psizam/detail/opcodes.hpp>
 #include <psizam/detail/vector.hpp>
+#include <psizam/native_guest_abi.hpp>
 
 #include <algorithm>
 #include <cstdint>
@@ -383,6 +384,10 @@ namespace psizam {
       const char *             error            = nullptr;
       // Type-erased holder for LLVM JIT engine — keeps compiled code alive
       std::shared_ptr<void>    jit_engine;
+      // Private guest ABI targets, indexed by global function index. Public
+      // entry wrappers remain in code[].jit_code_offset for LLVM execution.
+      std::vector<const void*> native_function_ptrs;
+      psizam::native_guest_abi native_guest_abi = psizam::native_guest_abi::legacy_caller_cleanup;
 
       void finalize() {
          import_functions.resize(get_imported_functions_size());
@@ -418,23 +423,23 @@ namespace psizam {
          return code.at(index - get_imported_functions_size()).locals.size();
       }
 
-      auto& get_function_type(uint32_t index) const {
-         if (index < get_imported_functions_size()) {
-            // Map function index to the Nth function import in the imports array,
-            // skipping non-function imports (memory, global, table).
-            uint32_t func_count = 0;
-            for (uint32_t i = 0; i < imports.size(); i++) {
-               if (imports[i].kind == external_kind::Function) {
-                  if (func_count == index)
-                     return types[imports[i].type.func_t];
-                  func_count++;
-               }
+      uint32_t get_function_type_index(uint32_t index) const {
+         const auto imported = get_imported_functions_size();
+         if (index < imported) {
+            uint32_t function = 0;
+            for (const auto& entry : imports) {
+               if (entry.kind == external_kind::Function && function++ == index)
+                  return entry.type.func_t;
             }
             PSIZAM_ASSERT(false, wasm_parse_exception, "imported function index out of range");
          }
-         uint32_t local_idx = index - get_imported_functions_size();
-         PSIZAM_ASSERT(local_idx < functions.size(), wasm_parse_exception, "function index out of range");
-         return types.at(functions[local_idx]);
+         const auto local = index - imported;
+         PSIZAM_ASSERT(local < functions.size(), wasm_parse_exception, "function index out of range");
+         return functions[local];
+      }
+
+      auto& get_function_type(uint32_t index) const {
+         return types.at(get_function_type_index(index));
       }
 
       uint32_t get_function_stack_size(uint32_t index) const {

@@ -254,8 +254,11 @@ inline pzam_load_result load_pzam(const pzam_file& pzam)
    if (is_jit) {
       out.mod.allocator._code_base = static_cast<char*>(exec_code);
       out.mod.allocator._code_size = total_code_size;
+      out.mod.native_function_ptrs.assign(out.mod.get_functions_total(), nullptr);
       for (std::size_t j = 0; j < cs.functions.size(); ++j) {
          out.mod.code[j].jit_code_offset = cs.functions[j].code_offset;
+         out.mod.native_function_ptrs[out.mod.get_imported_functions_size() + j] =
+             out.mod.allocator._code_base + cs.functions[j].code_offset;
          out.mod.code[j].jit_code_size   = cs.functions[j].code_size;
          out.mod.code[j].stack_size      = cs.functions[j].stack_size;
       }

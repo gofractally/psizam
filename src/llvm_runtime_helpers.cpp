@@ -20,20 +20,26 @@ namespace {
       return *static_cast<ctx_t*>(ctx);
    }
 
-   // Escape via longjmp with an existing exception_ptr.
-   // Used when propagating exceptions from host calls or recursive WASM calls.
-   [[noreturn]] void escape_exception(std::exception_ptr eptr) {
-      if (trap_jmp_ptr) {
-         saved_exception = std::move(eptr);
-         siglongjmp(*trap_jmp_ptr, -1);
+   template <typename F>
+   auto invoke_or_escape(F&& f) -> std::invoke_result_t<F> {
+      using result_type = std::invoke_result_t<F>;
+      if (!trap_jmp_ptr) return f();
+      if constexpr (std::is_void_v<result_type>) {
+         longjmp_on_exception([&] { f(); });
+      } else {
+         static_assert(std::is_trivially_destructible_v<result_type>);
+         result_type result{};
+         longjmp_on_exception([&] { result = f(); });
+         return result;
       }
-      std::rethrow_exception(eptr);
    }
 
    // Escape via longjmp with a new exception, or throw if no escape target.
    template<typename E>
    [[noreturn]] void escape_or_throw(const char* msg) {
       if (trap_jmp_ptr) {
+         if (trap_observer)
+            trap_observer(msg, trap_observer_data);
          saved_exception = std::make_exception_ptr(E{msg});
          siglongjmp(*trap_jmp_ptr, -1);
       }
@@ -89,24 +95,18 @@ int64_t __psizam_call_host(void* ctx, uint32_t func_idx,
    if (c._host_trampoline_ptrs) {
       auto trampoline = c._host_trampoline_ptrs[func_idx];
       if (trampoline) {
-         try {
-            auto result = trampoline(c.get_host_ptr(), args, c.linear_memory());
-            return result.i64;
-         } catch (...) {
-            escape_exception(std::current_exception());
-         }
+         return invoke_or_escape([&] {
+            return trampoline(c.get_host_ptr(), args, c.linear_memory()).i64;
+         });
       }
    }
 
    // Fallback: use the table dispatch
    auto* table = c.get_host_table();
    uint32_t mapped_index = c.get_module().import_functions[func_idx];
-   try {
-      auto result = table->call(c.get_host_ptr(), mapped_index, args, c.linear_memory());
-      return result.i64;
-   } catch (...) {
-      escape_exception(std::current_exception());
-   }
+   return invoke_or_escape([&] {
+      return table->call(c.get_host_ptr(), mapped_index, args, c.linear_memory()).i64;
+   });
 }
 
 // Nothrow variant for LLVM JIT path where .eh_frame data is registered.
@@ -172,19 +172,15 @@ int64_t __psizam_call_host_full(void* ctx, uint32_t func_idx,
 
 void __psizam_memory_init(void* ctx, uint32_t seg_idx,
                            uint32_t dest, uint32_t src, uint32_t n) {
-   try {
+   invoke_or_escape([&] {
       as_ctx(ctx).init_linear_memory(seg_idx, dest, src, n);
-   } catch (...) {
-      escape_exception(std::current_exception());
-   }
+   });
 }
 
 void __psizam_data_drop(void* ctx, uint32_t seg_idx) {
-   try {
+   invoke_or_escape([&] {
       as_ctx(ctx).drop_data(seg_idx);
-   } catch (...) {
-      escape_exception(std::current_exception());
-   }
+   });
 }
 
 void __psizam_memory_copy(void* ctx, uint32_t dest, uint32_t src, uint32_t n) {
@@ -212,11 +208,9 @@ void __psizam_memory_fill(void* ctx, uint32_t dest, uint32_t val, uint32_t n) {
 }
 
 void __psizam_elem_drop(void* ctx, uint32_t seg_idx) {
-   try {
+   invoke_or_escape([&] {
       as_ctx(ctx).drop_elem(seg_idx);
-   } catch (...) {
-      escape_exception(std::current_exception());
-   }
+   });
 }
 
 int64_t __psizam_call_indirect(void* ctx, void* mem, uint32_t type_idx,
@@ -260,11 +254,9 @@ int64_t __psizam_call_indirect(void* ctx, void* mem, uint32_t type_idx,
       auto offset = mod.code[code_idx].jit_code_offset;
       using llvm_entry_fn_t = int64_t(*)(void*, void*, native_value*);
       auto fn = reinterpret_cast<llvm_entry_fn_t>(offset);
-      try {
+      return invoke_or_escape([&] {
          return fn(ctx, mem, static_cast<native_value*>(args_buf));
-      } catch (...) {
-         escape_exception(std::current_exception());
-      }
+      });
    }
 }
 

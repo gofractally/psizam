@@ -1,6 +1,7 @@
 #pragma once
 
 #include <psizam/detail/jit_reloc.hpp>
+#include <psizam/native_guest_abi.hpp>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -14,6 +15,11 @@ namespace psizam::detail {
       std::vector<uint8_t>         code_blob;          // filled by LLVM AOT path
       std::vector<std::pair<uint32_t, uint32_t>> function_offsets; // entry wrapper (offset, size)
       std::vector<std::pair<uint32_t, uint32_t>> body_offsets;     // function body (offset, size) — LLVM only
+      // Private typed import targets, indexed by imported function index.
+      // Offsets are relative to the same code blob as function/body offsets.
+      std::vector<std::pair<uint32_t, uint32_t>> import_thunk_offsets;
+      std::vector<uint64_t>        import_thunk_stack_sizes; // native prologue bytes where available
+      psizam::native_guest_abi     native_guest_abi = psizam::native_guest_abi::legacy_caller_cleanup;
       std::vector<uint64_t>        entry_stack_sizes;  // native prologue bytes, LLVM only
       std::vector<uint64_t>        body_stack_sizes;
       uint32_t                    native_stack_probe_size = 0;

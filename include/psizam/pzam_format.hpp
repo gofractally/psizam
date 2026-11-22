@@ -10,6 +10,7 @@
 // Load path: mmap → validate pSSZ → decode metadata/code → pick section → execute.
 
 #include <psizam/detail/jit_reloc.hpp>
+#include <psizam/native_artifact.hpp>
 #include <psio/pssz_view.hpp>
 #include <psio/wit_types.hpp>
 
@@ -26,7 +27,8 @@ namespace psizam {
    static constexpr uint32_t PZAM_MAGIC   = 0x4d415a50; // "PZAM" in little-endian
    // Version 5 reserves the full inline-table metadata tail. Older native code
    // can embed a different inline/indirect layout decision and must be rebuilt.
-   static constexpr uint32_t PZAM_VERSION = 5;
+   // Version 6 also persists the native embedder contract and source ranges.
+   static constexpr uint32_t PZAM_VERSION = 6;
 
    // ---- Architecture ----
 
@@ -229,6 +231,9 @@ namespace psizam {
    };
    PSIO_REFLECT(pzam_attestation, pubkey_hash, signature)
 
+   PSIO_REFLECT(native_aot_source_range, native_offset, native_size, wasm_offset, wasm_size)
+   PSIO_REFLECT(native_aot_metadata, identity, sources)
+
    /// One compiled code variant.
    /// All backends produce C ABI entry points — no legacy dispatch modes.
    struct pzam_code_section {
@@ -245,10 +250,11 @@ namespace psizam {
       std::vector<pzam_func_entry>   functions;
       std::vector<pzam_relocation>   relocations;
       std::vector<uint8_t>           code_blob;
+      std::optional<native_aot_metadata> native_contract;
    };
    PSIO_REFLECT(pzam_code_section,
       arch, opt_tier, instrumentation, stack_limit_mode, page_size, max_stack,
-      compiler, attestations, functions, relocations, code_blob)
+      compiler, attestations, functions, relocations, code_blob, native_contract)
 
    // ===========================================================================
    // Top-level .pzam file

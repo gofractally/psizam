@@ -185,6 +185,13 @@ namespace psizam::detail {
       ~machine_code_writer_a64() {
          _allocator.end_code<true>(_code_segment_base);
          auto num_functions = _mod.get_functions_total();
+         _mod.native_function_ptrs.assign(num_functions, nullptr);
+         for (uint32_t index = 0; index < num_functions && index < _function_relocations.size(); ++index) {
+            if (auto* target = std::get_if<void*>(&_function_relocations[index])) {
+               auto offset = static_cast<char*>(*target) - static_cast<char*>(_code_segment_base);
+               _mod.native_function_ptrs[index] = _mod.allocator._code_base + offset;
+            }
+         }
          if (num_functions <= _function_relocations.size()) {
             for (auto& elem : _mod.elements) {
                for (auto& entry : elem.elems) {

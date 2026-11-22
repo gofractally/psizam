@@ -452,6 +452,17 @@ namespace psizam::detail {
          return get_table_base(table_idx) + base;
       }
 
+      table_entry make_table_entry(uint32_t table_idx, uint32_t reference) {
+         auto& mod = resolve_module();
+         table_entry result{UINT32_MAX, reference, nullptr};
+         if (mod.tables[table_idx].element_type != types::funcref || reference == UINT32_MAX)
+            return result;
+         result.type = mod.get_function_type_index(reference);
+         if (reference < mod.native_function_ptrs.size())
+            result.code_ptr = mod.native_function_ptrs[reference];
+         return result;
+      }
+
       // table.grow: grows a table, returns previous size or -1 on failure
       uint32_t table_grow(uint32_t table_idx, uint32_t delta, table_entry init_val) {
          auto& mod = resolve_module();
@@ -794,6 +805,14 @@ namespace psizam::detail {
                std::reverse(args_raw + 0, args_raw + args_count);
                result.scalar = call_host_function(args_raw, func_index);
             } else if (_mod->allocator._code_base == nullptr) {
+               // A trap bypasses generated entry-wrapper restoration. Preserve
+               // enclosing frame boundaries before entering any saved LLVM code.
+               auto previous_top = this->_top_frame;
+               auto previous_bottom = this->_bottom_frame;
+               auto restore_frames = scope_guard([&] {
+                  this->_top_frame = previous_top;
+                  this->_bottom_frame = previous_bottom;
+               });
                using llvm_entry_fn_t = int64_t(*)(void*, void*, native_value*);
                auto entry = reinterpret_cast<llvm_entry_fn_t>(
                   _mod->code[func_index - _mod->get_imported_functions_size()].jit_code_offset);
@@ -912,6 +931,14 @@ namespace psizam::detail {
                std::reverse(args_raw + 0, args_raw + args_count);
                result.scalar = call_host_function(args_raw, func_index);
             } else if (_mod->allocator._code_base == nullptr) {
+               // A trap bypasses generated entry-wrapper restoration. Preserve
+               // enclosing frame boundaries before entering any saved LLVM code.
+               auto previous_top = this->_top_frame;
+               auto previous_bottom = this->_bottom_frame;
+               auto restore_frames = scope_guard([&] {
+                  this->_top_frame = previous_top;
+                  this->_bottom_frame = previous_bottom;
+               });
                // LLVM backend: jit_code_offset is an absolute address to an entry wrapper
                // with signature: int64_t(*)(void* ctx, void* mem, native_value* args)
                using llvm_entry_fn_t = int64_t(*)(void*, void*, native_value*);

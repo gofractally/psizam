@@ -27,6 +27,9 @@ namespace psizam::detail {
       std::vector<code_relocation> relocations;     // relocations against runtime symbols
       std::vector<std::pair<uint32_t, uint32_t>> function_offsets; // (offset, size) per entry wrapper
       std::vector<std::pair<uint32_t, uint32_t>> body_offsets;     // (offset, size) per function body
+      std::vector<std::pair<uint32_t, uint32_t>> import_thunk_offsets; // import-indexed typed targets
+      std::vector<uint64_t> import_thunk_stack_sizes;
+      psizam::native_guest_abi native_guest_abi = psizam::native_guest_abi::legacy_caller_cleanup;
       // Native prologue allocations, not logical WASM charges. Zero is a valid
       // frame size; completeness is established separately from these values.
       std::vector<uint64_t> entry_stack_sizes;
