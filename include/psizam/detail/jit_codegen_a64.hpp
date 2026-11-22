@@ -240,6 +240,8 @@ namespace psizam::detail {
 
          body.jit_code_offset = code_start - static_cast<unsigned char*>(_code_segment_base);
          body.jit_code_size = static_cast<uint32_t>(code - code_start);
+         body.native_stack_frame_bytes = 16 + uint64_t(_frame_size);
+         body.native_stack_frame_complete = true;
 
          // Reclaim unused code buffer tail to keep code compact.
          // Critical for aarch64 where B/BL displacement is limited to ±128MB.
@@ -921,29 +923,33 @@ namespace psizam::detail {
                          + func.prologue_gas_extra);
 
          // Count body local slots, accounting for v128 locals using 2 slots (16 bytes)
-         uint32_t body_local_slots = 0;
+         uint64_t body_local_slots = 0;
          {
             const auto& locals = _mod.code[func.func_index].locals;
             for (uint32_t g = 0; g < locals.size(); ++g) {
                uint32_t slots_per = (locals[g].type == types::v128) ? 2 : 1;
-               body_local_slots += locals[g].count * slots_per;
+               body_local_slots += uint64_t(locals[g].count) * slots_per;
             }
          }
-         _body_locals = body_local_slots;
+         PSIZAM_ASSERT(body_local_slots <= UINT32_MAX, wasm_parse_exception,
+                       "native fixed local slot overflow");
+         _body_locals = static_cast<uint32_t>(body_local_slots);
 
          _callee_saved_used = func.callee_saved_used;
          _callee_saved_count = __builtin_popcount(_callee_saved_used);
 
          // Total frame slots: body locals + spill slots + callee-saved saves
-         uint32_t total_slots = body_local_slots + _num_spill_slots + _callee_saved_count;
+         uint64_t total_slots = body_local_slots + _num_spill_slots + _callee_saved_count;
          // Round up to even for 16-byte alignment
-         uint32_t aligned_slots = (total_slots + 1) & ~1u;
+         const uint64_t aligned_slots = (total_slots + 1) & ~uint64_t{1};
+         PSIZAM_ASSERT(aligned_slots <= uint64_t(INT32_MAX) / 8, wasm_parse_exception,
+                       "native fixed frame exceeds addressable range");
 
          _frame_size = static_cast<int32_t>(aligned_slots * 8);
          if (aligned_slots > 0) {
             emit_sub_imm(SP, SP, _frame_size);
             // Zero-initialize locals + spill slots
-            uint32_t zero_slots = body_local_slots + _num_spill_slots;
+            uint32_t zero_slots = static_cast<uint32_t>(body_local_slots + _num_spill_slots);
             for (uint32_t i = 0; i < zero_slots; i += 2) {
                int32_t off = i * 8;
                if (i + 1 < zero_slots) {

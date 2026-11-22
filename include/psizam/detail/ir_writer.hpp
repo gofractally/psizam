@@ -3439,6 +3439,23 @@ namespace psizam::detail {
          if (!_compile_result) return;
          auto& output = *_compile_result;
          output.native_guest_abi = abi;
+         output.native_stack_frames_complete = false;
+         if (output.body_stack_sizes.size() != _mod.code.size()) {
+            output.error = "native body frame count mismatch";
+            return;
+         }
+         bool body_frames_complete = true;
+         for (size_t i = 0; i < _mod.code.size(); ++i) {
+            const auto& body = _mod.code[i];
+            if (!body.native_stack_frame_complete || body.native_stack_frame_bytes == UINT64_MAX)
+               body_frames_complete = false;
+            else
+               output.body_stack_sizes[i] = body.native_stack_frame_bytes;
+         }
+         if (abi != psizam::native_guest_abi::legacy_caller_cleanup && !body_frames_complete) {
+            output.error = "incomplete native body frame coverage";
+            return;
+         }
          if (code_offset > UINT32_MAX) {
             output.error = "native import code base overflow";
             return;
@@ -3474,7 +3491,9 @@ namespace psizam::detail {
          } else if (abi != psizam::native_guest_abi::legacy_caller_cleanup &&
                     !output.import_thunk_stack_sizes.empty()) {
             output.error = "missing native import frame bounds";
+            return;
          }
+         output.native_stack_frames_complete = body_frames_complete;
       }
       mem_safety    _mem_mode     = mem_safety::guarded;
       checked_mode  _checked_kind = checked_mode::strict;
@@ -3745,6 +3764,8 @@ namespace psizam::detail {
             const auto count = _mod.get_imported_functions_size();
             r->import_thunk_offsets.assign(count, {0, 0});
             r->import_thunk_stack_sizes.assign(count, 0);
+            r->body_stack_sizes.assign(_mod.code.size(), UINT64_MAX);
+            r->native_stack_frames_complete = false;
          }
       }
 #if !defined(__wasi__)

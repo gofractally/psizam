@@ -307,6 +307,11 @@ namespace psizam {
       // Parser-defined logical byte charge, including the fixed 16-byte frame.
       // Zero outside byte-limit mode. Unlike stack_size, no writer repurposes it.
       std::uint32_t               byte_stack_usage = 0;
+      // Fixed native function-frame allocation, excluding operand/incoming
+      // argument storage and transient helper/host continuations. Unknown until
+      // the native writer proves it; zero is reserved for a real zero frame.
+      uint64_t                   native_stack_frame_bytes = UINT64_MAX;
+      bool                       native_stack_frame_complete = false;
       const uint8_t*              body_start = nullptr;  // pointer to local_count byte in WASM binary
       std::vector<branch_hint>    branch_hints;          // sorted by offset
 

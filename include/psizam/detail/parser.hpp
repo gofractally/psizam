@@ -3343,6 +3343,12 @@ namespace psizam::detail {
       }
 
       void write_code_out(growable_allocator& allocator, wasm_code_ptr& code, const void* code_start) {
+         // A repeated code-generation pass cannot inherit a previous native
+         // producer's frame proof. Writers publish completed functions independently.
+         for (auto& body : _mod->code) {
+            body.native_stack_frame_bytes = UINT64_MAX;
+            body.native_stack_frame_complete = false;
+         }
          auto _compile_threads = get_compile_threads(_options);
          Writer code_writer = [&] {
             if constexpr (std::is_constructible_v<Writer, growable_allocator&, size_t, module&,

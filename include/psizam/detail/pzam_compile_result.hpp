@@ -23,7 +23,7 @@ namespace psizam::detail {
       std::vector<uint64_t>        import_thunk_stack_sizes;
       psizam::native_guest_abi     native_guest_abi = psizam::native_guest_abi::legacy_caller_cleanup;
       std::vector<uint64_t>        entry_stack_sizes;  // native prologue bytes, LLVM only
-      std::vector<uint64_t>        body_stack_sizes;
+      std::vector<uint64_t>        body_stack_sizes; // fixed frame bounds, code-indexed; excludes dynamic areas
       uint32_t                    native_stack_probe_size = 0;
       bool                        native_stack_frames_complete = false;
       std::string                  target_triple;       // set by caller for LLVM AOT

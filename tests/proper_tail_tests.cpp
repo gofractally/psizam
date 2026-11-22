@@ -65,7 +65,17 @@ std::vector<uint32_t> logical_costs(uint32_t threads) {
    psizam::wasm_allocator allocator;
    psizam::backend<functions, Impl, tail_byte_options> vm(fixture(), &allocator, options);
    std::vector<uint32_t> result;
-   for (const auto& body : vm.get_module().code) result.push_back(body.byte_stack_usage);
+   for (const auto& body : vm.get_module().code) {
+      result.push_back(body.byte_stack_usage);
+      if constexpr (std::is_same_v<Impl, psizam::interpreter>) {
+         CHECK_FALSE(body.native_stack_frame_complete);
+         CHECK(body.native_stack_frame_bytes == UINT64_MAX);
+      } else if constexpr (std::is_same_v<Impl, psizam::jit> || std::is_same_v<Impl, psizam::jit2>) {
+         // These are live-module fields: no pzam_compile_result was supplied.
+         CHECK(body.native_stack_frame_complete);
+         CHECK(body.native_stack_frame_bytes != UINT64_MAX);
+      }
+   }
    return result;
 }
 
@@ -88,6 +98,13 @@ void verify_import_metadata(uint32_t threads, bool backtrace) {
    REQUIRE(output.import_thunk_offsets.size() == count);
    REQUIRE(output.import_thunk_stack_sizes.size() == count);
    REQUIRE(mod.native_function_ptrs.size() == mod.get_functions_total());
+   REQUIRE(output.native_stack_frames_complete);
+   REQUIRE(output.body_stack_sizes.size() == mod.code.size());
+   for (size_t i = 0; i < mod.code.size(); ++i) {
+      CHECK(mod.code[i].native_stack_frame_complete);
+      CHECK(mod.code[i].native_stack_frame_bytes != UINT64_MAX);
+      CHECK(output.body_stack_sizes[i] == mod.code[i].native_stack_frame_bytes);
+   }
    for (uint32_t i = 0; i < count; ++i) {
       const auto [offset, size] = output.import_thunk_offsets[i];
       CHECK(size > 0);

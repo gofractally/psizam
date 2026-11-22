@@ -122,8 +122,15 @@ namespace psizam::detail {
          _compile_result(result) {
 
          _mod.native_guest_abi = psizam::native_guest_abi::jit_callee_cleanup;
-         if (_compile_result)
+         if (_compile_result) {
             _compile_result->native_guest_abi = _mod.native_guest_abi;
+            _compile_result->body_stack_sizes.assign(_mod.code.size(), UINT64_MAX);
+            _compile_result->native_stack_frames_complete = false;
+         }
+         for (auto& fn : _mod.code) {
+            fn.native_stack_frame_bytes = UINT64_MAX;
+            fn.native_stack_frame_complete = false;
+         }
 
          // Scale veneer island capacity with function count
          uint32_t num_funcs = mod.get_functions_total();
@@ -394,6 +401,7 @@ namespace psizam::detail {
 
       void emit_prologue(const func_type& /*ft*/, const std::vector<local_entry>& locals, uint32_t funcnum) {
          _tail_stack_adjustments.clear();
+         _current_code_index = funcnum;
          // Insert veneer island if enough code has been emitted
          maybe_insert_veneer_island();
 
@@ -4291,9 +4299,21 @@ namespace psizam::detail {
       using fn_type = native_value(*)(void* context, void* memory);
 
       void finalize(function_body& body) {
+         PSIZAM_ASSERT(_local_count <= (UINT64_MAX - 16) / 16, wasm_parse_exception,
+                       "native fixed frame size overflow");
+         auto& published = _mod.code[_current_code_index];
+         if (!published.native_stack_frame_complete) ++_native_frame_count;
+         body.native_stack_frame_bytes = 16 + _local_count * 16;
+         body.native_stack_frame_complete = true;
+         published.native_stack_frame_bytes = body.native_stack_frame_bytes;
+         published.native_stack_frame_complete = true;
          body.jit_code_size = static_cast<uint32_t>(code - _code_start);
          _allocator.reclaim(code, _code_end - code);
          body.jit_code_offset = _code_start - (unsigned char*)_code_segment_base;
+         if (_compile_result) {
+            _compile_result->body_stack_sizes[_current_code_index] = body.native_stack_frame_bytes;
+            _compile_result->native_stack_frames_complete = _native_frame_count == _mod.code.size();
+         }
       }
 
       const void* get_addr() const {
@@ -5940,6 +5960,8 @@ namespace psizam::detail {
       void* stack_overflow_handler = nullptr;
       void* memory_handler = nullptr;
       uint64_t _local_count = 0;
+      uint32_t _current_code_index = UINT32_MAX;
+      uint32_t _native_frame_count = 0;
 
       // Gas-metering patch handles (Phase 4 heavy-op accumulator). Each
       // points at the first MOVZ of the MOVZ+3×MOVK chain inside the

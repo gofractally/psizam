@@ -110,6 +110,10 @@ namespace psizam::detail {
                return;
             }
          }
+         for (uint32_t index = 0; index < _num_functions; ++index) {
+            _mod.code[index].native_stack_frame_bytes = _body_stack_sizes[index];
+            _mod.code[index].native_stack_frame_complete = true;
+         }
          _compile_result->entry_stack_sizes = std::move(_entry_stack_sizes);
          _compile_result->body_stack_sizes = std::move(_body_stack_sizes);
          _compile_result->native_stack_probe_size = 4096;

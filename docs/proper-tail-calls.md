@@ -54,6 +54,19 @@ This does not by itself bound ordinary C++ host continuations retained by
 recursive host-to-guest reentry. A positive host-boundary reserve is a separate
 required contract and release gate owned by the integrating runtime work.
 
+The fixed-frame metadata checkpoint publishes code-indexed native body bounds
+both in each live `function_body` and in `body_stack_sizes`. An explicit
+completeness flag distinguishes a proven zero frame from an unavailable bound;
+an unavailable per-body bound is `UINT64_MAX`. AArch64 JIT1 reports its saved
+FP/LR plus all native local slots. AArch64 JIT2 additionally accounts for its
+actual allocated spill and callee-saved slots, including alignment, with checked
+size arithmetic before narrowing. LLVM uses its extracted native frame sizes.
+The bounds exclude dynamic operand storage, incoming arguments and transient
+helpers or host continuations. They are inputs to the integrating physical
+policy, and do not change the logical WASM charge or artifact format. Native
+result publication fails closed when a nonlegacy ABI lacks body-frame coverage;
+the interpreter explicitly retains unavailable metadata.
+
 For frame replacement, let `B` be the current frame pointer, `M` its incoming
 native argument bytes and `K` the target's argument bytes. The retained ordinary
 caller continuation expects completion at `S = B + 16 + M`. Stage the target
