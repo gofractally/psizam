@@ -216,6 +216,11 @@ class null_writer {
    void emit_i64_trunc_sat_f64_s() {}
    void emit_i64_trunc_sat_f64_u() {}
 
+   void emit_i64_add128() {}
+   void emit_i64_sub128() {}
+   void emit_i64_mul_wide_s() {}
+   void emit_i64_mul_wide_u() {}
+
    void emit_i32_extend8_s() {}
    void emit_i32_extend16_s() {}
    void emit_i64_extend8_s() {}

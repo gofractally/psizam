@@ -15,7 +15,8 @@ add_custom_command(OUTPUT "${_parity_wasm}"
 add_executable(psizam_wasmtime_backend_tests
    wasmtime_backend_tests.cpp
    "${_parity_wasm}" "${_parity_names}")
-target_include_directories(psizam_wasmtime_backend_tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+target_include_directories(psizam_wasmtime_backend_tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}"
+   "${PROJECT_SOURCE_DIR}/tests")
 target_link_libraries(psizam_wasmtime_backend_tests PRIVATE
    psizam psizam-exec psizam-wasmtime Catch2::Catch2)
 target_compile_definitions(psizam_wasmtime_backend_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS

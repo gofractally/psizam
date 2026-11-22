@@ -302,7 +302,11 @@
    opcode_macro(i64_trunc_sat_f64_s, 6)         \
    opcode_macro(i64_trunc_sat_f64_u, 7)         \
    opcode_macro(memory_copy, 10)                \
-   opcode_macro(memory_fill, 11)
+   opcode_macro(memory_fill, 11)                \
+   opcode_macro(i64_add128, 19)                 \
+   opcode_macro(i64_sub128, 20)                 \
+   opcode_macro(i64_mul_wide_s, 21)             \
+   opcode_macro(i64_mul_wide_u, 22)
 
 #define PSIZAM_VEC_MEMORY_OPS(opcode_macro)     \
    opcode_macro(v128_load, 0)                   \

@@ -2149,6 +2149,50 @@ namespace psizam::detail {
       void emit_i32_trunc_u_f64()    { ir_unop(ir_op::i32_trunc_u_f64, types::i32); }
       void emit_i64_extend_s_i32()   { ir_unop(ir_op::i64_extend_s_i32, types::i64); }
       void emit_i64_extend_u_i32()   { ir_unop(ir_op::i64_extend_u_i32, types::i64); }
+
+      // ──── Wide arithmetic ────
+      // 128-bit values are (low, high) pairs with the high half on top. They are
+      // lowered to single-result instructions; the only new ones are the two
+      // high-half multiplies.
+      uint32_t ir_value(ir_op op, uint8_t type, uint32_t lhs, uint32_t rhs = ir_vreg_none) {
+         uint32_t dest = _func->alloc_vreg(type);
+         ir_inst inst{};
+         inst.opcode = op;
+         inst.type = type;
+         inst.dest = dest;
+         inst.rr.src1 = lhs;
+         inst.rr.src2 = rhs;
+         _func->emit(inst);
+         return dest;
+      }
+      void ir_wide_addsub(ir_op op, bool is_add) {
+         if (_unreachable) return;
+         uint32_t b_hi = _func->vpop();
+         uint32_t b_lo = _func->vpop();
+         uint32_t a_hi = _func->vpop();
+         uint32_t a_lo = _func->vpop();
+         uint32_t lo = ir_value(op, types::i64, a_lo, b_lo);
+         // Carry out of the low half: sum < addend; borrow: minuend < subtrahend.
+         uint32_t carry = is_add ? ir_value(ir_op::i64_lt_u, types::i32, lo, b_lo)
+                                 : ir_value(ir_op::i64_lt_u, types::i32, a_lo, b_lo);
+         uint32_t carry64 = ir_value(ir_op::i64_extend_u_i32, types::i64, carry);
+         uint32_t hi = ir_value(op, types::i64, ir_value(op, types::i64, a_hi, b_hi), carry64);
+         _func->vpush(lo);
+         _func->vpush(hi);
+      }
+      void ir_mul_wide(ir_op high) {
+         if (_unreachable) return;
+         uint32_t rhs = _func->vpop();
+         uint32_t lhs = _func->vpop();
+         uint32_t lo = ir_value(ir_op::i64_mul, types::i64, lhs, rhs);
+         uint32_t hi = ir_value(high, types::i64, lhs, rhs);
+         _func->vpush(lo);
+         _func->vpush(hi);
+      }
+      void emit_i64_add128()     { ir_wide_addsub(ir_op::i64_add, true); }
+      void emit_i64_sub128()     { ir_wide_addsub(ir_op::i64_sub, false); }
+      void emit_i64_mul_wide_s() { ir_mul_wide(ir_op::i64_mulhi_s); }
+      void emit_i64_mul_wide_u() { ir_mul_wide(ir_op::i64_mulhi_u); }
       void emit_i64_trunc_s_f32()    { ir_unop(ir_op::i64_trunc_s_f32, types::i64); }
       void emit_i64_trunc_u_f32()    { ir_unop(ir_op::i64_trunc_u_f32, types::i64); }
       void emit_i64_trunc_s_f64()    { ir_unop(ir_op::i64_trunc_s_f64, types::i64); }

@@ -170,6 +170,7 @@ namespace psizam::detail {
             case ir_op::i64_and: case ir_op::i64_or: case ir_op::i64_xor:
             case ir_op::i64_shl: case ir_op::i64_shr_s: case ir_op::i64_shr_u:
             case ir_op::i64_rotl: case ir_op::i64_rotr:
+            case ir_op::i64_mulhi_s: case ir_op::i64_mulhi_u:
             case ir_op::i32_eq: case ir_op::i32_ne: case ir_op::i32_lt_s: case ir_op::i32_lt_u:
             case ir_op::i32_gt_s: case ir_op::i32_gt_u: case ir_op::i32_le_s: case ir_op::i32_le_u:
             case ir_op::i32_ge_s: case ir_op::i32_ge_u:

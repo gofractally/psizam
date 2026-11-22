@@ -365,6 +365,11 @@ namespace psizam::detail {
       UNOP(i64_trunc_sat_f64_s)
       UNOP(i64_trunc_sat_f64_u)
 
+      OP(i64_add128)
+      OP(i64_sub128)
+      OP(i64_mul_wide_s)
+      OP(i64_mul_wide_u)
+
       UNOP(i32_extend8_s)
       UNOP(i32_extend16_s)
       UNOP(i64_extend8_s)

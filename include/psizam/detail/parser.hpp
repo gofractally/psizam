@@ -3074,6 +3074,21 @@ namespace psizam::detail {
                      TRUNC_SAT_OP(i64, f64, s)
                      TRUNC_SAT_OP(i64, f64, u)
 #undef TRUNC_SAT_OP
+                     // Wide arithmetic: 128-bit values are (low, high) pairs of
+                     // i64 with the high half on top of the stack.
+#define WIDE_OP(name, operands)                                                         \
+                     case ext_opcodes::name: {                                          \
+                        check_in_bounds();                                              \
+                        for (int i = 0; i < operands; ++i) op_stack.pop(types::i64);    \
+                        op_stack.push(types::i64);                                      \
+                        op_stack.push(types::i64);                                      \
+                        code_writer.emit_ ## name();                                    \
+                     } break;
+                     WIDE_OP(i64_add128, 4)
+                     WIDE_OP(i64_sub128, 4)
+                     WIDE_OP(i64_mul_wide_s, 2)
+                     WIDE_OP(i64_mul_wide_u, 2)
+#undef WIDE_OP
                      case ext_opcodes::memory_init: {
                         check_in_bounds();
                         PSIZAM_ASSERT(get_enable_bulk_memory(_options), wasm_parse_exception, "Bulk memory not enabled");

@@ -226,7 +226,7 @@ pub unsafe extern "C" fn pzwt_engine_new(
     c.wasm_memory64(false);
     c.wasm_extended_const(false);
     c.wasm_custom_page_sizes(false);
-    c.wasm_wide_arithmetic(false);
+    c.wasm_wide_arithmetic(true);
     c.wasm_features(WasmFeatures::FUNCTION_REFERENCES, false);
     c.wasm_gc(false);
     c.collector(Collector::Null);

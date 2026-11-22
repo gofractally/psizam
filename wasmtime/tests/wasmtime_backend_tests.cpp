@@ -16,6 +16,7 @@
 #include <thread>
 
 #include "float_parity_ops.hpp"
+#include "wide_arithmetic_fixture.hpp"
 
 namespace wt = psizam::wasmtime;
 
@@ -761,4 +762,38 @@ TEST_CASE("wasmtime: a module with no functions still gets its memory and stack 
    CHECK(std::string_view(inst.memory().data() + 4, 3) == "abc");
    inst.set_stack_remaining(1234);
    CHECK(inst.stack_remaining() == 1234);
+}
+
+TEST_CASE("wasmtime: wide arithmetic matches 128-bit host arithmetic, plain and stack-metered")
+{
+   struct no_host {};
+   psizam::wasm_code     code = wide_arithmetic::module_bytes();
+   wt::runtime<no_host>  rt;
+   stack_options         psizam_options;
+   const auto            costs = wt::validate_and_cost(code, psizam_options);
+   for (bool metered : {false, true})
+   {
+      CAPTURE(metered);
+      no_host               h;
+      wt::instance<no_host> inst(rt, metered ? rt.compile_metered(code, costs) : rt.compile(code), h);
+      if (metered)
+         inst.set_stack_remaining(1 << 20);
+      uint64_t mismatches = 0;
+      wide_arithmetic::run_all(
+          [&](const char* name, uint64_t a, uint64_t b) {
+             return inst.call<uint64_t, uint64_t, uint64_t>(name, a, b);
+          },
+          [&](const char* name, uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+             return inst.call<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>(name, a, b, c, d);
+          },
+          [&](const char* name) { return inst.call<uint64_t>(name); },
+          [&](uint64_t actual, uint64_t expected, const std::string& name) {
+             if (actual != expected && mismatches++ < 8)
+             {
+                CAPTURE(name);
+                CHECK(actual == expected);
+             }
+          });
+      CHECK(mismatches == 0);
+   }
 }

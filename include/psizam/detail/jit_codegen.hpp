@@ -1428,6 +1428,14 @@ namespace psizam::detail {
          case ir_op::i32_rotr: emit_i32_shift(base::ROR_cl); break;
          case ir_op::i64_rotl: emit_i64_shift(base::ROL_cl); break;
          case ir_op::i64_rotr: emit_i64_shift(base::ROR_cl); break;
+         case ir_op::i64_mulhi_s:
+         case ir_op::i64_mulhi_u:
+            this->emit_pop_raw(rcx);
+            this->emit_pop_raw(rax);
+            // imul/mul %rcx: %rdx:%rax = %rax * %rcx
+            this->emit_bytes(0x48, 0xf7, inst.opcode == ir_op::i64_mulhi_s ? 0xe9 : 0xe1);
+            this->emit_push_raw(rdx);
+            break;
 
          // ── Unary integer ops ──
          case ir_op::i32_clz:
@@ -2866,6 +2874,15 @@ namespace psizam::detail {
          case ir_op::i64_shr_u: return emit_shift_reg(func, inst, 5, false);
          case ir_op::i64_rotl:  return emit_shift_reg(func, inst, 0, false);
          case ir_op::i64_rotr:  return emit_shift_reg(func, inst, 1, false);
+         case ir_op::i64_mulhi_s:
+         case ir_op::i64_mulhi_u:
+            load_vreg_rcx(inst.rr.src2);
+            load_vreg_rax(inst.rr.src1);
+            // imul/mul %rcx: %rdx:%rax = %rax * %rcx
+            this->emit_bytes(0x48, 0xf7, inst.opcode == ir_op::i64_mulhi_s ? 0xe9 : 0xe1);
+            this->emit_bytes(0x48, 0x89, 0xd0); // mov %rdx, %rax
+            store_rax_vreg(inst.dest);
+            return true;
 
          // Unary
          case ir_op::i32_eqz: {

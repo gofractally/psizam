@@ -2432,6 +2432,30 @@ namespace psizam::detail {
          emit_push_x(X0);
       }
 
+      // Wide arithmetic: (low, high) pairs with the high half on top.
+      void emit_i64_add128() { emit_i64_wide_addsub(0xAB020000, 0x9A030021); } // ADDS X0,X0,X2; ADC X1,X1,X3
+      void emit_i64_sub128() { emit_i64_wide_addsub(0xEB020000, 0xDA030021); } // SUBS X0,X0,X2; SBC X1,X1,X3
+      void emit_i64_wide_addsub(uint32_t low_op, uint32_t carry_op) {
+         emit_pop_x(X3); // b high
+         emit_pop_x(X2); // b low
+         emit_pop_x(X1); // a high
+         emit_pop_x(X0); // a low
+         emit32(low_op);
+         emit32(carry_op);
+         emit_push_x(X0);
+         emit_push_x(X1);
+      }
+      void emit_i64_mul_wide_s() { emit_i64_mul_wide(0x9B417C02); } // SMULH X2, X0, X1
+      void emit_i64_mul_wide_u() { emit_i64_mul_wide(0x9BC17C02); } // UMULH X2, X0, X1
+      void emit_i64_mul_wide(uint32_t high_op) {
+         emit_pop_x(X1);
+         emit_pop_x(X0);
+         emit32(high_op);
+         emit32(0x9B017C00); // MUL X0, X0, X1
+         emit_push_x(X0);
+         emit_push_x(X2);
+      }
+
       void emit_i64_div_s() {
          emit_binop_pop(X1, X0);
          // CBZ X1, fpe_handler

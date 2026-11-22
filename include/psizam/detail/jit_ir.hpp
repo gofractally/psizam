@@ -95,6 +95,8 @@ namespace psizam::detail {
       i32_and, i32_or, i32_xor, i32_shl, i32_shr_s, i32_shr_u, i32_rotl, i32_rotr,
       i64_add, i64_sub, i64_mul, i64_div_s, i64_div_u, i64_rem_s, i64_rem_u,
       i64_and, i64_or, i64_xor, i64_shl, i64_shr_s, i64_shr_u, i64_rotl, i64_rotr,
+      // High 64 bits of the 128-bit product (wide arithmetic)
+      i64_mulhi_s, i64_mulhi_u,
       // Unary float
       f32_abs, f32_neg, f32_ceil, f32_floor, f32_trunc, f32_nearest, f32_sqrt,
       f64_abs, f64_neg, f64_ceil, f64_floor, f64_trunc, f64_nearest, f64_sqrt,

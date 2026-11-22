@@ -1363,6 +1363,44 @@ namespace psizam::detail {
          auto& oper = context.peek_operand();
          oper = i64_const_t{ _psizam_i64_trunc_sat_f64_u(oper.to_f64()) };
       }
+      // Wide arithmetic: operands and results are (low, high) with high on top.
+      [[gnu::always_inline]] inline void operator()(const i64_add128_t& op) {
+         context.inc_pc();
+         const uint64_t b_hi = context.pop_operand().to_ui64();
+         const uint64_t b_lo = context.pop_operand().to_ui64();
+         const uint64_t a_hi = context.pop_operand().to_ui64();
+         auto&          lo   = context.peek_operand().to_ui64();
+         const uint64_t sum  = lo + b_lo;
+         const uint64_t hi   = a_hi + b_hi + (sum < b_lo);
+         lo = sum;
+         context.push_operand(i64_const_t{hi});
+      }
+      [[gnu::always_inline]] inline void operator()(const i64_sub128_t& op) {
+         context.inc_pc();
+         const uint64_t b_hi = context.pop_operand().to_ui64();
+         const uint64_t b_lo = context.pop_operand().to_ui64();
+         const uint64_t a_hi = context.pop_operand().to_ui64();
+         auto&          lo   = context.peek_operand().to_ui64();
+         const uint64_t hi   = a_hi - b_hi - (lo < b_lo);
+         lo -= b_lo;
+         context.push_operand(i64_const_t{hi});
+      }
+      [[gnu::always_inline]] inline void operator()(const i64_mul_wide_s_t& op) {
+         context.inc_pc();
+         const int64_t rhs = context.pop_operand().to_i64();
+         auto&         lo  = context.peek_operand().to_ui64();
+         const __int128 product = static_cast<__int128>(static_cast<int64_t>(lo)) * rhs;
+         lo = static_cast<uint64_t>(product);
+         context.push_operand(i64_const_t{static_cast<uint64_t>(static_cast<unsigned __int128>(product) >> 64)});
+      }
+      [[gnu::always_inline]] inline void operator()(const i64_mul_wide_u_t& op) {
+         context.inc_pc();
+         const uint64_t rhs = context.pop_operand().to_ui64();
+         auto&          lo  = context.peek_operand().to_ui64();
+         const unsigned __int128 product = static_cast<unsigned __int128>(lo) * rhs;
+         lo = static_cast<uint64_t>(product);
+         context.push_operand(i64_const_t{static_cast<uint64_t>(product >> 64)});
+      }
       [[gnu::always_inline]] inline void operator()(const i32_extend8_s_t& op) {
          context.inc_pc();
          auto& oper = context.peek_operand();

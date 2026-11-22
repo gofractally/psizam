@@ -192,6 +192,7 @@ namespace psizam::detail {
             case ir_op::i64_and: case ir_op::i64_or: case ir_op::i64_xor:
             case ir_op::i64_shl: case ir_op::i64_shr_s: case ir_op::i64_shr_u:
             case ir_op::i64_rotl: case ir_op::i64_rotr:
+            case ir_op::i64_mulhi_s: case ir_op::i64_mulhi_u:
             case ir_op::i32_eq: case ir_op::i32_ne:
             case ir_op::i32_lt_s: case ir_op::i32_lt_u: case ir_op::i32_gt_s: case ir_op::i32_gt_u:
             case ir_op::i32_le_s: case ir_op::i32_le_u: case ir_op::i32_ge_s: case ir_op::i32_ge_u:
@@ -501,6 +502,10 @@ namespace psizam::detail {
          case ir_op::i64_add:   result = a + b; return true;
          case ir_op::i64_sub:   result = a - b; return true;
          case ir_op::i64_mul:   result = a * b; return true;
+         case ir_op::i64_mulhi_s:
+            result = static_cast<int64_t>((static_cast<__int128>(a) * b) >> 64); return true;
+         case ir_op::i64_mulhi_u:
+            result = static_cast<int64_t>((static_cast<unsigned __int128>(ua) * ub) >> 64); return true;
          case ir_op::i64_and:   result = a & b; return true;
          case ir_op::i64_or:    result = a | b; return true;
          case ir_op::i64_xor:   result = a ^ b; return true;
@@ -566,6 +571,7 @@ namespace psizam::detail {
          case ir_op::i64_and: case ir_op::i64_or: case ir_op::i64_xor:
          case ir_op::i64_shl: case ir_op::i64_shr_s: case ir_op::i64_shr_u:
          case ir_op::i64_rotl: case ir_op::i64_rotr:
+         case ir_op::i64_mulhi_s: case ir_op::i64_mulhi_u:
          case ir_op::i32_eq: case ir_op::i32_ne:
          case ir_op::i32_lt_s: case ir_op::i32_lt_u: case ir_op::i32_gt_s: case ir_op::i32_gt_u:
          case ir_op::i32_le_s: case ir_op::i32_le_u: case ir_op::i32_ge_s: case ir_op::i32_ge_u:

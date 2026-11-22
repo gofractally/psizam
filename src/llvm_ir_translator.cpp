@@ -2505,6 +2505,18 @@ namespace psizam::detail {
                   store_vreg(inst.dest, builder.CreateMul(
                      load_vreg_as(inst.rr.src1, i64_ty), load_vreg_as(inst.rr.src2, i64_ty)));
                   break;
+               case ir_op::i64_mulhi_s:
+               case ir_op::i64_mulhi_u: {
+                  auto* i128_ty = llvm::Type::getInt128Ty(*ctx);
+                  const bool is_signed = inst.opcode == ir_op::i64_mulhi_s;
+                  auto* lhs = load_vreg_as(inst.rr.src1, i64_ty);
+                  auto* rhs = load_vreg_as(inst.rr.src2, i64_ty);
+                  auto* wide = builder.CreateMul(
+                     is_signed ? builder.CreateSExt(lhs, i128_ty) : builder.CreateZExt(lhs, i128_ty),
+                     is_signed ? builder.CreateSExt(rhs, i128_ty) : builder.CreateZExt(rhs, i128_ty));
+                  store_vreg(inst.dest, builder.CreateTrunc(builder.CreateLShr(wide, 64), i64_ty));
+                  break;
+               }
                case ir_op::i64_div_s: {
                   auto* lhs = load_vreg_as(inst.rr.src1, i64_ty);
                   auto* rhs = load_vreg_as(inst.rr.src2, i64_ty);

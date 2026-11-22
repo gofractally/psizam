@@ -2001,6 +2001,8 @@ namespace psizam::detail {
          case ir_op::i64_shr_s: emit_binop_simple(inst, 0x9AC02800, false); break;
          case ir_op::i64_rotl: emit_i64_rotl(inst); break;
          case ir_op::i64_rotr:  emit_binop_simple(inst, 0x9AC02C00, false); break;
+         case ir_op::i64_mulhi_s: emit_binop_simple(inst, 0x9B407C00, false); break; // SMULH
+         case ir_op::i64_mulhi_u: emit_binop_simple(inst, 0x9BC07C00, false); break; // UMULH
 
          // ── Division (with trap checks for div-by-zero and overflow) ──
          case ir_op::i32_div_s: emit_i32_div_s(inst); break;

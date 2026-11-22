@@ -2487,6 +2487,31 @@ namespace psizam::detail {
          emit(IMUL, rcx, rax);
          emit_push(rax);
       }
+
+      // Wide arithmetic: (low, high) pairs with the high half on top.
+      void emit_i64_add128() { emit_i64_wide_addsub(0x01, 0x11); }
+      void emit_i64_sub128() { emit_i64_wide_addsub(0x29, 0x19); }
+      void emit_i64_wide_addsub(uint8_t low_op, uint8_t carry_op) {
+         COUNT_INSTR();
+         emit_pop(rcx); // b high
+         emit_pop(rdx); // b low
+         emit_pop(r8);  // a high
+         emit_pop(rax); // a low
+         emit_bytes(0x48, low_op, 0xd0);   // add/sub %rdx, %rax
+         emit_bytes(0x49, carry_op, 0xc8); // adc/sbb %rcx, %r8
+         emit_push(rax);
+         emit_push(r8);
+      }
+      void emit_i64_mul_wide_s() { emit_i64_mul_wide(0xe9); } // imul %rcx
+      void emit_i64_mul_wide_u() { emit_i64_mul_wide(0xe1); } // mul %rcx
+      void emit_i64_mul_wide(uint8_t modrm) {
+         COUNT_INSTR();
+         emit_pop(rcx);
+         emit_pop(rax);
+         emit_bytes(0x48, 0xf7, modrm); // %rdx:%rax = %rax * %rcx
+         emit_push(rax);
+         emit_push(rdx);
+      }
       // cdq; idiv %rcx; pushq %rax
       void emit_i64_div_s() {
          COUNT_INSTR();
