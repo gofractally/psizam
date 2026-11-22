@@ -300,6 +300,8 @@ void register_canonical_host_fn(const std::string& mod, const std::string& name)
 
    m.fast_fwd.push_back(nullptr);
    m.fast_rev.push_back(nullptr);
+   m.memory16_fwd.push_back(nullptr);
+   m.memory16_rev.push_back(nullptr);
    m.raw_ptrs.push_back(nullptr);
 }
 
