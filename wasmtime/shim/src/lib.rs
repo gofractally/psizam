@@ -129,6 +129,29 @@ fn report(out: *mut PzwtError, error: &Error) -> i32 {
     }
 }
 
+/// Bump when the module rewriting in stack_meter.rs changes what is compiled.
+const REWRITE_REVISION: u32 = 1;
+
+/// Identifies what this build compiles a module into: the wasmtime version,
+/// this shim's rewriting, and the target. Part of any key under which a
+/// compiled artifact is stored. A static, NUL-terminated string.
+#[no_mangle]
+pub extern "C" fn pzwt_identity() -> *const c_char {
+    static IDENTITY: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
+    IDENTITY
+        .get_or_init(|| {
+            CString::new(format!(
+                "wasmtime 51.0.0; psizam shim {} rewrite {}; {}-{}",
+                env!("CARGO_PKG_VERSION"),
+                REWRITE_REVISION,
+                std::env::consts::ARCH,
+                std::env::consts::OS
+            ))
+            .unwrap()
+        })
+        .as_ptr()
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pzwt_string_free(message: *mut c_char) {
     if !message.is_null() {

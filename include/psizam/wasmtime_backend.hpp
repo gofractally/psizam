@@ -83,6 +83,7 @@ namespace abi {
       uint8_t        needs_memory;
    };
 
+   const char* pzwt_identity();
    void        pzwt_string_free(char*);
    PzwtEngine* pzwt_engine_new(const PzwtConfig*, PzwtError*);
    void        pzwt_engine_delete(PzwtEngine*);
@@ -396,6 +397,15 @@ inline std::vector<uint8_t> rewritten(std::span<const uint8_t> wasm,
                          fp == float_profile::strict, sink, &out, &e))
       detail::raise(e);
    return out;
+}
+
+// What this build compiles a module into: the wasmtime version, the shim's
+// module rewriting, and the target. Include it, with the module's own hash and
+// the engine_options used, in any key under which module::serialize output is
+// stored.
+inline std::string_view build_identity()
+{
+   return abi::pzwt_identity();
 }
 
 // ── module ──────────────────────────────────────────────────────────────────
