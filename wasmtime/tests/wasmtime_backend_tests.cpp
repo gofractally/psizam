@@ -532,3 +532,162 @@ TEST_CASE("wasmtime: an exhausted stack budget is reported as a stack overflow")
    CHECK(inst.call<uint32_t, uint32_t>("leaf", 0) > 0);
    CHECK(inst.stack_remaining() == 1 << 20);
 }
+
+namespace {
+// How deep the native stack is at a host call, and what the logical budget
+// shows there, for the cheapest possible frames.
+struct depth_host {
+   std::function<uint32_t()> remaining;
+   uintptr_t                 shallowest = 0, deepest = UINTPTR_MAX;
+   uint32_t                  left_at_deepest = 0;
+   void mark()
+   {
+      auto here = reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
+      shallowest = std::max(shallowest, here);
+      if (here < deepest)
+      {
+         deepest         = here;
+         left_at_deepest = remaining();
+      }
+   }
+};
+}  // namespace
+
+TEST_CASE("wasmtime: the byte budget ends recursion before the native stack can")
+{
+   // Each shape recurses n levels and calls the host at the bottom. The host
+   // records how much native stack that took.
+   constexpr std::string_view shapes = R"((module
+     (import "env" "mark" (func $mark))
+     (func $bare (export "bare") (param i32)
+       (if (local.get 0) (then (call $bare (i32.sub (local.get 0) (i32.const 1)))) (else (call $mark))))
+     (func $locals (export "locals") (param i32) (local i32 i32 i32 i32 i64 i64 f32 f64)
+       (if (local.get 0) (then (call $locals (i32.sub (local.get 0) (i32.const 1)))) (else (call $mark))))
+     (func $vectors (export "vectors") (param i32) (local v128 v128 v128)
+       (if (local.get 0) (then (call $vectors (i32.sub (local.get 0) (i32.const 1)))) (else (call $mark))))
+     (func (export "params") (param i32)
+       (call $params (local.get 0) (i64.const 1) (i64.const 2) (f64.const 3) (f64.const 4)
+         (i32.const 5) (i32.const 6) (i64.const 7)))
+     (func $params (param i32 i64 i64 f64 f64 i32 i32 i64)
+       (if (local.get 0)
+         (then (call $params (i32.sub (local.get 0) (i32.const 1)) (local.get 1) (local.get 2)
+                 (local.get 3) (local.get 4) (local.get 5) (local.get 6) (local.get 7)))
+         (else (call $mark))))
+     (func $live (export "live") (param i32) (result i64)
+       (if (result i64) (local.get 0)
+         (then (i64.add (i64.add (i64.const 1) (i64.extend_i32_u (local.get 0)))
+                        (call $live (i32.sub (local.get 0) (i32.const 1)))))
+         (else (call $mark) (i64.const 0))))
+     (func $forever (export "forever") (call $forever))
+   ))";
+   constexpr uint32_t budget = 1 << 20;
+   wt::engine_options options;
+   options.native_stack = 64ull << 20;
+   wt::runtime<depth_host> rt(options);
+   rt.add<&depth_host::mark>("env", "mark");
+   psizam::wasm_code code = wt::assemble(shapes);
+   stack_options     psizam_options;
+   auto              costs = wt::validate_and_cost(code, psizam_options);
+
+   double worst = 0;
+   for (const char* shape : {"bare", "locals", "vectors", "params", "live"})
+   {
+      depth_host               h;
+      wt::instance<depth_host> inst(rt, rt.compile_metered(code, costs), h);
+      h.remaining = [&] { return inst.stack_remaining(); };
+      uint32_t levels = 4000;
+      inst.set_stack_remaining(budget);
+      inst.call_discarding_results(shape, levels);
+      depth_host top;
+      wt::instance<depth_host> again(rt, rt.compile_metered(code, costs), top);
+      top.remaining = [&] { return again.stack_remaining(); };
+      again.set_stack_remaining(budget);
+      again.call_discarding_results(shape, 0u);
+      double native  = double(top.deepest) - double(h.deepest);
+      double logical = double(top.left_at_deepest) - double(h.left_at_deepest);
+      INFO(shape << ": native " << native / levels << " bytes per frame, logical "
+                 << logical / levels);
+      REQUIRE(logical > 0);
+      worst = std::max(worst, native / logical);
+      // The dedicated stack is 64 times the budget; frames must stay far
+      // inside that for the budget to be the limit that binds.
+      CHECK(native / logical < 16);
+   }
+   WARN("worst native bytes per budget byte: " << worst);
+
+   // With the whole budget, unbounded recursion of the cheapest frame ends in
+   // the injected check, not in wasmtime's native-stack check.
+   depth_host               h;
+   wt::instance<depth_host> inst(rt, rt.compile_metered(code, costs), h);
+   inst.set_stack_remaining(budget);
+   try
+   {
+      inst.call("forever");
+      FAIL("expected a stack overflow");
+   }
+   catch (const wt::trap& t)
+   {
+      CHECK(t.kind == wt::trap_kind::stack_overflow);
+      CHECK(std::string(t.what()) == "stack overflow");
+   }
+}
+
+TEST_CASE("wasmtime: stack accounting covers multi-result functions and the start function")
+{
+   constexpr std::string_view text = R"((module
+     (import "env" "observe" (func $observe (param i32) (result i32)))
+     (import "env" "reenter" (func $reenter (param i32) (result i32)))
+     (global $started (mut i32) (i32.const 0))
+     (func $pair (param i32) (result i32 i64) (local i64)
+       (if (local.get 0) (then (return (call $observe (i32.const 1)) (i64.const 7))))
+       (call $observe (i32.const 2)) (i64.const 9))
+     (func (export "sum") (param i32) (result i32)
+       (call $pair (local.get 0)) (i32.wrap_i64) (i32.add))
+     (func $init (global.set $started (call $observe (i32.const 3))))
+     (func (export "started") (param i32) (result i32) (global.get $started))
+     (start $init)
+   ))";
+   wt::engine_options options;
+   options.features |= wt::feature::multi_value;
+   wt::runtime<stack_host> rt(options);
+   rt.add<&stack_host::observe>("env", "observe").add<&stack_host::reenter>("env", "reenter");
+   psizam::wasm_code code = wt::assemble(text);
+   stack_options     psizam_options;
+   auto              costs = wt::validate_and_cost(code, psizam_options);
+
+   stack_host ref_host;
+   psizam::wasm_allocator      wa;
+   psizam::host_function_table table;
+   table.add<&stack_host::observe>("env", "observe");
+   table.add<&stack_host::reenter>("env", "reenter");
+   psizam::backend<psizam::registered_host_functions<stack_host>, psizam::jit, stack_options>
+       reference(code, std::move(table), &ref_host, &wa, psizam_options);
+   ref_host.remaining = [&] { return reference.get_context().get_remaining_call_depth(); };
+   ref_host.nested    = [](uint32_t) { return 0u; };
+   reference.get_context().set_max_call_depth(5000);
+   reference.initialize(&ref_host);
+   auto reference_start = ref_host.seen;
+
+   stack_host               h;
+   wt::instance<stack_host> inst(rt, rt.compile_metered(code, costs), h);
+   h.remaining = [&] { return inst.stack_remaining(); };
+   h.nested    = [](uint32_t) { return 0u; };
+   // Nothing has run yet: the start function waits for a budget.
+   CHECK(h.seen.empty());
+   inst.set_stack_remaining(5000);
+   inst.run_start();
+   CHECK(h.seen == reference_start);
+   REQUIRE(h.seen.size() == 1);
+
+   for (uint32_t budget : {5000u, 100u, 60u, 40u, 20u})
+      for (uint32_t arg : {0u, 1u})
+      {
+         auto expected = run_once(
+             ref_host, budget, [&](uint32_t b) { reference.get_context().set_max_call_depth(b); },
+             [&] { return reference.call_with_return(ref_host, "env", "sum", arg)->to_ui32(); });
+         auto actual = run_once(h, budget, [&](uint32_t b) { inst.set_stack_remaining(b); },
+                                [&] { return inst.call<uint32_t, uint32_t>("sum", arg); });
+         INFO("budget " << budget << " arg " << arg);
+         CHECK(actual == expected);
+      }
+}

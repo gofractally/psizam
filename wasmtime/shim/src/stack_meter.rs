@@ -23,6 +23,10 @@ use wasmparser::{Operator, Parser, Payload};
 
 pub const STACK_EXPORT: &str = "psizam:stack-remaining";
 
+/// The module's start function is not run at instantiation, where no budget
+/// has been set yet. It is exported under this name for the host to call.
+pub const START_EXPORT: &str = "psizam:start";
+
 /// Written to the counter just before the overflow trap, so the host can tell
 /// a stack overflow from an ordinary `unreachable`. Budgets stay below 2^31.
 pub const OVERFLOW_SENTINEL: u32 = u32::MAX;
@@ -37,6 +41,13 @@ struct Meter<'a> {
     has_export_section: bool,
     added_global: bool,
     added_export: bool,
+    /// The module's start function, if it has one.
+    start: Option<u32>,
+    /// Types to append: `() -> results` for functions with several results,
+    /// which the wrapping block needs and the module may not declare.
+    extra_types: Vec<Vec<wasmparser::ValType>>,
+    /// Index of the `() -> results` type for each defined function that needs one.
+    block_types: Vec<Option<u32>>,
 }
 
 /// Position of a section in a module. Custom sections have none.
@@ -60,6 +71,14 @@ fn rank(id: SectionId) -> Option<u32> {
 }
 
 impl Meter<'_> {
+    fn add_exports(&mut self, exports: &mut ExportSection) {
+        exports.export(STACK_EXPORT, ExportKind::Global, self.stack_global);
+        if let Some(start) = self.start {
+            exports.export(START_EXPORT, ExportKind::Func, start);
+        }
+        self.added_export = true;
+    }
+
     fn counter_global(&self) -> (GlobalType, ConstExpr) {
         (
             GlobalType { val_type: ValType::I32, mutable: true, shared: false },
@@ -70,6 +89,22 @@ impl Meter<'_> {
 
 impl Reencode for Meter<'_> {
     type Error = String;
+
+    fn parse_type_section(
+        &mut self,
+        types: &mut wasm_encoder::TypeSection,
+        section: wasmparser::TypeSectionReader<'_>,
+    ) -> Result<(), Error<String>> {
+        wasm_encoder::reencode::utils::parse_type_section(self, types, section)?;
+        for results in std::mem::take(&mut self.extra_types) {
+            let results = results
+                .into_iter()
+                .map(|t| self.val_type(t))
+                .collect::<Result<Vec<_>, _>>()?;
+            types.ty().function([], results);
+        }
+        Ok(())
+    }
 
     fn parse_global_section(
         &mut self,
@@ -89,8 +124,7 @@ impl Reencode for Meter<'_> {
         section: wasmparser::ExportSectionReader<'_>,
     ) -> Result<(), Error<String>> {
         wasm_encoder::reencode::utils::parse_export_section(self, exports, section)?;
-        exports.export(STACK_EXPORT, ExportKind::Global, self.stack_global);
-        self.added_export = true;
+        self.add_exports(exports);
         Ok(())
     }
 
@@ -118,9 +152,8 @@ impl Reencode for Meter<'_> {
         }
         if !self.has_export_section && !self.added_export && next > 70 {
             let mut exports = ExportSection::new();
-            exports.export(STACK_EXPORT, ExportKind::Global, self.stack_global);
+            self.add_exports(&mut exports);
             module.section(&exports);
-            self.added_export = true;
         }
         Ok(())
     }
@@ -144,11 +177,9 @@ impl Reencode for Meter<'_> {
         let block = match results.as_slice() {
             [] => BlockType::Empty,
             [one] => BlockType::Result(self.val_type(*one)?),
-            _ => {
-                return Err(Error::UserError(
-                    "stack accounting does not support multiple results".to_string(),
-                ))
-            }
+            _ => BlockType::FunctionType(self.block_types[index].ok_or_else(|| {
+                Error::UserError("missing block type for a multi-result function".to_string())
+            })?),
         };
         let g = self.stack_global;
 
@@ -219,9 +250,48 @@ impl Reencode for Meter<'_> {
     }
 }
 
+/// Removes the start section, returning the module without it and the start
+/// function's index. Sections are `id, size (LEB128), contents`.
+fn strip_start(wasm: &[u8]) -> Result<(Vec<u8>, Option<u32>), String> {
+    fn leb(bytes: &[u8], at: &mut usize) -> Result<u32, String> {
+        let mut value = 0u32;
+        for shift in (0..35).step_by(7) {
+            let byte = *bytes.get(*at).ok_or("truncated module")?;
+            *at += 1;
+            value |= u32::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+        }
+        Err("invalid integer in module".to_string())
+    }
+    let mut out = wasm.get(..8).ok_or("truncated module")?.to_vec();
+    let mut start = None;
+    let mut at = 8;
+    while at < wasm.len() {
+        let begin = at;
+        let id = wasm[at];
+        at += 1;
+        let size = leb(wasm, &mut at)? as usize;
+        let end = at.checked_add(size).filter(|e| *e <= wasm.len()).ok_or("truncated section")?;
+        if id == 8 {
+            let mut inner = at;
+            start = Some(leb(wasm, &mut inner)?);
+        } else {
+            out.extend_from_slice(&wasm[begin..end]);
+        }
+        at = end;
+    }
+    Ok((out, start))
+}
+
 /// Returns `wasm` with stack accounting added. `costs` has one entry per
 /// defined function, in order.
 pub fn add_stack_accounting(wasm: &[u8], costs: &[u32]) -> Result<Vec<u8>, String> {
+    let (stripped, start) = strip_start(wasm)?;
+    let wasm = stripped.as_slice();
+    // (parameter count, results) of every type, by index.
+    let mut signatures: Vec<(usize, Vec<wasmparser::ValType>)> = Vec::new();
     let mut types: Vec<Vec<wasmparser::ValType>> = Vec::new();
     let mut function_types: Vec<u32> = Vec::new();
     let mut globals: u32 = 0;
@@ -233,10 +303,14 @@ pub fn add_stack_accounting(wasm: &[u8], costs: &[u32]) -> Result<Vec<u8>, Strin
             Payload::TypeSection(section) => {
                 for group in section {
                     for ty in group.map_err(|e| e.to_string())?.into_types() {
-                        types.push(match &ty.composite_type.inner {
-                            wasmparser::CompositeInnerType::Func(f) => f.results().to_vec(),
-                            _ => Vec::new(),
-                        });
+                        let (params, results) = match &ty.composite_type.inner {
+                            wasmparser::CompositeInnerType::Func(f) => {
+                                (f.params().len(), f.results().to_vec())
+                            }
+                            _ => (usize::MAX, Vec::new()),
+                        };
+                        signatures.push((params, results.clone()));
+                        types.push(results);
                     }
                 }
             }
@@ -274,9 +348,28 @@ pub fn add_stack_accounting(wasm: &[u8], costs: &[u32]) -> Result<Vec<u8>, Strin
             function_types.len()
         ));
     }
-    let results = function_types
+    let results: Vec<Vec<wasmparser::ValType>> = function_types
         .iter()
         .map(|t| types.get(*t as usize).cloned().unwrap_or_default())
+        .collect();
+    // A function with several results is wrapped in a block of type
+    // `() -> results`. Use a type the module already has, or add one.
+    let mut extra_types: Vec<Vec<wasmparser::ValType>> = Vec::new();
+    let block_types = results
+        .iter()
+        .map(|r| {
+            if r.len() < 2 {
+                return None;
+            }
+            if let Some(i) = signatures.iter().position(|(params, res)| *params == 0 && res == r) {
+                return Some(i as u32);
+            }
+            let extra = extra_types.iter().position(|e| e == r).unwrap_or_else(|| {
+                extra_types.push(r.clone());
+                extra_types.len() - 1
+            });
+            Some((signatures.len() + extra) as u32)
+        })
         .collect();
 
     let mut meter = Meter {
@@ -288,6 +381,9 @@ pub fn add_stack_accounting(wasm: &[u8], costs: &[u32]) -> Result<Vec<u8>, Strin
         has_export_section,
         added_global: false,
         added_export: false,
+        start,
+        extra_types,
+        block_types,
     };
     let mut module = Module::new();
     meter

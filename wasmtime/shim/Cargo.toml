@@ -26,6 +26,9 @@ wasmtime = { version = "=51.0.0", default-features = false, features = [
 # versions wasmtime itself resolves to.
 wasmparser = "=0.263.0"
 wat = "=1.263.0"
+# Runs wasm on a dedicated native stack.
+psm = "0.1"
+libc = "0.2"
 wasm-encoder = { version = "=0.263.0", features = ["wasmparser"] }
 
 [profile.release]

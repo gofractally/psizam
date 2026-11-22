@@ -47,6 +47,7 @@ namespace abi {
       uint32_t features;
       uint32_t float_profile;
       uint64_t max_wasm_stack;
+      uint64_t native_stack;
       uint8_t  epoch_interruption;
    };
    struct PzwtError {
@@ -170,8 +171,14 @@ struct engine_options {
    uint32_t      features = feature::simd | feature::relaxed_simd | feature::bulk_memory |
                             feature::sign_extension | feature::saturating_float_to_int;
    float_profile fp       = float_profile::performance;
-   // Native stack for wasm frames. Zero keeps wasmtime's default.
-   uint64_t max_wasm_stack     = 0;
+   // Native stack wasmtime allows wasm frames per entry. Zero keeps wasmtime's
+   // default, or half of native_stack when that is set.
+   uint64_t max_wasm_stack = 0;
+   // If nonzero, the outermost call into wasm on a thread runs on a dedicated
+   // native stack of this many bytes. Use it with compile_metered: size it so
+   // the byte budget always runs out first, and the overflow point then never
+   // depends on native frame sizes or on the calling thread's stack.
+   uint64_t native_stack       = 0;
    bool     epoch_interruption = true;
 };
 
@@ -310,11 +317,15 @@ namespace detail {
             // argument reads the slots that follow the previous one.
             std::tuple<std::decay_t<Args>...> args{load<Args>(values, slot, m)...};
             auto& self = *static_cast<Host*>(state->host);
+            // By-value parameters are moved into the call, so move-only
+            // argument types work; reference parameters bind to the tuple.
             if constexpr (std::is_void_v<R>)
-               std::apply([&](auto&... a) { (self.*Fn)(a...); }, args);
+               std::apply([&](auto&... a) { (self.*Fn)(static_cast<Args&&>(a)...); }, args);
             else
-               value_traits<R>::store(values,
-                                      std::apply([&](auto&... a) { return (self.*Fn)(a...); }, args));
+               value_traits<R>::store(
+                   values, std::apply([&](auto&... a) {
+                      return (self.*Fn)(static_cast<Args&&>(a)...);
+                   }, args));
          }
          catch (...)
          {
@@ -421,7 +432,9 @@ class runtime {
    explicit runtime(const engine_options& options = {})
    {
       abi::PzwtConfig config{options.features, static_cast<uint32_t>(options.fp),
-                             options.max_wasm_stack, options.epoch_interruption};
+                             options.max_wasm_stack ? options.max_wasm_stack
+                                                    : options.native_stack / 2,
+                             options.native_stack, options.epoch_interruption};
       abi::PzwtError  e{};
       auto*           p = abi::pzwt_engine_new(&config, &e);
       if (!p)
@@ -567,6 +580,55 @@ class instance {
    R call(std::string_view name, Args... args)
    {
       return bind<R(Args...)>(name)(args...);
+   }
+
+   // Calls an export, checking only its parameters and discarding whatever it
+   // returns. This is how psizam's engines treat an entry point.
+   template <typename... Args>
+   void call_discarding_results(std::string_view name, Args... args)
+   {
+      constexpr auto want_params = detail::param_types<Args...>();
+      uint8_t        params[32], results[32];
+      size_t         nparams = 0, nresults = 0;
+      std::unique_ptr<abi::PzwtFunc, void (*)(abi::PzwtFunc*)> f(
+          abi::pzwt_instance_func(state_->active, instance_.get(), name.data(), name.size(), params,
+                                  &nparams, results, &nresults, 32),
+          abi::pzwt_func_delete);
+      if (!f)
+         throw error("no callable export named " + std::string(name));
+      if (nparams != want_params.size() ||
+          !std::equal(want_params.begin(), want_params.end(), params))
+         throw error("export " + std::string(name) + " does not take the given arguments");
+      abi::PzwtValue values[32]{};
+      size_t         slot = 0;
+      auto put = [&](auto x) {
+         detail::value_traits<decltype(x)>::store(values + slot, x);
+         slot += detail::value_traits<decltype(x)>::types.size();
+      };
+      (put(args), ...);
+      abi::PzwtError e{};
+      if (abi::pzwt_call(state_->active, f.get(), values, 32, &e))
+         fail(e);
+   }
+
+   // Runs the module's start function, if it has one. Only needed for a module
+   // compiled with compile_metered, whose start function is held back until
+   // the host has set a stack budget; otherwise it already ran.
+   void run_start()
+   {
+      uint8_t params[32], results[32];
+      size_t  nparams = 0, nresults = 0;
+      static constexpr std::string_view name = "psizam:start";
+      std::unique_ptr<abi::PzwtFunc, void (*)(abi::PzwtFunc*)> f(
+          abi::pzwt_instance_func(state_->active, instance_.get(), name.data(), name.size(), params,
+                                  &nparams, results, &nresults, 32),
+          abi::pzwt_func_delete);
+      if (!f)
+         return;
+      abi::PzwtValue values[1]{};
+      abi::PzwtError e{};
+      if (abi::pzwt_call(state_->active, f.get(), values, 1, &e))
+         fail(e);
    }
 
    std::span<char> memory()

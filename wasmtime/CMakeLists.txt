@@ -30,7 +30,8 @@ set_target_properties(psizam-wasmtime-shim PROPERTIES IMPORTED_LOCATION "${_shim
 add_dependencies(psizam-wasmtime-shim psizam-wasmtime-shim-build)
 
 add_library(psizam-wasmtime INTERFACE)
-target_include_directories(psizam-wasmtime INTERFACE "${PROJECT_SOURCE_DIR}/include")
+# Relative to this file, so another project can add this directory directly.
+target_include_directories(psizam-wasmtime INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/../include")
 target_compile_features(psizam-wasmtime INTERFACE cxx_std_20)
 target_compile_definitions(psizam-wasmtime INTERFACE PSIZAM_ENABLE_WASMTIME_BACKEND)
 target_link_libraries(psizam-wasmtime INTERFACE psizam-wasmtime-shim)

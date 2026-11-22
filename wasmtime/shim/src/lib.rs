@@ -40,6 +40,10 @@ pub struct PzwtConfig {
     pub float_profile: u32,
     /// Native stack available to wasm, in bytes. Not the consensus stack rule.
     pub max_wasm_stack: u64,
+    /// If nonzero, the outermost call into wasm on a thread runs on a
+    /// dedicated native stack of this size, so that deep recursion is bounded
+    /// by the embedder's own stack accounting and not by the calling thread.
+    pub native_stack: u64,
     pub epoch_interruption: u8,
 }
 
@@ -136,6 +140,7 @@ pub unsafe extern "C" fn pzwt_string_free(message: *mut c_char) {
 pub struct PzwtEngine {
     engine: Engine,
     epoch_interruption: bool,
+    native_stack: usize,
 }
 
 #[no_mangle]
@@ -194,6 +199,9 @@ pub unsafe extern "C" fn pzwt_engine_new(
 
     c.epoch_interruption(config.epoch_interruption != 0);
     if config.max_wasm_stack != 0 {
+        // wasmtime requires its async stack size, which this engine never
+        // uses, to be at least the wasm stack limit.
+        c.async_stack_size(config.max_wasm_stack as usize);
         c.max_wasm_stack(config.max_wasm_stack as usize);
     }
 
@@ -201,6 +209,7 @@ pub unsafe extern "C" fn pzwt_engine_new(
         Ok(engine) => Box::into_raw(Box::new(PzwtEngine {
             engine,
             epoch_interruption: config.epoch_interruption != 0,
+            native_stack: config.native_stack as usize,
         })),
         Err(e) => {
             report(error, &e);
@@ -340,6 +349,8 @@ struct Data {
     memory: Option<Memory>,
     /// The stack counter of a module compiled with stack accounting.
     stack: Option<Global>,
+    /// The engine's dedicated-stack size, for calls made through this store.
+    native_stack: usize,
     limits: StoreLimits,
     interrupt: Arc<AtomicBool>,
 }
@@ -355,6 +366,79 @@ pub struct PzwtStore {
     context: Option<PzwtContext>,
     store: Box<Store<Data>>,
     engine: Engine,
+}
+
+// ── dedicated native stack ──────────────────────────────────────────────────
+
+/// A mapped stack with an inaccessible page below it.
+struct NativeStack {
+    map: *mut u8,
+    map_len: usize,
+    base: *mut u8,
+    size: usize,
+}
+
+impl NativeStack {
+    fn new(size: usize) -> Option<NativeStack> {
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let size = size.div_ceil(page) * page;
+        let map_len = size + page;
+        let map = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                map_len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if map == libc::MAP_FAILED {
+            return None;
+        }
+        let map = map as *mut u8;
+        unsafe { libc::mprotect(map as *mut c_void, page, libc::PROT_NONE) };
+        Some(NativeStack { map, map_len, base: unsafe { map.add(page) }, size })
+    }
+}
+
+impl Drop for NativeStack {
+    fn drop(&mut self) {
+        unsafe { libc::munmap(self.map as *mut c_void, self.map_len) };
+    }
+}
+
+thread_local! {
+    // One stack per thread, kept between calls. `Some` only while no call on
+    // this thread is using it.
+    static IDLE_STACK: std::cell::RefCell<Option<NativeStack>> = const { std::cell::RefCell::new(None) };
+    // How many wasm calls are active on this thread.
+    static CALL_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Runs `f`. The outermost call on a thread moves to the dedicated stack;
+/// calls nested inside it are already there.
+fn on_native_stack<R>(size: usize, f: impl FnOnce() -> R) -> R {
+    let depth = CALL_DEPTH.get();
+    CALL_DEPTH.set(depth + 1);
+    let result = if depth > 0 || size == 0 {
+        f()
+    } else {
+        let stack = IDLE_STACK
+            .with(|s| s.borrow_mut().take())
+            .filter(|s| s.size >= size)
+            .or_else(|| NativeStack::new(size));
+        match stack {
+            Some(stack) => {
+                let result = unsafe { psm::on_stack(stack.base, stack.size, f) };
+                IDLE_STACK.with(|s| *s.borrow_mut() = Some(stack));
+                result
+            }
+            None => f(),
+        }
+    };
+    CALL_DEPTH.set(depth);
+    result
 }
 
 #[repr(C)]
@@ -375,6 +459,7 @@ pub unsafe extern "C" fn pzwt_store_new(
         host,
         memory: None,
         stack: None,
+        native_stack: 0,
         limits: StoreLimitsBuilder::new()
             .memory_size(limits.max_memory_bytes as usize)
             .table_elements(limits.max_table_elements as usize)
@@ -400,6 +485,7 @@ pub unsafe extern "C" fn pzwt_store_new(
         });
     }
     let mut result = Box::new(PzwtStore { context: None, store, engine: engine.engine.clone() });
+    result.store.data_mut().native_stack = engine.native_stack;
     let context: StoreContextMut<'_, Data> = result.store.as_context_mut();
     result.context = Some(PzwtContext(std::mem::transmute::<
         StoreContextMut<'_, Data>,
@@ -655,7 +741,10 @@ pub unsafe extern "C" fn pzwt_instantiate(
     error: *mut PzwtError,
 ) -> *mut PzwtInstance {
     let cx = &mut (*context).0;
-    match (*linker).0.instantiate(&mut *cx, &(*module).0) {
+    let native_stack = cx.data().native_stack;
+    let outcome =
+        on_native_stack(native_stack, || (*linker).0.instantiate(&mut *cx, &(*module).0));
+    match outcome {
         Ok(instance) => {
             let memory = instance.get_memory(&mut *cx, "memory");
             cx.data_mut().memory = memory;
@@ -743,7 +832,10 @@ pub unsafe extern "C" fn pzwt_call(
 ) -> i32 {
     let cx = &mut (*context).0;
     let values = std::ptr::slice_from_raw_parts_mut(values, count);
-    match (*func).0.call_unchecked(&mut *cx, values) {
+    let native_stack = cx.data().native_stack;
+    let func = &(*func).0;
+    let outcome = on_native_stack(native_stack, || func.call_unchecked(&mut *cx, values));
+    match outcome {
         Ok(()) => PZWT_OK,
         Err(e) => {
             // The injected overflow check marks the counter, then traps.
