@@ -308,6 +308,13 @@ if(PSIZAM_ENABLE_TESTS AND NOT CMAKE_SYSTEM_NAME STREQUAL "WASI")
    endif()
 endif()
 
+# ── Wasmtime Backend (opt-in) ─────────────────────────────────────────────────
+# Upstream wasmtime (Cranelift) as an execution engine, built with cargo.
+option(PSIZAM_ENABLE_WASMTIME "Build the wasmtime execution backend (needs cargo)" OFF)
+if(PSIZAM_ENABLE_WASMTIME)
+   add_subdirectory(wasmtime)
+endif()
+
 # ── Install ────────────────────────────────────────────────────────────────────
 if(PSIZAM_ENABLE_INSTALL)
    include(GNUInstallDirs)

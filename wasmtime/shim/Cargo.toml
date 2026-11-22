@@ -1,0 +1,29 @@
+[package]
+name = "psizam-wasmtime-shim"
+version = "0.1.0"
+edition = "2021"
+publish = false
+rust-version = "1.97"
+description = "C ABI over wasmtime for the psizam wasmtime backend"
+
+[lib]
+crate-type = ["staticlib"]
+
+# The wasmtime version is consensus-relevant: pin it exactly. The psizam fork
+# (deterministic stack accounting, strict relaxed-madd profile) will be wired in
+# through [patch.crates-io] here; until then only upstream behaviour is exposed.
+[dependencies]
+wasmtime = { version = "=51.0.0", default-features = false, features = [
+    "runtime",
+    "cranelift",
+    "std",
+    "threads",
+    "parallel-compilation",
+    "wat",
+] }
+
+[profile.release]
+opt-level = 3
+debug = 1
+panic = "abort"
+codegen-units = 16
