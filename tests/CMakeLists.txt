@@ -514,7 +514,7 @@ if(PSIZAM_ENABLE_LLVM)
       PSIZAM_AOT_PHYSICAL_WASM="${CMAKE_CURRENT_BINARY_DIR}/aot-physical.wasm"
       PSIZAM_AOT_PHYSICAL_BATCH_WASM="${CMAKE_CURRENT_BINARY_DIR}/aot-physical-batch.wasm")
    target_link_libraries(psizam_aot_physical_tests PRIVATE psizam psizam-exec psizam-llvm-aot Catch2::Catch2)
-   target_include_directories(psizam_aot_physical_tests PRIVATE ${LLVM_INCLUDE_DIRS})
+   psizam_llvm_include_directories(psizam_aot_physical_tests PRIVATE)
    add_test(NAME psizam_aot_physical_tests COMMAND psizam_aot_physical_tests)
    set_tests_properties(psizam_aot_physical_tests PROPERTIES TIMEOUT 60 LABELS "execution;compiler;resource")
 endif()

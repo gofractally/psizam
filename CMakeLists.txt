@@ -164,6 +164,21 @@ endif()
 # ── LLVM Compile Backend (opt-in) ────────────────────────────────────────────
 option(PSIZAM_ENABLE_LLVM "Build LLVM AOT/JIT backend" OFF)
 
+
+# Debian and Ubuntu install libc++abi's cxxabi.h in LLVM's own include
+# directory. Ahead of the standard library on the search path it replaces
+# libstdc++'s cxxabi.h and the two disagree on __cxa_init_primary_exception.
+# Search such a directory after the system headers instead.
+function(psizam_llvm_include_directories target scope)
+   foreach(dir IN LISTS LLVM_INCLUDE_DIRS)
+      if(NOT APPLE AND EXISTS "${dir}/cxxabi.h")
+         target_compile_options(${target} ${scope} "SHELL:-idirafter ${dir}")
+      else()
+         target_include_directories(${target} ${scope} "${dir}")
+      endif()
+   endforeach()
+endfunction()
+
 if(PSIZAM_ENABLE_LLVM)
    # PSIZAM_LLVM_TARGETS: semicolon-separated list, e.g. "X86;AArch64" (default: both)
    if(NOT DEFINED PSIZAM_LLVM_TARGETS)
@@ -203,7 +218,7 @@ if(PSIZAM_ENABLE_LLVM)
    llvm_map_components_to_libnames(_LLVM_AOT_LIBS ${_LLVM_AOT_COMPONENTS})
    add_library(psizam-llvm-aot STATIC src/llvm_ir_translator.cpp src/llvm_aot_compiler.cpp)
    target_link_libraries(psizam-llvm-aot PUBLIC psizam ${_LLVM_AOT_LIBS})
-   target_include_directories(psizam-llvm-aot PUBLIC ${LLVM_INCLUDE_DIRS})
+   psizam_llvm_include_directories(psizam-llvm-aot PUBLIC)
    target_compile_definitions(psizam-llvm-aot PUBLIC PSIZAM_ENABLE_LLVM_BACKEND
       PRIVATE ${_LLVM_AOT_DEFINITIONS})
    if(NOT LLVM_ENABLE_RTTI)
@@ -237,7 +252,7 @@ if(PSIZAM_ENABLE_LLVM)
          target_link_libraries(psizam-llvm-jit PUBLIC psizam-llvm-arm)
       endif()
       target_link_libraries(psizam-llvm-jit PUBLIC psizam psizam-exec ${_LLVM_JIT_LIBS})
-      target_include_directories(psizam-llvm-jit PUBLIC ${LLVM_INCLUDE_DIRS})
+      psizam_llvm_include_directories(psizam-llvm-jit PUBLIC)
       target_compile_definitions(psizam-llvm-jit PUBLIC PSIZAM_ENABLE_LLVM_BACKEND)
       if(NOT LLVM_ENABLE_RTTI)
          target_compile_options(psizam-llvm-jit PRIVATE -fno-rtti)
