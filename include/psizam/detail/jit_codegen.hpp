@@ -595,6 +595,10 @@ namespace psizam::detail {
          this->emit_bytes(0x48, 0x89, 0xe0);
          this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
          this->emit_bytes(0x50, 0x50);
+         // The host may re-enter this context with a lowered budget. Keep the
+         // caller's budget in the spare alignment slot and put it back after.
+         this->emit_mov(*(rdi + call_depth_offset()), ecx);
+         this->emit_bytes(0x48, 0x89, 0x4c, 0x24, 0x08); // mov %rcx, 8(%rsp)
 
          this->emit_mov(*(rdi + trampoline_ptrs_offset()), rax);
          this->emit_bytes(0x48, 0x85, 0xc0); // test %rax, %rax
@@ -622,8 +626,10 @@ namespace psizam::detail {
          this->emit_bytes(0xff, 0xd0);
          base::fix_branch(done, code);
 
+         this->emit_bytes(0x8b, 0x4c, 0x24, 0x08); // mov 8(%rsp), %ecx: saved budget
          this->emit_bytes(0x48, 0x8b, 0x24, 0x24); // restore native stack
          this->emit_bytes(0x5e, 0x5f);
+         this->emit_mov(ecx, *(rdi + call_depth_offset()));
          if (_enable_backtrace) {
             this->emit_bytes(0x31, 0xc9); // preserve RAX:RDX return values
             this->emit_bytes(0x48, 0x89, 0x0f);
