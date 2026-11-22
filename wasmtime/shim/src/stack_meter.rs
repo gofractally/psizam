@@ -27,6 +27,11 @@ pub const STACK_EXPORT: &str = "psizam:stack-remaining";
 /// has been set yet. It is exported under this name for the host to call.
 pub const START_EXPORT: &str = "psizam:start";
 
+/// Host functions take pointers into the module's memory whether or not the
+/// module exports it, as psizam's engines allow. The memory is exported under
+/// this name so the host can always reach it.
+pub const MEMORY_EXPORT: &str = "psizam:memory";
+
 /// Written to the counter just before the overflow trap, so the host can tell
 /// a stack overflow from an ordinary `unreachable`. Budgets stay below 2^31.
 pub const OVERFLOW_SENTINEL: u32 = u32::MAX;
@@ -43,6 +48,8 @@ struct Meter<'a> {
     added_export: bool,
     /// The module's start function, if it has one.
     start: Option<u32>,
+    /// Whether the module has a memory (index 0).
+    has_memory: bool,
     /// Types to append: `() -> results` for functions with several results,
     /// which the wrapping block needs and the module may not declare.
     extra_types: Vec<Vec<wasmparser::ValType>>,
@@ -75,6 +82,9 @@ impl Meter<'_> {
         exports.export(STACK_EXPORT, ExportKind::Global, self.stack_global);
         if let Some(start) = self.start {
             exports.export(START_EXPORT, ExportKind::Func, start);
+        }
+        if self.has_memory {
+            exports.export(MEMORY_EXPORT, ExportKind::Memory, 0);
         }
         self.added_export = true;
     }
@@ -297,6 +307,7 @@ pub fn add_stack_accounting(wasm: &[u8], costs: &[u32]) -> Result<Vec<u8>, Strin
     let mut globals: u32 = 0;
     let mut has_global_section = false;
     let mut has_export_section = false;
+    let mut has_memory = false;
 
     for payload in Parser::new(0).parse_all(wasm) {
         match payload.map_err(|e| e.to_string())? {
@@ -316,8 +327,10 @@ pub fn add_stack_accounting(wasm: &[u8], costs: &[u32]) -> Result<Vec<u8>, Strin
             }
             Payload::ImportSection(section) => {
                 for import in section.into_imports() {
-                    if let wasmparser::TypeRef::Global(_) = import.map_err(|e| e.to_string())?.ty {
-                        globals += 1;
+                    match import.map_err(|e| e.to_string())?.ty {
+                        wasmparser::TypeRef::Global(_) => globals += 1,
+                        wasmparser::TypeRef::Memory(_) => has_memory = true,
+                        _ => {}
                     }
                 }
             }
@@ -326,6 +339,7 @@ pub fn add_stack_accounting(wasm: &[u8], costs: &[u32]) -> Result<Vec<u8>, Strin
                     function_types.push(ty.map_err(|e| e.to_string())?);
                 }
             }
+            Payload::MemorySection(section) => has_memory |= section.count() > 0,
             Payload::GlobalSection(section) => {
                 has_global_section = true;
                 globals += section.count();
@@ -333,8 +347,9 @@ pub fn add_stack_accounting(wasm: &[u8], costs: &[u32]) -> Result<Vec<u8>, Strin
             Payload::ExportSection(section) => {
                 has_export_section = true;
                 for export in section {
-                    if export.map_err(|e| e.to_string())?.name == STACK_EXPORT {
-                        return Err(format!("module already exports {STACK_EXPORT}"));
+                    let name = export.map_err(|e| e.to_string())?.name;
+                    if [STACK_EXPORT, START_EXPORT, MEMORY_EXPORT].contains(&name) {
+                        return Err(format!("module exports the reserved name {name}"));
                     }
                 }
             }
@@ -382,6 +397,7 @@ pub fn add_stack_accounting(wasm: &[u8], costs: &[u32]) -> Result<Vec<u8>, Strin
         added_global: false,
         added_export: false,
         start,
+        has_memory,
         extra_types,
         block_types,
     };

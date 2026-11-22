@@ -691,3 +691,28 @@ TEST_CASE("wasmtime: stack accounting covers multi-result functions and the star
          CHECK(actual == expected);
       }
 }
+
+TEST_CASE("wasmtime: host spans reach a memory the module does not export")
+{
+   constexpr std::string_view text = R"((module
+     (import "env" "note" (func $note (param i32 i32)))
+     (memory 1)
+     (data (i32.const 8) "private")
+     (func (export "say") (call $note (i32.const 8) (i32.const 7)))
+   ))";
+   struct note_host {
+      std::string seen;
+      void note(std::span<const char> s) { seen.assign(s.begin(), s.end()); }
+   };
+   wt::runtime<note_host> rt;
+   rt.add<&note_host::note>("env", "note");
+   psizam::wasm_code code = wt::assemble(text);
+   stack_options     psizam_options;
+   note_host         h;
+   wt::instance<note_host> inst(
+       rt, rt.compile_metered(code, wt::validate_and_cost(code, psizam_options)), h);
+   inst.set_stack_remaining(4096);
+   inst.call("say");
+   CHECK(h.seen == "private");
+   CHECK(inst.memory().size() == 65536);
+}

@@ -746,7 +746,11 @@ pub unsafe extern "C" fn pzwt_instantiate(
         on_native_stack(native_stack, || (*linker).0.instantiate(&mut *cx, &(*module).0));
     match outcome {
         Ok(instance) => {
-            let memory = instance.get_memory(&mut *cx, "memory");
+            // A module compiled with stack accounting always exports its
+            // memory under a reserved name; otherwise use the usual one.
+            let memory = instance
+                .get_memory(&mut *cx, stack_meter::MEMORY_EXPORT)
+                .or_else(|| instance.get_memory(&mut *cx, "memory"));
             cx.data_mut().memory = memory;
             let stack = instance.get_global(&mut *cx, stack_meter::STACK_EXPORT);
             cx.data_mut().stack = stack;
