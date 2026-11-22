@@ -4,7 +4,47 @@
 #include <psizam/native_artifact.hpp>
 #include <psizam/detail/ir_writer_llvm_aot.hpp>
 
+#include <exception>
+#include <pthread.h>
+#include <system_error>
+#include <type_traits>
+
 namespace psizam::detail {
+   // LLVM recurses deeply. The module may first be needed on a small or
+   // nearly exhausted stack (a nested call runs on its caller's WASM stack),
+   // and whether a node compiles at all depends on its cache. Give every cold
+   // compile the same dedicated stack so that it cannot overflow on one node
+   // and succeed on another.
+   inline constexpr std::size_t aot_compile_stack_size = 8 * 1024 * 1024;
+
+   template<typename F>
+   void run_on_aot_compile_stack(F&& compile) {
+      struct job {
+         std::remove_reference_t<F>* compile;
+         std::exception_ptr failure;
+      } state{&compile, nullptr};
+      pthread_attr_t attributes;
+      if (int error = pthread_attr_init(&attributes))
+         throw std::system_error(error, std::generic_category(), "AOT compile stack");
+      pthread_t thread;
+      int error = pthread_attr_setstacksize(&attributes, aot_compile_stack_size);
+      if (!error)
+         error = pthread_create(&thread, &attributes, [](void* arg) -> void* {
+            auto& state = *static_cast<job*>(arg);
+            try {
+               (*state.compile)();
+            } catch (...) {
+               state.failure = std::current_exception();
+            }
+            return nullptr;
+         }, &state);
+      pthread_attr_destroy(&attributes);
+      if (error)
+         throw std::system_error(error, std::generic_category(), "AOT compile stack");
+      pthread_join(thread, nullptr);
+      if (state.failure) std::rethrow_exception(state.failure);
+   }
+
    template<typename Options, typename DebugInfo>
    struct aot_parser {
       const Options& options;
@@ -58,12 +98,12 @@ namespace psizam::detail {
          // The writer emits object code and relocations, not ORC JIT code.
          // Its destructor finishes the result, so end its lifetime before save.
          null_debug_info unused_debug;
-         {
+         run_on_aot_compile_stack([&] {
             binary_parser<ir_writer_llvm_aot, Options, null_debug_info> parser(
                mod.allocator, options, backtrace, byte_stack);
             parser.set_compile_result(&result);
             parser.parse_module(wasm, mod, unused_debug);
-         }
+         });
          mod.finalize();
          auto artifact = save_native_aot(wasm, mod, result, identity);
          if constexpr (requires { options.store_native_aot(identity, artifact); })

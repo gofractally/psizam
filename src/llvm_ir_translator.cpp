@@ -1264,6 +1264,13 @@ namespace psizam::detail {
             builder.CreateStore(builder.CreateLoad(i64_ty, ms_ptr, "init_ms"), mem_size_cache);
          }
 
+         // Instructions translated below also request entry storage
+         // (memory.grow, v128 temporaries). Without a byte-stack or gas
+         // prologue the entry block was empty when alloca_builder was made,
+         // so its insertion point is the block's end and would follow the
+         // terminator added later. Pin it to the top of the block.
+         alloca_builder.SetInsertPoint(entry_bb, entry_bb->getFirstInsertionPt());
+
          // ── Pre-scan: which blocks have block_start instructions? ──
          // Blocks created by emit_block/emit_loop have block_start.
          // Blocks created by emit_if do NOT (only block_end).
@@ -5566,10 +5573,8 @@ namespace psizam::detail {
          llvm::ModulePassManager mpm;
          llvm::FunctionPassManager fpm;
 
-         // DEBUG: skip Phase 2 passes to bisect the runtime crash.
-         // PSIZAM_LLVM_SKIP_PHASE2=1 keeps Phase 1 (canonicalize) and
-         // Phase 3 (cleanup) but skips Reassociate/GVN/LICM.
-         bool skip_phase2 = std::getenv("PSIZAM_LLVM_SKIP_PHASE2") != nullptr;
+         // The pipeline is fixed: a saved artifact's identity does not cover
+         // the process environment, so nothing here may depend on it.
 
          // Phase 1: Canonicalize — cheap, huge IR reduction.
          // mem2reg is critical: promotes alloca-per-register to SSA.
@@ -5580,18 +5585,16 @@ namespace psizam::detail {
          fpm.addPass(llvm::InstCombinePass());
          fpm.addPass(llvm::SimplifyCFGPass());
 
-         if (!skip_phase2) {
-            // Phase 2: Optimize — moderate cost, good speedup.
-            // Reassociate enables better constant folding.
-            // GVN eliminates redundant loads (e.g., repeated ctx pointer loads).
-            // LICM hoists loop-invariant computations (loop pass, needs adaptor).
-            fpm.addPass(llvm::ReassociatePass());
-            fpm.addPass(llvm::GVNPass());
-            {
-               llvm::LoopPassManager lpm;
-               lpm.addPass(llvm::LICMPass(llvm::LICMOptions()));
-               fpm.addPass(llvm::createFunctionToLoopPassAdaptor(std::move(lpm), /*UseMemorySSA=*/true));
-            }
+         // Phase 2: Optimize — moderate cost, good speedup.
+         // Reassociate enables better constant folding.
+         // GVN eliminates redundant loads (e.g., repeated ctx pointer loads).
+         // LICM hoists loop-invariant computations (loop pass, needs adaptor).
+         fpm.addPass(llvm::ReassociatePass());
+         fpm.addPass(llvm::GVNPass());
+         {
+            llvm::LoopPassManager lpm;
+            lpm.addPass(llvm::LICMPass(llvm::LICMOptions()));
+            fpm.addPass(llvm::createFunctionToLoopPassAdaptor(std::move(lpm), /*UseMemorySSA=*/true));
          }
 
          // Phase 3: Cleanup — removes dead code exposed by earlier passes.

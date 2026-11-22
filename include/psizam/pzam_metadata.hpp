@@ -325,7 +325,7 @@ namespace psizam {
          pe.elems.reserve(e.elems.size());
          for (const auto& te : e.elems) {
             pzam_elem_entry pee;
-            pee.type = static_cast<uint8_t>(te.type);
+            pee.type = te.type;
             pee.index = te.index;
             pe.elems.push_back(pee);
          }

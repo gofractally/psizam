@@ -19,6 +19,7 @@ struct byte_options : default_options {
 struct host {
    std::function<uint32_t()> remaining;
    std::function<uint32_t()> nested;
+   std::function<void(uint32_t)> set_remaining;
    std::vector<uint64_t> observations;
    uint32_t observe(uint32_t tag) {
       auto value = remaining();
@@ -75,8 +76,22 @@ std::vector<outcome> exercise(host& h, const invoke& run) {
       results.push_back(call(h, run, name, std::string_view(name) == "tail-self" ? 25 : 3));
    return results;
 }
+// An embedder may charge its own frame by lowering the budget before it
+// re-enters a context that is suspended in a host call. The suspended caller
+// must get its own budget back each time, however often that happens.
+constexpr uint32_t reentry_charge = 4096;
+constexpr uint32_t reentry_count = 40;
+std::vector<outcome> exercise_lowered_reentry(host& h, const invoke& run) {
+   h.nested = [&] {
+      h.set_remaining(h.remaining() - reentry_charge);
+      return run("leaf", 0);
+   };
+   return {call(h, run, "host-loop", reentry_count), call(h, run, "leaf", 0)};
+}
+using scenario = std::vector<outcome>(*)(host&, const invoke&);
 template<class Impl>
-std::vector<outcome> native(uint32_t budget, const char* path = BYTE_STACK_WASM, bool eh = false) {
+std::vector<outcome> native(uint32_t budget, const char* path = BYTE_STACK_WASM, bool eh = false,
+                            scenario run_scenario = exercise) {
    host h;
    auto wasm = read_wasm(path);
    byte_options options;
@@ -85,6 +100,7 @@ std::vector<outcome> native(uint32_t budget, const char* path = BYTE_STACK_WASM,
    using registry = registered_host_functions<host>;
    backend<registry, Impl, byte_options> engine(wasm, table(), &h, &memory, options);
    h.remaining = [&] { return engine.get_context().get_remaining_call_depth(); };
+   h.set_remaining = [&](uint32_t value) { engine.get_context().set_max_call_depth(value); };
    invoke run = [&](const char* name, uint32_t n) {
       auto value = engine.call_with_return(h, "env", name, n);
       if (!value) throw std::runtime_error("missing return value");
@@ -93,7 +109,7 @@ std::vector<outcome> native(uint32_t budget, const char* path = BYTE_STACK_WASM,
    if (eh) {
       return {call(h, run, "caught", 0), call(h, run, "leaf", 0)};
    }
-   return exercise(h, run);
+   return run_scenario(h, run);
 }
 
 #ifdef PSIZAM_ENABLE_LLVM_BACKEND
@@ -131,7 +147,8 @@ std::vector<char> saved(uint32_t threads) {
    REQUIRE(file.code_sections[0].stack_limit_mode == 1);
    return pzam_save(file);
 }
-std::vector<outcome> aot(const std::vector<char>& bytes, uint32_t budget) {
+std::vector<outcome> aot(const std::vector<char>& bytes, uint32_t budget,
+                         scenario run_scenario = exercise) {
    host h;
    auto loaded = detail::load_pzam(pzam_load(bytes));
    std::shared_ptr<void> owner(loaded.exec_code, [](void* p) { jit_allocator::instance().free(p); });
@@ -144,13 +161,14 @@ std::vector<outcome> aot(const std::vector<char>& bytes, uint32_t budget) {
    context.set_max_pages(16);
    context.reset();
    h.remaining = [&] { return context.get_remaining_call_depth(); };
+   h.set_remaining = [&](uint32_t value) { context.set_max_call_depth(value); };
    invoke run = [&](const char* name, uint32_t n) {
       auto value = context.execute(&h, detail::jit_visitor{nullptr},
                                   loaded.mod.get_exported_function(name), n);
       if (!value) throw std::runtime_error("missing return value");
       return value->to_ui32();
    };
-   return exercise(h, run);
+   return run_scenario(h, run);
 }
 #endif
 }
@@ -194,6 +212,30 @@ TEST_CASE("A byte budget accepts its exact frame cost and rejects one byte less"
       compare(aot(bytes, budget), reference, "LLVM-O2");
 #endif
    }
+}
+
+TEST_CASE("Re-entry that lowers the byte budget does not leak it from the suspended caller", "[byte-stack]") {
+   const uint32_t budget = 65536;
+   REQUIRE(reentry_charge * reentry_count > budget);
+   auto reference = native<jit>(budget, BYTE_STACK_WASM, false, exercise_lowered_reentry);
+   REQUIRE(reference.size() == 2);
+   CHECK(reference[0].success);
+   CHECK(reference[0].observations.size() == reentry_count + 1);
+   CHECK(reference[0].remaining == budget);
+   auto check = [&](const std::vector<outcome>& actual, const char* engine) {
+      REQUIRE(actual.size() == reference.size());
+      for (size_t i = 0; i < actual.size(); ++i) {
+         CAPTURE(engine, i, actual[i].success, actual[i].value, reference[i].value,
+                 actual[i].remaining, reference[i].remaining, actual[i].error,
+                 actual[i].observations, reference[i].observations);
+         CHECK(actual[i] == reference[i]);
+      }
+   };
+   check(native<jit2>(budget, BYTE_STACK_WASM, false, exercise_lowered_reentry), "jit2");
+   check(native<jit_profile>(budget, BYTE_STACK_WASM, false, exercise_lowered_reentry), "jit-profile");
+#ifdef PSIZAM_ENABLE_LLVM_BACKEND
+   check(aot(saved(0), budget, exercise_lowered_reentry), "LLVM-O2");
+#endif
 }
 
 TEST_CASE("Caught exceptions restore JIT byte budgets", "[byte-stack][eh]") {

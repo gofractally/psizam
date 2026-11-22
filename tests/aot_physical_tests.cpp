@@ -230,3 +230,28 @@ TEST_CASE("Native frame metadata survives a second parallel compilation batch",
    CHECK(result.function_offsets.back().second > 0);
    CHECK(result.body_offsets.back().second > 0);
 }
+
+TEST_CASE("An ELF relocation outside the artifact's set fails the compile, not the process",
+          "[aot-physical][compiler]") {
+   // x86_64 shares the mapping code, but this fixture only draws an unlisted
+   // relocation from the AArch64 backend.
+   for (auto target : {"aarch64-unknown-linux-gnu"}) {
+      CAPTURE(target);
+      // A GOT-indirect call is a relocation kind the artifact loader does not apply.
+      auto fixture = frame_fixture();
+      auto& context = *fixture.context;
+      auto* pointer = llvm::PointerType::getUnqual(context);
+      auto* i64 = llvm::Type::getInt64Ty(context);
+      auto* i32 = llvm::Type::getInt32Ty(context);
+      auto* type = llvm::FunctionType::get(pointer, {pointer, i32, i64}, false);
+      auto* memset = llvm::Function::Create(type, llvm::Function::ExternalLinkage, "memset", fixture.ir.get());
+      memset->addFnAttr(llvm::Attribute::NonLazyBind);
+      auto* body = fixture.ir->getFunction("wasm_func_0");
+      auto* ret = body->getEntryBlock().getTerminator();
+      llvm::IRBuilder<> builder(ret);
+      builder.CreateCall(memset, {body->getArg(1), builder.getInt32(0), body->getArg(2)});
+      auto result = compile(std::move(fixture), target);
+      INFO(result.error);
+      CHECK(result.error.find("Unsupported aarch64 ELF relocation type") != std::string::npos);
+   }
+}

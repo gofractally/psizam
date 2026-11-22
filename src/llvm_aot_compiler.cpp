@@ -202,17 +202,17 @@ namespace psizam::detail {
       return reloc_symbol::unknown;
    }
 
-   // Map ELF relocation type to pzam reloc_type
-   static reloc_type map_elf_reloc_type(uint64_t elf_type, bool is_x86_64) {
+   // Map ELF relocation type to pzam reloc_type. Which relocations LLVM picks
+   // depends on the module being compiled, so an unlisted one is a failed
+   // compilation of that module, never a reason to end the process.
+   static std::optional<reloc_type> map_elf_reloc_type(uint64_t elf_type, bool is_x86_64) {
       if (is_x86_64) {
          // ELF x86_64 relocation types (from elf.h)
          switch (elf_type) {
             case 1:  return reloc_type::abs64;           // R_X86_64_64
             case 2:  return reloc_type::x86_64_pc32;     // R_X86_64_PC32
             case 4:  return reloc_type::x86_64_pc32;     // R_X86_64_PLT32 (same encoding)
-            default:
-               std::cerr << "Fatal: Unsupported x86_64 ELF relocation type: " << elf_type << "\n";
-               std::abort();
+            default: return std::nullopt;
          }
       } else {
          // ELF aarch64 relocation types (from AArch64.def)
@@ -235,11 +235,14 @@ namespace psizam::detail {
             case 285: return reloc_type::aarch64_ldst32_abs_lo12_nc;  // R_AARCH64_LDST32_ABS_LO12_NC (0x11d)
             case 286: return reloc_type::aarch64_ldst64_abs_lo12_nc;  // R_AARCH64_LDST64_ABS_LO12_NC (0x11e)
             case 299: return reloc_type::aarch64_ldst128_abs_lo12_nc; // R_AARCH64_LDST128_ABS_LO12_NC (0x12b)
-            default:
-               std::cerr << "Fatal: Unsupported aarch64 ELF relocation type: " << elf_type << "\n";
-               std::abort();
+            default: return std::nullopt;
          }
       }
+   }
+
+   static llvm_aot_result unsupported_relocation(uint64_t elf_type, bool is_x86_64) {
+      return llvm_aot_result{.error = std::string("Unsupported ") + (is_x86_64 ? "x86_64" : "aarch64") +
+                                      " ELF relocation type " + std::to_string(elf_type)};
    }
 
    llvm_aot_result llvm_aot_compile(
@@ -493,7 +496,9 @@ namespace psizam::detail {
                   code_relocation cr;
                   cr.code_offset = reloc_offset;
                   cr.symbol = reloc_symbol::code_blob_self;
-                  cr.type = map_elf_reloc_type(reloc.getType(), is_x86_64);
+                  auto cr_type = map_elf_reloc_type(reloc.getType(), is_x86_64);
+                  if (!cr_type) return unsupported_relocation(reloc.getType(), is_x86_64);
+                  cr.type = *cr_type;
                   cr.addend = static_cast<int32_t>(data_section_blob_offset + sym_val) + elf_addend;
                   result.relocations.push_back(cr);
                   continue;
@@ -516,7 +521,9 @@ namespace psizam::detail {
                   uint32_t func_idx = std::stoul(idx_str);
                   uint32_t num_imports_val = mod.get_imported_functions_size();
                   if (func_idx >= num_imports_val) {
-                     auto mapped_type = map_elf_reloc_type(reloc.getType(), is_x86_64);
+                     auto known_type = map_elf_reloc_type(reloc.getType(), is_x86_64);
+                     if (!known_type) return unsupported_relocation(reloc.getType(), is_x86_64);
+                     const reloc_type mapped_type = *known_type;
                      uint32_t reloc_off = reloc_offset;
 
                      // Same-batch + PC-relative → resolve at compile time.
@@ -586,7 +593,9 @@ namespace psizam::detail {
                   code_relocation cr;
                   cr.code_offset = reloc_offset;
                   cr.symbol = reloc_symbol::code_blob_self;
-                  cr.type = map_elf_reloc_type(reloc.getType(), is_x86_64);
+                  auto cr_type = map_elf_reloc_type(reloc.getType(), is_x86_64);
+                  if (!cr_type) return unsupported_relocation(reloc.getType(), is_x86_64);
+                  cr.type = *cr_type;
                   cr.addend = static_cast<int32_t>(*value + *addend);
                   result.relocations.push_back(cr);
                   continue;
@@ -603,7 +612,9 @@ namespace psizam::detail {
                   code_relocation cr;
                   cr.code_offset = reloc_offset;
                   cr.symbol = mapped;
-                  cr.type = map_elf_reloc_type(reloc.getType(), is_x86_64);
+                  auto cr_type = map_elf_reloc_type(reloc.getType(), is_x86_64);
+                  if (!cr_type) return unsupported_relocation(reloc.getType(), is_x86_64);
+                  cr.type = *cr_type;
                   auto val_or_err = llvm::object::ELFRelocationRef(reloc).getAddend();
                   cr.addend = val_or_err ? static_cast<int32_t>(*val_or_err) : 0;
                   result.relocations.push_back(cr);
@@ -616,7 +627,9 @@ namespace psizam::detail {
             code_relocation cr;
             cr.code_offset = reloc_offset;
             cr.symbol = psizam_sym;
-            cr.type = map_elf_reloc_type(reloc.getType(), is_x86_64);
+            auto cr_type = map_elf_reloc_type(reloc.getType(), is_x86_64);
+            if (!cr_type) return unsupported_relocation(reloc.getType(), is_x86_64);
+            cr.type = *cr_type;
 
             // Get addend (RELA-style; for REL, addend is in the instruction)
             auto val_or_err = llvm::object::ELFRelocationRef(reloc).getAddend();

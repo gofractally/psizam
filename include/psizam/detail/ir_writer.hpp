@@ -1160,30 +1160,57 @@ namespace psizam::detail {
          return inst_idx;
       }
 
+      void emit_mov(uint32_t dest, uint32_t src) {
+         ir_inst mov{};
+         mov.opcode = ir_op::mov;
+         mov.type = types::i64;
+         mov.flags = IR_NONE;
+         mov.dest = dest;
+         mov.rr.src1 = src;
+         mov.rr.src2 = ir_vreg_none;
+         _func->emit(mov);
+      }
+
       branch_t emit_br_if(uint32_t dc, uint8_t rt, uint32_t label = UINT32_MAX, uint32_t result_count = 0, uint32_t eh_leave_count = 0) {
          uint32_t inst_idx = UINT32_MAX;
          if (!_unreachable) {
             uint32_t cond = _func->vpop();
+            uint32_t saved_params[16];
+            uint32_t saved_temps[16];
+            uint32_t saved_count = 0;
             if (label != UINT32_MAX) {
                uint32_t target_ctrl = _func->ctrl_stack_top - 1 - label;
                if (target_ctrl < _func->ctrl_stack_top) {
                   auto& target_entry = _func->ctrl_stack[target_ctrl];
                   if (target_entry.is_loop && target_entry.param_count > 0) {
-                     // Loop target: mov values to loop's param vregs
+                     // Loop target: mov values to loop's param vregs. The movs
+                     // precede the conditional branch, so they also run when it
+                     // is not taken. A parameter that is still on the value
+                     // stack belongs to that untaken path: keep its value in a
+                     // temporary and put it back after the branch.
                      uint32_t n = std::min<uint32_t>(result_count, target_entry.param_count);
                      if (n > _func->vstack_top) n = _func->vstack_top;
                      uint32_t base_depth = _func->vstack_top - n;
                      for (uint32_t i = 0; i < n; ++i) {
+                        uint32_t param = target_entry.param_vregs[i];
+                        if (_func->vstack[base_depth + i] == param) continue;
+                        bool live = false;
+                        for (uint32_t depth = 0; depth < _func->vstack_top && !live; ++depth)
+                           live = _func->vstack[depth] == param;
+                        if (!live) continue;
+                        saved_params[saved_count] = param;
+                        saved_temps[saved_count] = _func->alloc_vreg(types::i64);
+                        emit_mov(saved_temps[saved_count], param);
+                        ++saved_count;
+                     }
+                     for (uint32_t i = 0; i < n; ++i) {
                         uint32_t src = _func->vstack[base_depth + i];
                         if (src != target_entry.param_vregs[i]) {
-                           ir_inst mov{};
-                           mov.opcode = ir_op::mov;
-                           mov.type = types::i64;
-                           mov.flags = IR_NONE;
-                           mov.dest = target_entry.param_vregs[i];
-                           mov.rr.src1 = src;
-                           mov.rr.src2 = ir_vreg_none;
-                           _func->emit(mov);
+                           // Read a parameter that this branch also assigns
+                           // from its saved copy: the assignment is parallel.
+                           for (uint32_t k = 0; k < saved_count; ++k)
+                              if (saved_params[k] == src) src = saved_temps[k];
+                           emit_mov(target_entry.param_vregs[i], src);
                         }
                      }
                   } else if (!target_entry.is_loop && result_count > 1 && target_entry.result_count > 1) {
@@ -1284,6 +1311,9 @@ namespace psizam::detail {
             inst.br.src1 = cond;
             inst_idx = _func->current_inst_index();
             _func->emit(inst);
+            // Not taken: the loop parameters hold the enclosing values again.
+            for (uint32_t k = 0; k < saved_count; ++k)
+               emit_mov(saved_params[k], saved_temps[k]);
          }
          return inst_idx;
       }
@@ -2504,9 +2534,9 @@ namespace psizam::detail {
             inst.type = types::v128;
             inst.flags = IR_SIDE_EFFECT;
             inst.dest = static_cast<uint32_t>(sub);
-            inst.simd.v_src1 = static_cast<uint16_t>(a_vreg);
-            inst.simd.v_src2 = static_cast<uint16_t>(b_vreg);
-            inst.simd.v_dest = static_cast<uint16_t>(d1);
+            inst.simd.v_src1 = simd_vreg(a_vreg);
+            inst.simd.v_src2 = simd_vreg(b_vreg);
+            inst.simd.v_dest = simd_vreg(d1);
             inst.simd.addr = c_vreg;
             _func->emit(inst);
             _func->vpush(d1); _func->vpush(d2);
@@ -2524,9 +2554,9 @@ namespace psizam::detail {
             inst.type = types::v128;
             inst.flags = IR_SIDE_EFFECT;
             inst.dest = static_cast<uint32_t>(simd_sub::v128_bitselect);
-            inst.simd.v_src1 = static_cast<uint16_t>(val1);
-            inst.simd.v_src2 = static_cast<uint16_t>(val2);
-            inst.simd.v_dest = static_cast<uint16_t>(d1);
+            inst.simd.v_src1 = simd_vreg(val1);
+            inst.simd.v_src2 = simd_vreg(val2);
+            inst.simd.v_dest = simd_vreg(d1);
             // Store mask vreg in addr field (unused for bitselect's memory addressing)
             inst.simd.addr = mask;
             _func->emit(inst);
@@ -2539,7 +2569,7 @@ namespace psizam::detail {
             _func->vpop(); uint32_t s1 = _func->vpop();  // v128 (low vreg)
             uint32_t d = _func->alloc_vreg(types::i32);
             // Store result vreg in addr field so register path can pop scalar to vreg
-            ir_simd_emit_with_offset(simd_sub::v128_any_true, 0, d, static_cast<uint16_t>(s1));
+            ir_simd_emit_with_offset(simd_sub::v128_any_true, 0, d, simd_vreg(s1));
             _func->vpush(d);
          }
       }
@@ -3169,6 +3199,14 @@ namespace psizam::detail {
       }
 
       // ──── SIMD vstack tracking + IR emission ────
+      // v128_op names its vector operands in 16 bits, with 0xFFFF for "none".
+      // A larger id would alias another value in every IR backend, so such a
+      // function is refused instead of being compiled incorrectly.
+      static uint16_t simd_vreg(uint32_t vreg) {
+         PSIZAM_ASSERT(vreg < 0xFFFF, wasm_parse_exception,
+                       "function has too many values for its SIMD operands");
+         return static_cast<uint16_t>(vreg);
+      }
       void ir_simd_emit(simd_sub sub) {
          ir_inst inst{};
          inst.opcode = ir_op::v128_op;
@@ -3226,14 +3264,14 @@ namespace psizam::detail {
          uint32_t addr = _func->vpop();  // address vreg
          uint32_t d1 = _func->alloc_vreg(types::v128);
          uint32_t d2 = _func->alloc_vreg(types::v128);
-         ir_simd_emit_with_offset(sub, offset, addr, 0xFFFF, static_cast<uint16_t>(d1));
+         ir_simd_emit_with_offset(sub, offset, addr, 0xFFFF, simd_vreg(d1));
          _func->vpush(d1); _func->vpush(d2);
       }
       void ir_simd_store(simd_sub sub, uint32_t offset) {
          if (_unreachable) return;
          _func->vpop(); uint32_t s1 = _func->vpop();  // v128 value (low vreg)
          uint32_t addr = _func->vpop(); // address vreg
-         ir_simd_emit_with_offset(sub, offset, addr, static_cast<uint16_t>(s1));
+         ir_simd_emit_with_offset(sub, offset, addr, simd_vreg(s1));
       }
       void ir_simd_load_lane(simd_sub sub, uint32_t offset, uint8_t lane) {
          if (_unreachable) return;
@@ -3243,7 +3281,7 @@ namespace psizam::detail {
          uint32_t d1 = _func->alloc_vreg(types::v128);
          uint32_t d2 = _func->alloc_vreg(types::v128);
          ir_simd_emit_with_offset_lane(sub, offset, lane, addr,
-                                        static_cast<uint16_t>(s1), static_cast<uint16_t>(d1));
+                                        simd_vreg(s1), simd_vreg(d1));
          _func->vpush(d1); _func->vpush(d2);
       }
       void ir_simd_store_lane(simd_sub sub, uint32_t offset, uint8_t lane) {
@@ -3251,7 +3289,7 @@ namespace psizam::detail {
          _func->has_simd = true;
          _func->vpop(); uint32_t s1 = _func->vpop();  // v128 (low vreg)
          uint32_t addr = _func->vpop(); // address
-         ir_simd_emit_with_offset_lane(sub, offset, lane, addr, static_cast<uint16_t>(s1));
+         ir_simd_emit_with_offset_lane(sub, offset, lane, addr, simd_vreg(s1));
       }
       void ir_simd_unop(simd_sub sub) {
          if (_unreachable) return;
@@ -3264,9 +3302,9 @@ namespace psizam::detail {
          inst.type = types::v128;
          inst.flags = IR_SIDE_EFFECT;
          inst.dest = static_cast<uint32_t>(sub);
-         inst.simd.v_src1 = static_cast<uint16_t>(s1);
+         inst.simd.v_src1 = simd_vreg(s1);
          inst.simd.v_src2 = 0xFFFF;
-         inst.simd.v_dest = static_cast<uint16_t>(d1);
+         inst.simd.v_dest = simd_vreg(d1);
          _func->emit(inst);
          _func->vpush(d1); _func->vpush(d2);
       }
@@ -3282,9 +3320,9 @@ namespace psizam::detail {
          inst.type = types::v128;
          inst.flags = IR_SIDE_EFFECT;
          inst.dest = static_cast<uint32_t>(sub);
-         inst.simd.v_src1 = static_cast<uint16_t>(s1);
-         inst.simd.v_src2 = static_cast<uint16_t>(s2);
-         inst.simd.v_dest = static_cast<uint16_t>(d1);
+         inst.simd.v_src1 = simd_vreg(s1);
+         inst.simd.v_src2 = simd_vreg(s2);
+         inst.simd.v_dest = simd_vreg(d1);
          _func->emit(inst);
          _func->vpush(d1); _func->vpush(d2);
       }
@@ -3297,7 +3335,7 @@ namespace psizam::detail {
          uint32_t d2 = _func->alloc_vreg(types::v128);
          // Store shift amount vreg in offset field so codegen can load from register
          ir_simd_emit_with_offset_lane(sub, shift_amt, 0, ir_vreg_none,
-                                        static_cast<uint16_t>(s1), static_cast<uint16_t>(d1));
+                                        simd_vreg(s1), simd_vreg(d1));
          _func->vpush(d1); _func->vpush(d2);
       }
       void ir_simd_extract(simd_sub sub, uint8_t lane) {
@@ -3306,7 +3344,7 @@ namespace psizam::detail {
          _func->vpop(); uint32_t s1 = _func->vpop();  // v128 (low vreg)
          uint32_t d = _func->alloc_vreg(types::i64);
          // Store result vreg in addr field so register path can pop scalar to vreg
-         ir_simd_emit_with_offset_lane(sub, 0, lane, d, static_cast<uint16_t>(s1));
+         ir_simd_emit_with_offset_lane(sub, 0, lane, d, simd_vreg(s1));
          _func->vpush(d);
       }
       void ir_simd_replace(simd_sub sub, uint8_t lane) {
@@ -3317,7 +3355,7 @@ namespace psizam::detail {
          uint32_t d1 = _func->alloc_vreg(types::v128);
          uint32_t d2 = _func->alloc_vreg(types::v128);
          ir_simd_emit_with_offset_lane(sub, scalar, lane, ir_vreg_none,
-                                        static_cast<uint16_t>(s1), static_cast<uint16_t>(d1));
+                                        simd_vreg(s1), simd_vreg(d1));
          _func->vpush(d1); _func->vpush(d2);
       }
       void ir_simd_splat(simd_sub sub) {
@@ -3326,7 +3364,7 @@ namespace psizam::detail {
          uint32_t scalar = _func->vpop();  // scalar value vreg
          uint32_t d1 = _func->alloc_vreg(types::v128);
          uint32_t d2 = _func->alloc_vreg(types::v128);
-         ir_simd_emit_with_offset(sub, 0, scalar, 0xFFFF, static_cast<uint16_t>(d1));
+         ir_simd_emit_with_offset(sub, 0, scalar, 0xFFFF, simd_vreg(d1));
          _func->vpush(d1); _func->vpush(d2);
       }
       void ir_simd_test(simd_sub sub) {
@@ -3335,7 +3373,7 @@ namespace psizam::detail {
          _func->vpop(); uint32_t s1 = _func->vpop();  // v128 (low vreg)
          uint32_t d = _func->alloc_vreg(types::i32);
          // Store result vreg in addr field so register path can pop scalar to vreg
-         ir_simd_emit_with_offset(sub, 0, d, static_cast<uint16_t>(s1));
+         ir_simd_emit_with_offset(sub, 0, d, simd_vreg(s1));
          _func->vpush(d);
       }
       void ir_emit_arg(uint32_t vreg) {

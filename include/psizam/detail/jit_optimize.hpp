@@ -418,6 +418,14 @@ namespace psizam::detail {
                   if (use_count[mv_src] < UINT16_MAX) use_count[mv_src]++;
                   break;
                }
+               // The copy holds the source's value as of the mov. Once the
+               // source is assigned again (loop parameters and merge vregs
+               // have several definitions) a later consumer must keep
+               // reading the copy.
+               bool is_s = (u.opcode >= ir_op::i32_store && u.opcode <= ir_op::i64_store32);
+               bool is_b = (u.opcode == ir_op::block_start || u.opcode == ir_op::block_end);
+               bool is_br = (u.opcode == ir_op::br || u.opcode == ir_op::br_if || u.opcode == ir_op::br_table);
+               if (!is_s && !is_b && !is_br && u.dest == mv_src) break;
             }
          }
 

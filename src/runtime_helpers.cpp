@@ -62,7 +62,7 @@ const void* __psizam_resolve_indirect(void* ctx, uint32_t type_idx,
    auto& entry = table_base[elem_idx];
 
    // Null/uninitialized check (0xFFFFFFFF is the sentinel)
-   if (entry.type == 0xFFFFFFFF)
+   if (entry.type == UINT32_MAX || entry.index == UINT32_MAX)
       return nullptr; // triggers trap in caller
 
    // Type check

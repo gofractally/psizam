@@ -28,7 +28,9 @@ namespace psizam {
    // Version 5 reserves the full inline-table metadata tail. Older native code
    // can embed a different inline/indirect layout decision and must be rebuilt.
    // Version 6 also persists the native embedder contract and source ranges.
-   static constexpr uint32_t PZAM_VERSION = 6;
+   // Version 7 stores an element's full canonical type index. Eight bits lost
+   // the null sentinel and aliased type indices above 255.
+   static constexpr uint32_t PZAM_VERSION = 7;
 
    // ---- Architecture ----
 
@@ -128,7 +130,7 @@ namespace psizam {
    PSIO_REFLECT(pzam_export_entry, field_name, kind, index)
 
    struct pzam_elem_entry {
-      uint8_t  type  = 0;   // funcref/externref
+      uint32_t type  = 0;   // canonical function type index (or UINT32_MAX for ref.null)
       uint32_t index = 0;   // function index (or UINT32_MAX for ref.null)
    };
    PSIO_REFLECT(pzam_elem_entry, type, index)

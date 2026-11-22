@@ -17,11 +17,25 @@ TEST_CASE("PZAM uses the public psio pSSZ codec", "[pzam-format]") {
    CHECK(bytes == psio::encode(psio::pssz{}, file));
    REQUIRE(psio::validate<pzam_file>(psio::pssz{}, bytes).ok());
    REQUIRE(pzam_validate(bytes));
-   const std::vector<char> prefix{'P','Z','A','M', 5,0,0,0};
+   const std::vector<char> prefix{'P','Z','A','M', char(PZAM_VERSION),0,0,0};
    REQUIRE(bytes.size() >= prefix.size());
    CHECK(std::equal(prefix.begin(), prefix.end(), bytes.begin()));
    CHECK(pzam_load(bytes).metadata.wit == std::nullopt);
    CHECK(pzam_save(pzam_load(bytes)) == bytes);
+}
+
+TEST_CASE("PZAM element entries keep full type indices and the null sentinel", "[pzam-format]") {
+   pzam_file file;
+   auto& segment = file.metadata.elements.emplace_back();
+   segment.elems.push_back({UINT32_MAX, UINT32_MAX});   // ref.null
+   segment.elems.push_back({300, 7});                   // canonical type index above 255
+   const auto loaded = pzam_load(pzam_save(file));
+   REQUIRE(loaded.metadata.elements.size() == 1);
+   REQUIRE(loaded.metadata.elements[0].elems.size() == 2);
+   CHECK(loaded.metadata.elements[0].elems[0].type == UINT32_MAX);
+   CHECK(loaded.metadata.elements[0].elems[0].index == UINT32_MAX);
+   CHECK(loaded.metadata.elements[0].elems[1].type == 300);
+   CHECK(loaded.metadata.elements[0].elems[1].index == 7);
 }
 
 TEST_CASE("PZAM pSSZ preserves WIT and large code sections", "[pzam-format]") {

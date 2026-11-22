@@ -34,6 +34,21 @@ namespace {
       }
    }
 
+   template <typename F>
+   auto preserving_stack_budget(ctx_t& c, F&& f) {
+      const auto remaining = c.get_remaining_call_depth();
+      auto restore = scope_guard([&] { c.set_max_call_depth(remaining); });
+      return f();
+   }
+
+   int64_t dispatch_host(ctx_t& c, uint32_t func_idx, native_value* args) {
+      if (c._host_trampoline_ptrs)
+         if (auto trampoline = c._host_trampoline_ptrs[func_idx])
+            return trampoline(c.get_host_ptr(), args, c.linear_memory()).i64;
+      const auto mapped = c.get_module().import_functions[func_idx];
+      return c.get_host_table()->call(c.get_host_ptr(), mapped, args, c.linear_memory()).i64;
+   }
+
    // Escape via longjmp with a new exception, or throw if no escape target.
    template<typename E>
    [[noreturn]] void escape_or_throw(const char* msg) {
@@ -88,86 +103,40 @@ int64_t __psizam_call_host(void* ctx, uint32_t func_idx,
                             void* args_buf, uint32_t nargs) {
    auto& c = as_ctx(ctx);
    auto* args = static_cast<native_value*>(args_buf);
-
-   // Fast path: call the trampoline directly if available.
-   // The trampoline_ptrs array is indexed by import number and handles
-   // all type conversion internally — no table lookup needed.
-   if (c._host_trampoline_ptrs) {
-      auto trampoline = c._host_trampoline_ptrs[func_idx];
-      if (trampoline) {
-         return invoke_or_escape([&] {
-            return trampoline(c.get_host_ptr(), args, c.linear_memory()).i64;
-         });
-      }
-   }
-
-   // Fallback: use the table dispatch
-   auto* table = c.get_host_table();
-   uint32_t mapped_index = c.get_module().import_functions[func_idx];
    return invoke_or_escape([&] {
-      return table->call(c.get_host_ptr(), mapped_index, args, c.linear_memory()).i64;
+      return preserving_stack_budget(c, [&] { return dispatch_host(c, func_idx, args); });
    });
 }
 
-// Nothrow variant for LLVM JIT path where .eh_frame data is registered.
-// Exceptions propagate naturally through LLVM frames without siglongjmp.
+// The ORC path has registered unwind information. Its C++ cleanup still owns
+// the suspended caller's live budget when a host callback re-enters this context.
 int64_t __psizam_call_host_nothrow(void* ctx, uint32_t func_idx,
                                     void* args_buf, uint32_t nargs) {
    auto& c = as_ctx(ctx);
-   auto* args = static_cast<native_value*>(args_buf);
-
-   if (c._host_trampoline_ptrs) {
-      auto trampoline = c._host_trampoline_ptrs[func_idx];
-      if (trampoline) {
-         return trampoline(c.get_host_ptr(), args, c.linear_memory()).i64;
-      }
-   }
-
-   auto* table = c.get_host_table();
-   uint32_t mapped_index = c.get_module().import_functions[func_idx];
-   return table->call(c.get_host_ptr(), mapped_index, args, c.linear_memory()).i64;
+   return preserving_stack_budget(c, [&] {
+      return dispatch_host(c, func_idx, static_cast<native_value*>(args_buf));
+   });
 }
 
-// Combined host call: call_depth_dec + call_host + call_depth_inc + get_memory in one.
-// One exception-safe native frame owns depth, dispatch and memory refresh.
+// Combined host call: one exception-safe native frame owns count tracking,
+// dispatch and memory refresh. Byte mode already charges the Wasm body.
 int64_t __psizam_call_host_full(void* ctx, uint32_t func_idx,
                                  void* args_buf, uint32_t nargs,
                                  void** mem_out) {
    auto& c = as_ctx(ctx);
-   auto* args = static_cast<native_value*>(args_buf);
-
-   // Inline call_depth_dec
-   const bool count_mode = !c.get_module().stack_limit_is_bytes;
-   if (count_mode) {
-      uint32_t depth = c.get_remaining_call_depth();
-      if (depth <= 1)
-         escape_or_throw<wasm_interpreter_exception>("stack overflow");
-      c.set_max_call_depth(depth - 1);
-   }
-
-   // Catch and finish C++ exception cleanup before escaping generated frames.
-   // This is required for both LLVM AOT and JIT, without relying on unwind info.
-   int64_t result;
-   longjmp_on_exception([&] {
-      if (c._host_trampoline_ptrs) {
-         auto trampoline = c._host_trampoline_ptrs[func_idx];
-         if (trampoline) {
-            result = trampoline(c.get_host_ptr(), args, c.linear_memory()).i64;
-            return;
+   return invoke_or_escape([&] {
+      return preserving_stack_budget(c, [&] {
+         if (!c.get_module().stack_limit_is_bytes) {
+            const auto depth = c.get_remaining_call_depth();
+            if (depth <= 1)
+               throw wasm_interpreter_exception("stack overflow");
+            c.set_max_call_depth(depth - 1);
          }
-      }
-      auto* table = c.get_host_table();
-      uint32_t mapped_index = c.get_module().import_functions[func_idx];
-      result = table->call(c.get_host_ptr(), mapped_index, args, c.linear_memory()).i64;
+         const auto result = dispatch_host(c, func_idx, static_cast<native_value*>(args_buf));
+         *mem_out = c.linear_memory();
+         return result;
+      });
    });
-
-   // Inline call_depth_inc
-   if (count_mode) c.set_max_call_depth(c.get_remaining_call_depth() + 1);
-
-   // Inline get_memory
-   *mem_out = c.linear_memory();
-
-   return result;
 }
 
 void __psizam_memory_init(void* ctx, uint32_t seg_idx,
@@ -233,13 +202,14 @@ int64_t __psizam_call_indirect(void* ctx, void* mem, uint32_t type_idx,
    auto& entry = table_base[table_elem];
 
    // Null/uninitialized check (0xFFFFFFFF is the sentinel)
-   if (entry.type == 0xFFFFFFFF)
+   if (entry.type == UINT32_MAX || entry.index == UINT32_MAX)
       escape_or_throw<wasm_interpreter_exception>("undefined element");
 
-   // Type check
-   const auto& expected_type = mod.types[type_idx];
-   const auto& actual_type = mod.get_function_type(entry.index);
-   if (!(actual_type == expected_type))
+   // Type check. The lookup can throw; generated frames cannot be unwound.
+   const bool type_matches = invoke_or_escape([&] {
+      return mod.get_function_type(entry.index) == mod.types.at(type_idx);
+   });
+   if (!type_matches)
       escape_or_throw<wasm_interpreter_exception>("indirect call type mismatch");
 
    // Call the function
@@ -278,7 +248,7 @@ int64_t __psizam_call_indirect_nothrow(void* ctx, void* mem, uint32_t type_idx,
    auto* table_base = c.get_table_base(table_idx);
    auto& entry = table_base[table_elem];
 
-   if (entry.type == 0xFFFFFFFF)
+   if (entry.type == UINT32_MAX || entry.index == UINT32_MAX)
       throw wasm_interpreter_exception{"undefined element"};
 
    const auto& expected_type = mod.types[type_idx];

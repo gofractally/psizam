@@ -502,6 +502,7 @@ namespace psizam::detail {
       ir_inst*        insts       = nullptr;
       uint32_t        inst_count  = 0;
       uint32_t        inst_cap    = 0;
+      jit_scratch_allocator* inst_alloc = nullptr;  // grows insts during IR construction
 
       ir_basic_block* blocks      = nullptr;
       uint32_t        block_count = 0;
@@ -557,11 +558,14 @@ namespace psizam::detail {
       // Initialize with bounded capacity from scratch allocator.
       // source_bytes = size of this function's WASM bytecode.
       void init(jit_scratch_allocator& alloc, std::size_t source_bytes) {
-         // Each WASM byte produces at most 3 IR instructions (e.g. store = addr+store+arg).
-         // Add a minimum to handle tiny functions.
+         // A WASM byte usually produces at most 3 IR instructions (e.g. store =
+         // addr+store+arg). That is only the initial size: a branch into a
+         // multi-value block or loop emits a mov per value from a single
+         // byte, so emit() grows the buffer when a function needs more.
          inst_cap = static_cast<uint32_t>(source_bytes * 3 + 16);
          insts = alloc.alloc<ir_inst>(inst_cap);
          inst_count = 0;
+         inst_alloc = &alloc;
 
          // Each control flow instruction creates at most 2 blocks.
          // source_bytes is an upper bound on instruction count.
@@ -601,8 +605,21 @@ namespace psizam::detail {
       }
 
       void emit(ir_inst inst) {
-         PSIZAM_ASSERT(inst_count < inst_cap, wasm_parse_exception, "IR instruction buffer overflow");
+         if (inst_count == inst_cap) grow_insts();
          insts[inst_count++] = inst;
+      }
+
+      // Instructions are addressed by index, never by pointer, while a
+      // function is being written, so the buffer may move. The scratch
+      // allocator only bumps: the old copy is reclaimed with the function.
+      void grow_insts() {
+         PSIZAM_ASSERT(inst_alloc && inst_cap <= UINT32_MAX / 2, wasm_parse_exception,
+                       "IR instruction buffer overflow");
+         const uint32_t grown_cap = inst_cap * 2;
+         ir_inst* grown = inst_alloc->alloc<ir_inst>(grown_cap);
+         std::memcpy(grown, insts, inst_count * sizeof(ir_inst));
+         insts = grown;
+         inst_cap = grown_cap;
       }
 
       uint32_t current_inst_index() const {

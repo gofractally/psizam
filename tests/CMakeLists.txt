@@ -634,6 +634,58 @@ target_compile_definitions(psizam_byte_stack_tests PRIVATE CATCH_CONFIG_NO_POSIX
    BYTE_STACK_EH_WASM="${CMAKE_CURRENT_BINARY_DIR}/byte-stack-eh.wasm")
 add_test(NAME execution.byte-stack COMMAND psizam_byte_stack_tests)
 set_tests_properties(execution.byte-stack PROPERTIES LABELS "execution;quick;resource" TIMEOUT 120)
+# Differential fixtures: results and trap behavior must match JIT1 everywhere.
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/engine-parity.wasm"
+   COMMAND "${PSIZAM_WAT2WASM}" "${CMAKE_CURRENT_SOURCE_DIR}/engine-parity.wat"
+      -o "${CMAKE_CURRENT_BINARY_DIR}/engine-parity.wasm"
+   DEPENDS engine-parity.wat VERBATIM)
+# One vector stays live while 65536 more are created: with 16-bit operand ids
+# a later vector would alias the first.
+string(REPEAT "i32.const 9 i32x4.splat drop\n" 65536 _wide_simd_body)
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-simd.wat"
+   "(module (func (export \"wide\") (param i32) (result i32)\n"
+   "local.get 0 i32x4.splat\n${_wide_simd_body}"
+   "i32.const 1000 i32x4.splat i32x4.add i32x4.extract_lane 1))\n")
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-simd.wasm"
+   COMMAND "${PSIZAM_WAT2WASM}" "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-simd.wat"
+      -o "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-simd.wasm"
+   DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-simd.wat" VERBATIM)
+# Many conditional branches into a wide loop: far more IR than source bytes.
+string(REPEAT "local.get 0 br_if 0\n" 300 _wide_loop_branches)
+string(REPEAT "i32.const 3 i32.mul i32.add\n" 23 _wide_loop_fold)
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-loop.wat"
+   "(module (func (export \"wide-loop\") (param i32) (result i32)\n"
+   "i32.const 1 i32.const 2 i32.const 3 i32.const 4 i32.const 5 i32.const 6\n"
+   "i32.const 7 i32.const 8 i32.const 9 i32.const 10 i32.const 11 i32.const 12\n"
+   "(loop (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)\n"
+   "i32.const 100 i32.const 200 i32.const 300 i32.const 400 i32.const 500 i32.const 600\n"
+   "i32.const 700 i32.const 800 i32.const 900 i32.const 1000 i32.const 1100 i32.const 1200\n"
+   "${_wide_loop_branches}${_wide_loop_fold})))\n")
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-loop.wasm"
+   COMMAND "${PSIZAM_WAT2WASM}" "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-loop.wat"
+      -o "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-loop.wasm"
+   DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-loop.wat" VERBATIM)
+add_executable(psizam_engine_parity_tests main.cpp engine_parity_tests.cpp
+   "${CMAKE_CURRENT_BINARY_DIR}/engine-parity.wasm"
+   "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-loop.wasm"
+   "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-simd.wasm")
+target_link_libraries(psizam_engine_parity_tests PRIVATE psizam psizam-exec Catch2::Catch2)
+if(PSIZAM_ENABLE_LLVM)
+   # The cold AOT entry point saves and reloads through the native artifact
+   # layer, whose build identity normally comes from the embedder.
+   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-build/psizam-native-build.hpp"
+      "#define PSIZAM_NATIVE_BUILD_ID \"engine-parity-tests\"\n")
+   target_sources(psizam_engine_parity_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/native_artifact.cpp")
+   target_include_directories(psizam_engine_parity_tests PRIVATE
+      "${CMAKE_CURRENT_BINARY_DIR}/engine-parity-build")
+   target_link_libraries(psizam_engine_parity_tests PRIVATE psizam-llvm-aot)
+endif()
+target_compile_definitions(psizam_engine_parity_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
+   ENGINE_PARITY_WASM="${CMAKE_CURRENT_BINARY_DIR}/engine-parity.wasm"
+   ENGINE_PARITY_WIDE_LOOP_WASM="${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-loop.wasm"
+   ENGINE_PARITY_WIDE_SIMD_WASM="${CMAKE_CURRENT_BINARY_DIR}/engine-parity-wide-simd.wasm")
+add_test(NAME execution.engine-parity COMMAND psizam_engine_parity_tests)
+set_tests_properties(execution.engine-parity PROPERTIES LABELS "execution;quick" TIMEOUT 120)
 if(PSIZAM_ENABLE_LLVM)
    foreach(bits 32 64)
       add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/private-atomics-${bits}.wasm"

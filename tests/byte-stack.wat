@@ -28,5 +28,11 @@
     else local.get $n i32.const 1 i32.sub return_call $tail end)
   (func (export "host-nested") (param i32) (result i32)
     i32.const 4 call $observe drop call $reenter drop i32.const 5 call $observe)
+  (func (export "host-loop") (param $n i32) (result i32)
+    (loop $again
+      call $reenter drop
+      local.get $n i32.const 1 i32.sub local.tee $n
+      br_if $again)
+    i32.const 6 call $observe)
   (func (export "host-failure") (param i32) (result i32) call $fail i32.const 0)
   (func (export "trap") (param i32) (result i32) unreachable))
