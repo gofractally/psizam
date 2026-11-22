@@ -1,0 +1,998 @@
+#include <psibase/NativeFunctions.hpp>
+
+#include <psibase/ActionContext.hpp>
+#include <psibase/Mount.hpp>
+#include <psibase/PsizamPolicy.hpp>
+#include <psibase/Rpc.hpp>
+#include <psibase/Socket.hpp>
+#include <psibase/saturating.hpp>
+#include <psibase/serviceEntry.hpp>
+#include <psio/finally.hpp>
+#include <psio/to_hex.hpp>
+
+#include <sys/stat.h>
+#include <unistd.h>
+#include <random>
+
+namespace psibase
+{
+   namespace
+   {
+      inline constexpr uint16_t wasi_errno_inval = 28;
+      inline constexpr uint16_t wasi_errno_nosys = 52;
+
+      template <typename F>
+      auto timeDb(NativeFunctions& self, F f)
+      {
+         auto start  = std::chrono::steady_clock::now();
+         auto result = f();
+         self.currentActContext->transactionContext.databaseTime +=
+             std::chrono::steady_clock::now() - start;
+         return result;
+      }
+
+      template <typename F>
+      void timeDbVoid(NativeFunctions& self, F f)
+      {
+         auto start = std::chrono::steady_clock::now();
+         f();
+         self.currentActContext->transactionContext.databaseTime +=
+             std::chrono::steady_clock::now() - start;
+      }
+
+      bool isSubjectiveContext(NativeFunctions& self)
+      {
+         return self.dbMode.isSubjective;
+      }
+
+      bool keyHasServicePrefix(DbId db)
+      {
+         return db == DbId::service || db == DbId::writeOnly || db == DbId::subjective ||
+                db == DbId::session || db == DbId::temporary;
+      }
+
+      struct Writable
+      {
+         bool chargeable;
+         bool refundable;
+      };
+
+      Writable getDbWrite(NativeFunctions& self, DbId db, psio::input_stream key)
+      {
+         if (db == DbId::subjective || db == DbId::session || db == DbId::temporary ||
+             db == DbId::nativeSubjective || db == DbId::nativeSession)
+         {
+            return {false, false};
+         }
+
+         if (db == DbId::writeOnly)
+         {
+            return {!isSubjectiveContext(self), false};
+         }
+
+         if (db == DbId::service || db == DbId::native)
+         {
+            return {true, true};
+         }
+         throw std::runtime_error("service may not write this db (" +
+                                  std::to_string(static_cast<std::uint32_t>(db)) +
+                                  "), or must use another intrinsic");
+      }
+
+      void verifyStatusRow(psio::input_stream                key,
+                           psio::input_stream                value,
+                           std::optional<psio::input_stream> oldValue)
+      {
+         check(psio::fracpack_validate_strict<StatusRow>({value.pos, value.end}),
+               "StatusRow has invalid format");
+         // TODO: Verify that only nextConsensus has changed
+         auto expectedKey = psio::convert_to_key(statusKey());
+         check(key.remaining() == expectedKey.size() &&
+                   !std::memcmp(key.pos, expectedKey.data(), key.remaining()),
+               "StatusRow has incorrect key");
+      }
+
+      void verifyCodeRow(TransactionContext&               ctx,
+                         psio::input_stream                key,
+                         psio::input_stream                value,
+                         std::optional<psio::input_stream> oldValue)
+      {
+         check(psio::fracpack_validate_strict<CodeRow>(value), "CodeRow has invalid format");
+         auto code      = psio::view<const CodeRow>(psio::prevalidated{value});
+         bool oldIsAuth = false;
+         if (oldValue)
+         {
+            auto oldCode = psio::view<const CodeRow>(psio::prevalidated{*oldValue});
+            if (oldCode.flags() & CodeRow::isVerify)
+            {
+               oldIsAuth = true;
+            }
+            //ctx.incCode(oldCode.codeHash(), oldCode.vmType(), oldCode.vmVersion(), -1);
+         }
+         bool isAuth = code.flags() & CodeRow::isVerify;
+         if (oldIsAuth || isAuth)
+         {
+            ctx.blockContext.modifiedAuthAccounts.insert(code.codeNum());
+         }
+         //ctx.incCode(code.codeHash(), code.vmType(), code.vmVersion(), 1);
+         auto expected_key = psio::convert_to_key(codeKey(code.codeNum()));
+         check(key.remaining() == expected_key.size() &&
+                   !std::memcmp(key.pos, expected_key.data(), key.remaining()),
+               "CodeRow has incorrect key");
+      }
+
+      void verifyRemoveCodeRow(TransactionContext& ctx,
+                               psio::input_stream  key,
+                               psio::input_stream  value)
+      {
+         auto code = psio::view<const CodeRow>(psio::prevalidated{value});
+         if (code.flags() & CodeRow::isVerify)
+         {
+            ctx.blockContext.modifiedAuthAccounts.insert(code.codeNum());
+         }
+         //ctx.incCode(code.codeHash(), code.vmType(), code.vmVersion(), -1);
+      }
+
+      void verifyCodeByHashRow(psio::input_stream key, psio::input_stream value)
+      {
+         check(psio::fracpack_validate_strict<CodeByHashRow>({value.pos, value.end}),
+               "CodeByHashRow has invalid format");
+         // TODO: use a view here instead of unpacking to a rich object
+         auto code =
+             psio::from_frac<CodeByHashRow>(psio::prevalidated{std::span{value.pos, value.end}});
+         auto codeHash = sha256(code.code.data(), code.code.size());
+         check(code.codeHash == codeHash, "CodeByHashRow has incorrect codeHash");
+         auto expected_key = psio::convert_to_key(code.key());
+         check(key.remaining() == expected_key.size() &&
+                   !memcmp(key.pos, expected_key.data(), key.remaining()),
+               "CodeByHashRow has incorrect key");
+      }
+
+      void verifyRemoveCodeByHashRow(TransactionContext& ctx,
+                                     psio::input_stream  key,
+                                     psio::input_stream  value)
+      {
+         auto code = psio::view<const CodeByHashRow>(psio::prevalidated{value});
+         ctx.blockContext.removedCode.insert(
+             codeByHashKey(code.codeHash(), code.vmType(), code.vmVersion()));
+      }
+
+      void verifyConfigRow(psio::input_stream key, psio::input_stream value)
+      {
+         check(psio::fracpack_validate_strict<ConfigRow>({value.pos, value.end}),
+               "ConfigRow has invalid format");
+         auto row = psio::from_frac<ConfigRow>(psio::prevalidated{std::span{value.pos, value.end}});
+         auto expected_key = psio::convert_to_key(row.key());
+         check(key.remaining() == expected_key.size() &&
+                   !memcmp(key.pos, expected_key.data(), key.remaining()),
+               "ConfigRow has incorrect key");
+
+         // Both of these are on the conservative side for triedent. The actual
+         // max values are odd.
+         check(row.maxKeySize <= 128, "maxKeySize too big for triedent");
+         check(row.maxValueSize <= (15 << 20), "maxValueSize too big for triedent");
+      }
+
+      void verifyWasmConfigRow(NativeTableNum     table,
+                               psio::input_stream key,
+                               psio::input_stream value)
+      {
+         check(psio::fracpack_validate_strict<WasmConfigRow>({value.pos, value.end}),
+               "WasmConfigRow has invalid format");
+         auto row =
+             psio::from_frac<WasmConfigRow>(psio::prevalidated{std::span{value.pos, value.end}});
+         auto expected_key = psio::convert_to_key(row.key(table));
+         check(key.remaining() == expected_key.size() &&
+                   !memcmp(key.pos, expected_key.data(), key.remaining()),
+               "WasmConfigRow has incorrect key");
+         // Reject an unusable execution policy while the privileged write can
+         // still fail, rather than accepting a row that prevents its repair.
+         static_cast<void>(NativeVMOptions{row.vmOptions});
+      }
+
+      void verifyNotifyTableRow(psio::input_stream key, psio::input_stream value)
+      {
+         // The notifyTable is only processed subjectively
+      }
+
+      void verifySubjectiveNotifyTableRow(Database&          db,
+                                          psio::input_stream key,
+                                          psio::input_stream value)
+      {
+         // The notifyTable is only processed subjectively
+         if (psio::fracpack_validate<NotifyRow>({value.pos, value.end}))
+         {
+            auto row =
+                psio::view<const NotifyRow>(psio::prevalidated{std::span{value.pos, value.end}});
+            if (row.type() == NotifyType::nextTransaction)
+            {
+               db.setCallbackFlags(DatabaseCallbacks::nextTransactionFlag);
+            }
+         }
+      }
+
+      void verifySubjectiveCodeRow(psio::input_stream key, psio::input_stream value)
+      {
+         check(psio::fracpack_validate_strict<CodeRow>(value), "CodeRow has invalid format");
+         auto code         = psio::view<const CodeRow>(psio::prevalidated{value});
+         auto expected_key = psio::convert_to_key(codeKey(code.codeNum()));
+         check(key.remaining() == expected_key.size() &&
+                   !std::memcmp(key.pos, expected_key.data(), key.remaining()),
+               "CodeRow has incorrect key");
+      }
+
+      void verifySubjectiveRunTableRow(Database&          db,
+                                       psio::input_stream key,
+                                       psio::input_stream value)
+      {
+         // The runTable is only processed subjectively
+         if (psio::fracpack_validate<RunRow>({value.pos, value.end}))
+         {
+            auto row =
+                psio::view<const NotifyRow>(psio::prevalidated{std::span{value.pos, value.end}});
+            db.setCallbackFlags(DatabaseCallbacks::runQueueFlag);
+         }
+      }
+
+      void verifyScheduledSnapshotRow(psio::input_stream key, psio::input_stream value)
+      {
+         check(psio::fracpack_validate_strict<ScheduledSnapshotRow>({value.pos, value.end}),
+               "ScheduledSnapshotRow has invalid format");
+         auto row = psio::from_frac<ScheduledSnapshotRow>(
+             psio::prevalidated{std::span{value.pos, value.end}});
+         auto expected_key = psio::convert_to_key(row.key());
+         check(key.remaining() == expected_key.size() &&
+                   !memcmp(key.pos, expected_key.data(), key.remaining()),
+               "ScheduledSnapshotRow has incorrect key");
+      }
+
+      void verifySocketRow(TransactionContext& tc, psio::input_stream key, psio::input_stream value)
+      {
+         auto existing = tc.blockContext.db.kvGetRaw(DbId::nativeSession, key);
+         if (!existing)
+            abortMessage("Cannot write a new socket");
+         auto old = psio::view<const SocketRow>(
+             psio::prevalidated{std::span{existing->pos, existing->end}});
+         check(psio::fracpack_validate_strict<SocketRow>({value.pos, value.end}),
+               "SocketRow has invalid format");
+         auto row =
+             psio::view<const SocketRow>(psio::prevalidated{std::span{value.pos, value.end}});
+         if (old.fd() != row.fd())
+            abortMessage("SocketRow has incorrect key");
+
+         if (auto oldInfo = get_if<WebSocketInfo>(old.info()))
+         {
+            if (auto newInfo = get_if<P2PSocketInfo>(row.info()))
+            {
+               if (oldInfo->endpoint() == newInfo->endpoint() && oldInfo->tls() == newInfo->tls())
+               {
+                  auto err = tc.blockContext.db.socketEnableP2P(
+                      row.fd(), *tc.blockContext.systemContext.sockets, tc.ownedSockets);
+                  if (err != 0)
+                     abortMessage("Socket cannot enable P2P: " + std::to_string(err));
+                  return;
+               }
+            }
+         }
+         if (old.info() != row.info())
+         {
+            abortMessage("Invalid update to SocketRow");
+         }
+      }
+
+      void verifyEnvRow(psio::input_stream key, psio::input_stream value)
+      {
+         // Native doesn't do anything with the env table.
+      }
+
+      void verifyHostConfigRow(TransactionContext& context,
+                               psio::input_stream  key,
+                               psio::input_stream  value)
+      {
+         check(psio::fracpack_validate<HostConfigRow>({value.pos, value.end}),
+               "HostConfigRow has invalid format");
+         auto expected_key = psio::convert_to_key(hostConfigKey());
+         check(key.remaining() == expected_key.size() &&
+                   !memcmp(key.pos, expected_key.data(), key.remaining()),
+               "HostConfigRow has incorrect key");
+         if (auto* callbacks = context.blockContext.systemContext.sharedDatabase.getCallbacks())
+         {
+            if (callbacks->validateHostConfig)
+            {
+               callbacks->validateHostConfig({value.pos, value.end});
+            }
+         }
+         context.blockContext.db.setCallbackFlags(DatabaseCallbacks::hostConfigFlag);
+      }
+
+      void verifyPendingShutdownRow(TransactionContext& context,
+                                    psio::input_stream  key,
+                                    psio::input_stream  value)
+      {
+         check(psio::fracpack_validate<PendingShutdownRow>({value.pos, value.end}),
+               "PendingShutdownRow has invalid format");
+         auto expected_key = psio::convert_to_key(pendingShutdownKey());
+         check(key.remaining() == expected_key.size() &&
+                   !memcmp(key.pos, expected_key.data(), key.remaining()),
+               "PendingShutdownRow has incorrect key");
+         context.blockContext.db.setCallbackFlags(DatabaseCallbacks::shutdownFlag);
+      }
+
+      void verifyTimerRow(Database& db, psio::input_stream key, psio::input_stream value)
+      {
+         if (psio::fracpack_validate<TimerRow>({value.pos, value.end}))
+         {
+            db.setCallbackFlags(DatabaseCallbacks::runQueueFlag);
+         }
+      }
+
+      void verifyWriteConstrained(TransactionContext&               context,
+                                  psio::input_stream                key,
+                                  psio::input_stream                value,
+                                  std::optional<psio::input_stream> existing)
+      {
+         NativeTableNum table;
+         check(key.remaining() >= sizeof(table), "Unrecognized key in nativeConstrained");
+         memcpy(&table, key.pos, sizeof(table));
+         std::reverse((char*)&table, (char*)(&table + 1));
+         if (table == statusTable)
+            verifyStatusRow(key, value, existing);
+         else if (table == codeTable)
+            verifyCodeRow(context, key, value, existing);
+         else if (table == codeByHashTable)
+            verifyCodeByHashRow(key, value);
+         else if (table == configTable)
+            verifyConfigRow(key, value);
+         else if (table == transactionWasmConfigTable || table == proofWasmConfigTable)
+            verifyWasmConfigRow(table, key, value);
+         else if (table == notifyTable)
+            verifyNotifyTableRow(key, value);
+         else if (table == scheduledSnapshotTable)
+            verifyScheduledSnapshotRow(key, value);
+         else
+            throw std::runtime_error("Unrecognized key in nativeConstrained");
+      }
+
+      void verifyWriteSubjective(Database& db, psio::input_stream key, psio::input_stream value)
+      {
+         NativeTableNum table;
+         check(key.remaining() >= sizeof(table), "Unrecognized key in nativeSubjective");
+         memcpy(&table, key.pos, sizeof(table));
+         std::reverse((char*)&table, (char*)(&table + 1));
+         if (table == notifyTable)
+            verifySubjectiveNotifyTableRow(db, key, value);
+         else if (table == codeTable)
+            verifySubjectiveCodeRow(key, value);
+         else if (table == codeByHashTable)
+            verifyCodeByHashRow(key, value);
+         else if (table == runTable)
+            verifySubjectiveRunTableRow(db, key, value);
+         else
+            throw std::runtime_error("Unrecognized key in nativeSubjective");
+      }
+
+      void verifyWriteSession(TransactionContext& context,
+                              psio::input_stream  key,
+                              psio::input_stream  value)
+      {
+         NativeTableNum table;
+         check(key.remaining() >= sizeof(table), "Unrecognized key in nativeSession");
+         memcpy(&table, key.pos, sizeof(table));
+         std::reverse((char*)&table, (char*)(&table + 1));
+         if (table == socketTable)
+            verifySocketRow(context, key, value);
+         else if (table == envTable)
+            verifyEnvRow(key, value);
+         else if (table == hostConfigTable)
+            verifyHostConfigRow(context, key, value);
+         else if (table == pendingShutdownTable)
+            verifyPendingShutdownRow(context, key, value);
+         else if (table == timerTable)
+            verifyTimerRow(context.blockContext.db, key, value);
+         else
+            throw std::runtime_error("Unrecognized key in nativeSession");
+      }
+
+      void verifyRemoveConstrained(TransactionContext& context,
+                                   psio::input_stream  key,
+                                   psio::input_stream  value)
+      {
+         NativeTableNum table;
+         check(key.remaining() >= sizeof(table), "Unrecognized key in nativeConstrained");
+         memcpy(&table, key.pos, sizeof(table));
+         std::reverse((char*)&table, (char*)(&table + 1));
+         if (table == codeTable)
+            verifyRemoveCodeRow(context, key, value);
+         else if (table == codeByHashTable)
+            verifyRemoveCodeByHashRow(context, key, value);
+      }
+
+      uint32_t clearResult(NativeFunctions& self)
+      {
+         self.result_key.clear();
+         self.result_value.clear();
+         return -1;
+      }
+
+      uint32_t setResult(NativeFunctions& self, std::vector<char> result)
+      {
+         self.result_key.clear();
+         self.result_value = std::move(result);
+         return self.result_value.size();
+      }
+
+      uint32_t setResult(NativeFunctions& self, const std::optional<psio::input_stream>& o)
+      {
+         if (!o)
+            return clearResult(self);
+         self.result_key.clear();
+         self.result_value.assign(o->pos, o->end);
+         return self.result_value.size();
+      }
+
+      uint32_t setResult(NativeFunctions& self, const std::optional<Database::KVResult>& o)
+      {
+         if (!o)
+            return clearResult(self);
+         self.result_key.assign(o->key.pos, o->key.end);
+         self.result_value.assign(o->value.pos, o->value.end);
+         return self.result_value.size();
+      }
+
+      KvResourceDelta& getDelta(KvResourceMap& deltas, const KvResourceKey& key)
+      {
+         auto pos = std::ranges::lower_bound(deltas, key, {}, &KvResourcePair::first);
+         if (pos == deltas.end())
+         {
+            pos = deltas.insert(pos, KvResourcePair{key, {}});
+         }
+         return pos->second;
+      }
+
+      void notifyKvMut(NativeFunctions& self,
+                       DbId             db,
+                       std::uint32_t    keyLen,
+                       std::uint32_t    oldValueLen,
+                       std::uint32_t    newValueLen)
+      {
+         auto& transactionStack = self.currentActContext->transactionContext.remainingStack;
+         auto  saved            = transactionStack;
+         auto  restoreStack     = psio::finally{[&] { transactionStack = saved; }};
+         auto remainingStack = self.currentExecContext->remainingStack();
+         check(remainingStack >= VMOptions::stack_usage_for_call, "stack overflow");
+         remainingStack -= VMOptions::stack_usage_for_call;
+         self.currentActContext->transactionContext.remainingStack = remainingStack;
+
+         Action act{
+             .service = transactionServiceNum,
+             .method  = MethodNumber{"kvNotify"},
+             .rawData =
+                 psio::to_frac(std::tuple(self.code.codeNum, db, keyLen, oldValueLen, newValueLen)),
+         };
+
+         auto flags       = CallFlags::none;
+         auto callerFlags = self.code.flags;
+
+         auto savedImported = std::move(self.transactionContext.importedHandles);
+         auto savedExported = std::move(self.transactionContext.exportedHandles);
+         auto _ =
+             psio::finally{[&]
+                           {
+                              self.transactionContext.importedHandles = std::move(savedImported);
+                              self.transactionContext.exportedHandles = std::move(savedExported);
+                           }};
+
+         self.currentActContext->actionTrace.innerTraces.push_back({ActionTrace{}});
+         auto& inner_action_trace =
+             std::get<ActionTrace>(self.currentActContext->actionTrace.innerTraces.back().inner);
+         self.currentActContext->transactionContext.execCalledAction(callerFlags, act,
+                                                                     inner_action_trace, flags);
+      }
+   }  // namespace
+
+   uint32_t NativeFunctions::getResult(std::span<char> dest, uint32_t offset)
+   {
+      if (offset < result_value.size() && dest.size())
+         memcpy(dest.data(), result_value.data() + offset,
+                std::min(result_value.size() - offset, dest.size()));
+      return result_value.size();
+   }
+
+   uint32_t NativeFunctions::getKey(std::span<char> dest)
+   {
+      if (!result_key.empty())
+         memcpy(dest.data(), result_key.data(), std::min(result_key.size(), dest.size()));
+      return result_key.size();
+   }
+
+   void NativeFunctions::writeConsole(std::span<const char> str)
+   {
+      // TODO: limit total console size across all executions within transaction
+      if (currentActContext->actionTrace.innerTraces.empty() ||
+          !std::holds_alternative<ConsoleTrace>(
+              currentActContext->actionTrace.innerTraces.back().inner))
+         currentActContext->actionTrace.innerTraces.push_back({ConsoleTrace{}});
+      auto& console =
+          std::get<ConsoleTrace>(currentActContext->actionTrace.innerTraces.back().inner).console;
+      console.append(str.begin(), str.end());
+   }
+
+   void NativeFunctions::abortMessage(std::span<const char> str)
+   {
+      throw std::runtime_error("service '" + code.codeNum.str() +
+                               "' aborted with message: " + std::string(str.data(), str.size()));
+   }
+
+   int32_t NativeFunctions::clockTimeGet(uint32_t                                  id,
+                                         psizam::detail::argument_proxy<uint64_t*> time)
+   {
+      check(isSubjectiveContext(*this), "clockGetTime cannot be called in a deterministic context");
+      clearResult(*this);
+      std::chrono::nanoseconds result;
+      if (id == 0)
+      {  // CLOCK_REALTIME
+         result = std::chrono::system_clock::now().time_since_epoch();
+      }
+      else if (id == 1)
+      {  // CLOCK_MONOTONIC
+         result = std::chrono::steady_clock::now().time_since_epoch();
+      }
+      else if (id == 2 || id == 3)
+      {  // CLOCK_PROCESS_CPUTIME_ID or CLOCK_THREAD_CPUTIME_ID
+         result = transactionContext.getBillableTime();
+      }
+      else
+      {
+         return wasi_errno_inval;
+      }
+      *time = result.count();
+      return 0;
+   }
+
+   void NativeFunctions::getRandom(std::span<char> dest)
+   {
+      check(isSubjectiveContext(*this), "getRandom cannot be called in a deterministic context");
+      std::random_device rng;
+      std::ranges::generate(dest, [&] { return rng(); });
+   }
+
+   void NativeFunctions::setMaxCpuTime(uint64_t nanoseconds)
+   {
+      check(code.flags & CodeRow::isPrivileged, "setMaxCpuTime requires privileges");
+      clearResult(*this);
+      // Ensure no overflow by capping the value. The exact value is not visible to
+      // wasm and does not affect consensus and there's no way a transaction can
+      // run for 300 years.
+      if (transactionContext.blockContext.isProducing)
+         transactionContext.setWatchdog(saturatingCast<CpuClock::duration>(
+             std::chrono::duration<std::uint64_t, std::nano>(nanoseconds)));
+   }
+
+   uint32_t NativeFunctions::getCurrentAction()
+   {
+      return setResult(*this, psio::convert_to_frac(currentActContext->action));
+   }
+
+   uint32_t NativeFunctions::call(std::span<const char> data, std::uint64_t flagsRaw)
+   {
+      auto& transactionStack = currentActContext->transactionContext.remainingStack;
+      auto  saved            = transactionStack;
+      auto  restoreStack     = psio::finally{[&] { transactionStack = saved; }};
+      auto remainingStack = currentExecContext->remainingStack();
+      check(remainingStack >= VMOptions::stack_usage_for_call, "stack overflow");
+      remainingStack -= VMOptions::stack_usage_for_call;
+      currentActContext->transactionContext.remainingStack = remainingStack;
+
+      // TODO: don't unpack rawData
+      check(psio::fracpack_validate_strict<Action>(data), "call: invalid data format");
+      auto flags = static_cast<CallFlags>(flagsRaw);
+      if (flags == CallFlags::runModeRpc || flags == CallFlags::runModeCallback)
+      {
+         check(dbMode.isSync && !dbMode.isSubjective, "Can only change run mode in a transaction");
+      }
+      else if (flags != CallFlags::none)
+      {
+         abortMessage("Invalid call flags: " + std::to_string(flagsRaw));
+      }
+      auto act         = psio::from_frac<Action>(psio::prevalidated{data});
+      auto callerFlags = code.flags;
+      if (act.sender != code.codeNum)
+      {
+         check((code.flags & CodeRow::isPrivileged) != 0,
+               "service is not authorized to call as another sender");
+         callerFlags |= ExecutionContext::callerSudo;
+      }
+
+      currentActContext->actionTrace.innerTraces.push_back({ActionTrace{}});
+      auto& inner_action_trace =
+          std::get<ActionTrace>(currentActContext->actionTrace.innerTraces.back().inner);
+      // TODO: avoid reserialization
+      currentActContext->transactionContext.execCalledAction(callerFlags, act, inner_action_trace,
+                                                             flags);
+      setResult(*this, inner_action_trace.rawRetval);
+
+      return result_value.size();
+   }
+
+   void NativeFunctions::setRetval(std::span<const char> data)
+   {
+      currentActContext->actionTrace.rawRetval.assign(data.begin(), data.end());
+      clearResult(*this);
+   }
+
+   uint32_t NativeFunctions::kvOpen(uint32_t dbRaw, std::span<const char> prefix, uint32_t mode)
+   {
+      check(prefix.size() <= transactionContext.config.maxKeySize, "key is too big");
+
+      auto db = static_cast<DbId>(dbRaw);
+
+      bool isRead  = false;
+      bool isWrite = false;
+      switch (mode)
+      {
+         case uint32_t(KvMode::read):
+            isRead = true;
+            break;
+         case uint32_t(KvMode::write):
+            isWrite = true;
+            break;
+         case uint32_t(KvMode::readWrite):
+            isRead  = true;
+            isWrite = true;
+            break;
+         default:
+            abortMessage("invalid mode");
+      }
+
+      if (!(code.flags & CodeRow::isPrivileged))
+      {
+         abortMessage("service may not open databases");
+      }
+
+      switch (db)
+      {
+         // Objective databases
+         case DbId::native:
+         case DbId::service:
+            check(dbMode.isSubjective || dbMode.isSync,
+                  "database access disabled during proof verification");
+            check(!isWrite || !isSubjectiveContext(*this),
+                  "database cannot be written in subjective context");
+            check(!isWrite || dbMode.isSync, "database cannot be written in async context");
+            break;
+         // Subjective databases that follow forks
+         case DbId::blockLog:
+         case DbId::writeOnly:
+            check(!isRead || isSubjectiveContext(*this),
+                  "subjective databases cannot be read in a deterministic context");
+            check(!isWrite || dbMode.isSync, "database cannot be written in async context");
+            break;
+         // Chain independent databases
+         case DbId::nativeSubjective:
+         case DbId::nativeSession:
+         case DbId::subjective:
+         case DbId::session:
+         case DbId::temporary:
+            check(isSubjectiveContext(*this),
+                  "subjective databases cannot be accessed in a deterministic context");
+            check(code.flags & ExecutionContext::isLocal, "service may not open this db");
+            break;
+         default:
+            throw std::runtime_error("service may not read this db, or must use another intrinsic");
+      }
+
+      return static_cast<std::uint32_t>(
+          buckets.open(db, std::vector(prefix.begin(), prefix.end()), static_cast<KvMode>(mode),
+                       transactionContext.getWasmConfig().maxHandles));
+   }
+
+   uint32_t NativeFunctions::kvOpenAt(uint32_t handle, std::span<const char> prefix, uint32_t mode)
+   {
+      const auto& bucket    = buckets[static_cast<KvHandle>(handle)];
+      auto        newPrefix = bucket.key(prefix);
+      check(newPrefix.size() <= transactionContext.config.maxKeySize, "key is too big");
+      check((static_cast<std::uint32_t>(bucket.mode) & mode) == mode,
+            "Cannot increase permissions");
+
+      return static_cast<std::uint32_t>(
+          buckets.open(bucket.db, newPrefix, static_cast<KvMode>(mode),
+                       transactionContext.getWasmConfig().maxHandles));
+   }
+
+   void NativeFunctions::kvClose(uint32_t handle)
+   {
+      buckets.close(static_cast<KvHandle>(handle));
+   }
+
+   void NativeFunctions::exportHandles(std::span<const char> data)
+   {
+      using Handles = std::vector<KvHandle>;
+      check(psio::fracpack_validate_strict<Handles>(data), "Expected list of handles");
+      auto handles = psio::view<const Handles>{psio::prevalidated{data}};
+      check(handles.size() <= transactionContext.getWasmConfig().maxHandles,
+            "Too many handles exported");
+      transactionContext.exportedHandles.clear();
+      transactionContext.exportedHandles.reserve(handles.size());
+      for (auto handle : handles)
+      {
+         transactionContext.exportedHandles.push_back(buckets[handle]);
+      }
+   }
+
+   uint32_t NativeFunctions::importHandles()
+   {
+      return setResult(*this,
+                       psio::to_frac(buckets.add(std::move(transactionContext.importedHandles),
+                                                 transactionContext.getWasmConfig().maxHandles)));
+   }
+
+   void NativeFunctions::kvPut(uint32_t              handle,
+                               std::span<const char> key,
+                               std::span<const char> value)
+   {
+      timeDbVoid(
+          *this,
+          [&]
+          {
+             clearResult(*this);
+             const auto& bucket = buckets[static_cast<KvHandle>(handle)];
+             if (!bucket.isWrite())
+                abortMessage("Cannot write to this db handle " + bucket.to_string());
+             auto fullKey  = bucket.key(key);
+             auto bucketDb = bucket.db;
+             check(fullKey.size() <= transactionContext.config.maxKeySize, "key is too big");
+             check(value.size() <= transactionContext.config.maxValueSize, "value is too big");
+             auto w = getDbWrite(*this, bucketDb, fullKey);
+             if (w.chargeable)
+             {
+                auto& delta =
+                    getDelta(transactionContext.kvResourceDeltas,
+                             KvResourceKey{code.codeNum, static_cast<std::uint32_t>(bucketDb)});
+                delta.records += 1;
+                delta.keyBytes += fullKey.size();
+                delta.valueBytes += value.size();
+                if (w.refundable)
+                {
+                   auto existing = database.kvGetRaw(bucketDb, fullKey);
+                   if (existing)
+                   {
+                      delta.records -= 1;
+                      delta.keyBytes -= fullKey.size();
+                      delta.valueBytes -= existing->remaining();
+                   }
+                   // nativeConstrained is both refundable and chargeable
+                   if (bucketDb == DbId::native)
+                   {
+                      verifyWriteConstrained(transactionContext, fullKey,
+                                             {value.data(), value.size()}, existing);
+                   }
+                   notifyKvMut(*this, bucketDb, fullKey.size(),
+                               existing ? existing->remaining() : -1, value.size());
+                }
+                else
+                {
+                   notifyKvMut(*this, bucketDb, fullKey.size(), -1, value.size());
+                }
+             }
+             else if (bucketDb == DbId::nativeSubjective)
+             {
+                verifyWriteSubjective(database, fullKey, {value.data(), value.size()});
+             }
+             else if (bucketDb == DbId::nativeSession)
+             {
+                verifyWriteSession(transactionContext, fullKey, {value.data(), value.size()});
+             }
+             database.kvPutRaw(bucketDb, {fullKey.data(), fullKey.size()},
+                               {value.data(), value.size()});
+          });
+   }
+
+   void NativeFunctions::kvRemove(uint32_t handle, std::span<const char> key)
+   {
+      timeDbVoid(*this,
+                 [&]
+                 {
+                    clearResult(*this);
+                    const auto& bucket = buckets[static_cast<KvHandle>(handle)];
+                    if (!bucket.isWrite())
+                       abortMessage("Cannot write to this db handle " + bucket.to_string());
+                    auto fullKey  = bucket.key(key);
+                    auto bucketDb = bucket.db;
+                    auto w        = getDbWrite(*this, bucketDb, fullKey);
+                    if (w.refundable)
+                    {
+                       if (auto existing = database.kvGetRaw(bucketDb, fullKey))
+                       {
+                          auto& delta = getDelta(
+                              transactionContext.kvResourceDeltas,
+                              KvResourceKey{code.codeNum, static_cast<std::uint32_t>(bucketDb)});
+                          delta.records -= 1;
+                          delta.keyBytes -= fullKey.size();
+                          delta.valueBytes -= existing->remaining();
+                          if (bucketDb == DbId::native)
+                          {
+                             verifyRemoveConstrained(transactionContext, fullKey, *existing);
+                          }
+                          notifyKvMut(*this, bucketDb, fullKey.size(), existing->remaining(), -1);
+                       }
+                    }
+                    database.kvRemoveRaw(bucketDb, fullKey);
+                 });
+   }
+
+   uint32_t NativeFunctions::kvGet(uint32_t handle, std::span<const char> key)
+   {
+      return timeDb(  //
+          *this,
+          [&]
+          {
+             const auto& bucket = buckets[static_cast<KvHandle>(handle)];
+             if (!bucket.isRead())
+                abortMessage("Cannot read from this db handle " + bucket.to_string());
+             auto fullKey = bucket.key(key);
+             return setResult(*this, database.kvGetRaw(bucket.db, fullKey));
+          });
+   }
+
+   uint32_t NativeFunctions::kvGreaterEqual(uint32_t              handle,
+                                            std::span<const char> key,
+                                            uint32_t              matchKeySize)
+   {
+      return timeDb(  //
+          *this,
+          [&]
+          {
+             check(matchKeySize <= key.size(), "matchKeySize is larger than key");
+             const auto& bucket = buckets[static_cast<KvHandle>(handle)];
+             if (!bucket.isRead())
+                abortMessage("Cannot read from this db handle " + bucket.to_string());
+             auto fullKey       = bucket.key(key);
+             auto fullMatchSize = bucket.prefix.size() + matchKeySize;
+             return setResult(*this, bucket.trimResult(database.kvGreaterEqualRaw(
+                                         bucket.db, fullKey, fullMatchSize)));
+          });
+   }
+
+   uint32_t NativeFunctions::kvLessThan(uint32_t              handle,
+                                        std::span<const char> key,
+                                        uint32_t              matchKeySize)
+   {
+      return timeDb(  //
+          *this,
+          [&]
+          {
+             check(matchKeySize <= key.size(), "matchKeySize is larger than key");
+             const auto& bucket = buckets[static_cast<KvHandle>(handle)];
+             if (!bucket.isRead())
+                abortMessage("Cannot read from this db handle " + bucket.to_string());
+             auto fullKey       = bucket.key(key);
+             auto fullMatchSize = bucket.prefix.size() + matchKeySize;
+             return setResult(*this, bucket.trimResult(database.kvLessThanRaw(bucket.db, fullKey,
+                                                                              fullMatchSize)));
+          });
+   }
+
+   uint32_t NativeFunctions::kvMax(uint32_t handle, std::span<const char> key)
+   {
+      return timeDb(  //
+          *this,
+          [&]
+          {
+             const auto& bucket = buckets[static_cast<KvHandle>(handle)];
+             if (!bucket.isRead())
+                abortMessage("Cannot read from this db handle " + bucket.to_string());
+             auto fullKey = bucket.key(key);
+             return setResult(*this, bucket.trimResult(database.kvMaxRaw(bucket.db, fullKey)));
+          });
+   }
+
+   // TODO: return an extensible struct instead of a vector.
+   //       maybe include intrinsic usage so transact can veto?
+   uint32_t NativeFunctions::kvGetTransactionUsage()
+   {
+      auto size = setResult(*this, psio::convert_to_frac(transactionContext.kvResourceDeltas));
+      return size;
+   }
+
+   void NativeFunctions::checkoutSubjective()
+   {
+      database.checkoutSubjective();
+   }
+   bool NativeFunctions::commitSubjective()
+   {
+      return database.commitSubjective(*transactionContext.blockContext.systemContext.sockets,
+                                       transactionContext.ownedSockets);
+   }
+   void NativeFunctions::abortSubjective()
+   {
+      database.abortSubjective();
+   }
+
+   int32_t NativeFunctions::socketOpen(std::span<const char> args)
+   {
+      check(isSubjectiveContext(*this), "Sockets are only available during subjective execution");
+      check(code.flags & CodeRow::isPrivileged, "Service is not allowed to open sockets");
+      check(code.flags & ExecutionContext::isLocal, "Service is not allowed to open sockets");
+
+      using Args = std::tuple<HttpRequest, std::optional<TLSInfo>, std::optional<SocketEndpoint>>;
+      check(psio::fracpack_validate<Args>(args), "Malformed arguments to socketOpen");
+
+      if (auto* callbacks =
+              transactionContext.blockContext.systemContext.sharedDatabase.getCallbacks())
+      {
+         if (callbacks->socketOpen)
+         {
+            std::int32_t result = -1;
+            callbacks->socketOpen(args,
+                                  [&](const std::shared_ptr<Socket>& socket)
+                                  {
+                                     check(result == -1, "socket already added");
+                                     transactionContext.blockContext.systemContext.sockets->add(
+                                         *transactionContext.blockContext.writer, socket,
+                                         &transactionContext.ownedSockets);
+                                     result = socket->id;
+                                  });
+            check(result != -1, "socketOpen failed to add a socket");
+            return result;
+         }
+      }
+      return -static_cast<std::int32_t>(wasi_errno_nosys);
+   }
+
+   int32_t NativeFunctions::socketSend(int32_t fd, std::span<const char> msg, std::uint32_t flags)
+   {
+      check(isSubjectiveContext(*this), "Sockets are only available during subjective execution");
+      check(code.flags & CodeRow::isPrivileged, "Service is not allowed to write to socket");
+      check(code.flags & ExecutionContext::isLocal, "Service is not allowed to write to socket");
+      check(dbMode.sockets, "Sockets disabled during speculative execution");
+      return transactionContext.blockContext.systemContext.sockets->send(
+          *transactionContext.blockContext.writer, fd, msg, flags);
+   }
+
+   int32_t NativeFunctions::socketSetFlags(int32_t fd, std::uint32_t mask, std::uint32_t value)
+   {
+      check(isSubjectiveContext(*this), "Sockets are only available during subjective execution");
+      check(code.flags & CodeRow::isPrivileged, "Service is not allowed to write to socket");
+      check(code.flags & ExecutionContext::isLocal, "Service is not allowed to write to socket");
+      check(dbMode.sockets, "Sockets disabled during speculative execution");
+      return database.socketSetFlags(fd, mask, value,
+                                     *transactionContext.blockContext.systemContext.sockets,
+                                     transactionContext.ownedSockets);
+   }
+
+   std::uint32_t NativeFunctions::readFile(std::span<const char> filename)
+   {
+      check(isSubjectiveContext(*this), "Files are only available during subjective execution");
+      check(code.flags & CodeRow::isPrivileged, "Service is not allowed to read files");
+      check(code.flags & ExecutionContext::isLocal, "Service is not allowed to read files");
+      try
+      {
+         auto file = transactionContext.blockContext.systemContext.mountpoints->open(
+             std::string_view{filename.data(), filename.size()});
+
+         struct stat stat;
+         if (::fstat(file.fd, &stat) < 0)
+            return clearResult(*this);
+         // -1 is reserved to indicate errors
+         if (stat.st_size >= std::numeric_limits<std::uint32_t>::max())
+            return clearResult(*this);
+         std::vector<char> result(static_cast<std::size_t>(stat.st_size));
+         char*             pos       = result.data();
+         std::size_t       remaining = result.size();
+         while (remaining)
+         {
+            auto count = ::read(file.fd, pos, remaining);
+            if (count <= 0)
+               return clearResult(*this);
+            remaining -= count;
+            pos += count;
+         }
+         return setResult(*this, std::move(result));
+      }
+      catch (std::system_error&)
+      {
+         return clearResult(*this);
+      }
+   }
+
+}  // namespace psibase

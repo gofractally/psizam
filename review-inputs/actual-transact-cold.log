@@ -1,0 +1,20 @@
+[1;33mFilters: "Test push_transaction"
+[0mRandomness seeded to: 123456789
+Generating backtrace...
+<wasm address 0x00031539>
+<wasm address 0x0005e4ca>
+<wasm address 0x00032469>
+<wasm address 0x00032469>
+<wasm address 0x00062671>
+<wasm address 0x00066ce1>
+<wasm address 0x000357d7>
+<wasm address 0x000506e3>
+<wasm address 0x0005b96a>
+<wasm address 0x00004857>
+<wasm address 0x00004857>
+<wasm address 0x001456a2>
+<wasm address 0x001456a2>
+<wasm address 0x001759aa>
+<wasm address 0x001871ec>
+<wasm address 0x001871ec>
+tester wasm asserted: no chain is selected
