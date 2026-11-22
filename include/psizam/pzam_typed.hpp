@@ -36,6 +36,7 @@
 #include <psizam/pzam_cache.hpp>
 #include <psizam/pzam_format.hpp>
 #include <psizam/pzam_metadata.hpp>
+#include <psizam/detail/pzam_loader.hpp>
 
 #include <psio/wit_abi.hpp>
 
@@ -323,43 +324,8 @@ namespace psizam {
                                  static_cast<char*>(_exec_code) + total_code_size);
 #endif
 
-         // Update module function entries
-         bool is_jit = static_cast<pzam_opt_tier>(cs->opt_tier) == pzam_opt_tier::jit1 ||
-                       static_cast<pzam_opt_tier>(cs->opt_tier) == pzam_opt_tier::jit2;
-         if (is_jit) {
-            _mod.allocator._code_base = static_cast<char*>(_exec_code);
-            _mod.allocator._code_size = total_code_size;
-            for (size_t j = 0; j < cs->functions.size(); j++) {
-               _mod.code[j].jit_code_offset = cs->functions[j].code_offset;
-               _mod.code[j].jit_code_size   = cs->functions[j].code_size;
-               _mod.code[j].stack_size       = cs->functions[j].stack_size;
-            }
-         } else {
-            _mod.allocator._exec_code_base = static_cast<char*>(_exec_code);
-            _mod.allocator._exec_code_size = total_code_size;
-            auto code_base_addr = reinterpret_cast<uintptr_t>(_exec_code);
-            for (size_t j = 0; j < cs->functions.size(); j++) {
-               _mod.code[j].jit_code_offset = code_base_addr + cs->functions[j].code_offset;
-               _mod.code[j].jit_code_size   = cs->functions[j].code_size;
-               _mod.code[j].stack_size       = cs->functions[j].stack_size;
-            }
-         }
-         _mod.maximum_stack      = cs->max_stack;
-         _mod.stack_limit_is_bytes = cs->stack_limit_mode != 0;
-
-         // Fix up element segment code_ptr fields for JIT dispatch
-         if (is_jit) {
-            uint32_t num_imports = _mod.get_imported_functions_size();
-            for (auto& elem_seg : _mod.elements) {
-               for (auto& entry : elem_seg.elems) {
-                  if (entry.index >= num_imports &&
-                      entry.index < num_imports + cs->functions.size()) {
-                     uint32_t code_idx = entry.index - num_imports;
-                     entry.code_ptr = _mod.allocator._code_base + cs->functions[code_idx].code_offset;
-                  }
-               }
-            }
-         }
+         // Shared with every other artifact consumer.
+         detail::install_pzam_code(_mod, *cs, _exec_code, total_code_size);
 
          // Initialize execution context (placement-new: jit_execution_context
          // is non-assignable due to std::atomic member)

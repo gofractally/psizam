@@ -12,6 +12,7 @@
 #include <psizam/pzam_cache.hpp>
 #include <psizam/pzam_format.hpp>
 #include <psizam/pzam_metadata.hpp>
+#include <psizam/detail/pzam_loader.hpp>
 #include <psizam/detail/wasi_host.hpp>
 
 #include <fcntl.h>
@@ -458,50 +459,10 @@ int pzam_run_main(int argc, char** argv) {
    profile.mark("__clear_cache (icache flush)");
 #endif
 
-   // Update module function entries based on backend type
-   bool is_jit = static_cast<pzam_opt_tier>(cs->opt_tier) == pzam_opt_tier::jit1 ||
-                 static_cast<pzam_opt_tier>(cs->opt_tier) == pzam_opt_tier::jit2;
-   if (is_jit) {
-      mod.allocator._code_base = static_cast<char*>(exec_code);
-      mod.allocator._code_size = total_code_size;
-      for (size_t j = 0; j < cs->functions.size(); j++) {
-         mod.code[j].jit_code_offset = cs->functions[j].code_offset;
-         mod.code[j].jit_code_size = cs->functions[j].code_size;
-         mod.code[j].stack_size = cs->functions[j].stack_size;
-      }
-   } else {
-      // LLVM tier: _code_base must stay null (it's the LLVM dispatch flag in
-      // execution_context), but the signal handler needs the code range via
-      // get_code_span() to classify faults as WASM traps vs corruption.
-      mod.allocator._exec_code_base = static_cast<char*>(exec_code);
-      mod.allocator._exec_code_size = total_code_size;
-      auto code_base_addr = reinterpret_cast<uintptr_t>(exec_code);
-      for (size_t j = 0; j < cs->functions.size(); j++) {
-         mod.code[j].jit_code_offset = code_base_addr + cs->functions[j].code_offset;
-         mod.code[j].jit_code_size = cs->functions[j].code_size;
-         mod.code[j].stack_size = cs->functions[j].stack_size;
-      }
-   }
-   mod.maximum_stack = cs->max_stack;
-   mod.stack_limit_is_bytes = cs->stack_limit_mode != 0;
+   // Shared with every other artifact consumer.
+   bool is_jit = psizam::detail::install_pzam_code(mod, *cs, exec_code, total_code_size);
 
    profile.mark("populate function entries");
-
-   // Fix up element segment code_ptr fields for JIT dispatch
-   if (is_jit) {
-      uint32_t num_imports = mod.get_imported_functions_size();
-      for (auto& elem_seg : mod.elements) {
-         for (auto& entry : elem_seg.elems) {
-            if (entry.index < num_imports + cs->functions.size()) {
-               uint32_t code_idx = entry.index - num_imports;
-               if (entry.index >= num_imports && code_idx < cs->functions.size()) {
-                  entry.code_ptr = mod.allocator._code_base + cs->functions[code_idx].code_offset;
-               }
-            }
-         }
-      }
-   }
-
    profile.mark("fixup element-segment code_ptr");
 
    // Set up execution context

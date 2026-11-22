@@ -146,6 +146,80 @@ inline bool derive_reverse_host_args(uint8_t opt_tier) noexcept {
 // Run the full loader sequence. Returns a `pzam_load_result` whose
 // `exec_code` the caller takes ownership of (free via
 // `jit_allocator::instance().free(...)`).
+
+// Point a restored module at relocated native code: public entries, private
+// guest targets, element-segment targets and logical byte costs. Shared by
+// every artifact consumer so they cannot drift apart.
+inline bool install_pzam_code(module& mod, const pzam_code_section& cs,
+                              void* exec_code, std::size_t total_code_size) {
+   const bool is_jit = static_cast<pzam_opt_tier>(cs.opt_tier) == pzam_opt_tier::jit1 ||
+                       static_cast<pzam_opt_tier>(cs.opt_tier) == pzam_opt_tier::jit2;
+   PSIZAM_ASSERT(cs.functions.size() == mod.code.size(), wasm_parse_exception,
+                 "pzam: code section does not match the module's functions");
+   if (is_jit) {
+      mod.allocator._code_base = static_cast<char*>(exec_code);
+      mod.allocator._code_size = total_code_size;
+      mod.native_function_ptrs.assign(mod.get_functions_total(), nullptr);
+      for (std::size_t j = 0; j < cs.functions.size(); ++j) {
+         mod.code[j].jit_code_offset = cs.functions[j].code_offset;
+         mod.native_function_ptrs[mod.get_imported_functions_size() + j] =
+             mod.allocator._code_base + cs.functions[j].code_offset;
+         mod.code[j].jit_code_size   = cs.functions[j].code_size;
+         mod.code[j].stack_size      = cs.functions[j].stack_size;
+      }
+      // Element-segment targets for JIT dispatch.
+      const uint32_t num_imports = mod.get_imported_functions_size();
+      for (auto& elem_seg : mod.elements)
+         for (auto& entry : elem_seg.elems)
+            if (entry.index >= num_imports && entry.index - num_imports < cs.functions.size())
+               entry.code_ptr = mod.allocator._code_base +
+                                cs.functions[entry.index - num_imports].code_offset;
+   } else {
+      // LLVM tier — `_code_base` doubles as the LLVM-dispatch flag in
+      // execution_context, so it must stay null. The signal handler still
+      // needs the code range via `_exec_code_base` for fault classification.
+      mod.allocator._exec_code_base = static_cast<char*>(exec_code);
+      mod.allocator._exec_code_size = total_code_size;
+      const auto code_base_addr = reinterpret_cast<uintptr_t>(exec_code);
+      for (std::size_t j = 0; j < cs.functions.size(); ++j) {
+         mod.code[j].jit_code_offset = code_base_addr + cs.functions[j].code_offset;
+         mod.code[j].jit_code_size   = cs.functions[j].code_size;
+         mod.code[j].stack_size      = cs.functions[j].stack_size;
+      }
+      // Typed guest ABI: calls between bodies, indirect calls and import
+      // calls go to private targets. Rebuild them, and the table entries that
+      // name them, exactly as the compiler published them.
+      mod.native_guest_abi = static_cast<native_guest_abi>(cs.guest_abi);
+      if (mod.native_guest_abi == native_guest_abi::llvm_tailcc) {
+         const uint32_t num_imports = mod.get_imported_functions_size();
+         PSIZAM_ASSERT(cs.import_thunks.size() == num_imports, wasm_parse_exception,
+                       "pzam: incomplete typed guest targets");
+         auto target = [&](uint32_t offset, uint32_t size) -> const void* {
+            PSIZAM_ASSERT(size && uint64_t(offset) + size <= total_code_size,
+                          wasm_parse_exception, "pzam: typed guest target outside code");
+            return static_cast<const char*>(exec_code) + offset;
+         };
+         mod.native_function_ptrs.assign(mod.get_functions_total(), nullptr);
+         for (uint32_t i = 0; i < num_imports; ++i)
+            mod.native_function_ptrs[i] =
+               target(cs.import_thunks[i].offset, cs.import_thunks[i].size);
+         for (std::size_t j = 0; j < cs.functions.size(); ++j)
+            mod.native_function_ptrs[num_imports + j] =
+               target(cs.functions[j].body_offset, cs.functions[j].body_size);
+         for (auto& elem_seg : mod.elements)
+            for (auto& entry : elem_seg.elems)
+               if (entry.index < mod.native_function_ptrs.size())
+                  entry.code_ptr = mod.native_function_ptrs[entry.index];
+      }
+   }
+   for (std::size_t j = 0; j < cs.functions.size(); ++j)
+      mod.code[j].byte_stack_usage = cs.functions[j].byte_stack_usage;
+   mod.prepare_native_function_costs();
+   mod.maximum_stack        = cs.max_stack;
+   mod.stack_limit_is_bytes = cs.stack_limit_mode != 0;
+   return is_jit;
+}
+
 inline pzam_load_result load_pzam(const pzam_file& pzam)
 {
    PSIZAM_ASSERT(pzam.magic == PZAM_MAGIC && pzam.format_version == PZAM_VERSION,
@@ -248,80 +322,8 @@ inline pzam_load_result load_pzam(const pzam_file& pzam)
                            static_cast<char*>(exec_code) + total_code_size);
 #endif
 
-   // (6) Populate per-function code metadata.
-   const bool is_jit = static_cast<pzam_opt_tier>(cs.opt_tier) == pzam_opt_tier::jit1 ||
-                       static_cast<pzam_opt_tier>(cs.opt_tier) == pzam_opt_tier::jit2;
-   if (is_jit) {
-      out.mod.allocator._code_base = static_cast<char*>(exec_code);
-      out.mod.allocator._code_size = total_code_size;
-      out.mod.native_function_ptrs.assign(out.mod.get_functions_total(), nullptr);
-      for (std::size_t j = 0; j < cs.functions.size(); ++j) {
-         out.mod.code[j].jit_code_offset = cs.functions[j].code_offset;
-         out.mod.native_function_ptrs[out.mod.get_imported_functions_size() + j] =
-             out.mod.allocator._code_base + cs.functions[j].code_offset;
-         out.mod.code[j].jit_code_size   = cs.functions[j].code_size;
-         out.mod.code[j].stack_size      = cs.functions[j].stack_size;
-      }
-   } else {
-      // LLVM tier — `_code_base` doubles as the LLVM-dispatch flag in
-      // execution_context, so it must stay null. The signal handler still
-      // needs the code range via `_exec_code_base` for fault classification.
-      out.mod.allocator._exec_code_base = static_cast<char*>(exec_code);
-      out.mod.allocator._exec_code_size = total_code_size;
-      const auto code_base_addr = reinterpret_cast<uintptr_t>(exec_code);
-      for (std::size_t j = 0; j < cs.functions.size(); ++j) {
-         out.mod.code[j].jit_code_offset = code_base_addr + cs.functions[j].code_offset;
-         out.mod.code[j].jit_code_size   = cs.functions[j].code_size;
-         out.mod.code[j].stack_size      = cs.functions[j].stack_size;
-      }
-      // Typed guest ABI: calls between bodies, indirect calls and import
-      // calls go to private targets. Rebuild them, and the table entries that
-      // name them, exactly as the compiler published them.
-      out.mod.native_guest_abi = static_cast<native_guest_abi>(cs.guest_abi);
-      if (out.mod.native_guest_abi == native_guest_abi::llvm_tailcc) {
-         const uint32_t num_imports = out.mod.get_imported_functions_size();
-         PSIZAM_ASSERT(cs.import_thunks.size() == num_imports &&
-                          cs.functions.size() == out.mod.code.size(),
-                       wasm_parse_exception, "pzam_loader: incomplete typed guest targets");
-         auto target = [&](uint32_t offset, uint32_t size) -> const void* {
-            PSIZAM_ASSERT(size && uint64_t(offset) + size <= total_code_size,
-                          wasm_parse_exception, "pzam_loader: typed guest target outside code");
-            return static_cast<const char*>(exec_code) + offset;
-         };
-         out.mod.native_function_ptrs.assign(out.mod.get_functions_total(), nullptr);
-         for (uint32_t i = 0; i < num_imports; ++i)
-            out.mod.native_function_ptrs[i] =
-               target(cs.import_thunks[i].offset, cs.import_thunks[i].size);
-         for (std::size_t j = 0; j < cs.functions.size(); ++j)
-            out.mod.native_function_ptrs[num_imports + j] =
-               target(cs.functions[j].body_offset, cs.functions[j].body_size);
-         for (auto& elem_seg : out.mod.elements)
-            for (auto& entry : elem_seg.elems)
-               if (entry.index < out.mod.native_function_ptrs.size())
-                  entry.code_ptr = out.mod.native_function_ptrs[entry.index];
-      }
-   }
-   for (std::size_t j = 0; j < cs.functions.size(); ++j)
-      out.mod.code[j].byte_stack_usage = cs.functions[j].byte_stack_usage;
-   out.mod.prepare_native_function_costs();
-   out.mod.maximum_stack        = cs.max_stack;
-   out.mod.stack_limit_is_bytes = cs.stack_limit_mode != 0;
-
-   // (7) Fix up element-segment code_ptr for JIT dispatch.
-   if (is_jit) {
-      const uint32_t num_imports = out.mod.get_imported_functions_size();
-      for (auto& elem_seg : out.mod.elements) {
-         for (auto& entry : elem_seg.elems) {
-            if (entry.index < num_imports + cs.functions.size()) {
-               const uint32_t code_idx = entry.index - num_imports;
-               if (entry.index >= num_imports && code_idx < cs.functions.size()) {
-                  entry.code_ptr = out.mod.allocator._code_base +
-                                   cs.functions[code_idx].code_offset;
-               }
-            }
-         }
-      }
-   }
+   // (6)+(7) Populate code metadata, guest targets and element targets.
+   const bool is_jit = install_pzam_code(out.mod, cs, exec_code, total_code_size);
 
    // (8) Derive trampoline direction once.
    out.exec_code            = exec_code;
