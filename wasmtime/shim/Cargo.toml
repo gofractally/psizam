@@ -19,6 +19,7 @@ wasmtime = { version = "=51.0.0", default-features = false, features = [
     "std",
     "threads",
     "parallel-compilation",
+    "pooling-allocator",
     "wat",
     # externref values. psizam admits them (a module can only ever hold null
     # ones, since no host function hands any out), so wasmtime must too. The

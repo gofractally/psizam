@@ -227,6 +227,27 @@ pub unsafe extern "C" fn pzwt_engine_new(
         c.max_wasm_stack(config.max_wasm_stack as usize);
     }
 
+    // EXPERIMENT: reuse instance memory from a fixed pool instead of mapping
+    // and unmapping it for every instantiation. Slot count from the
+    // environment; not a finished design (a full pool fails instantiation).
+    if let Some(slots) = std::env::var("PSIZAM_WASMTIME_POOL").ok().and_then(|v| v.parse::<u32>().ok()) {
+        if slots > 0 {
+            let mut pool = wasmtime::PoolingAllocationConfig::new();
+            pool.total_memories(slots);
+            pool.total_core_instances(slots);
+            pool.total_tables(slots);
+            pool.max_memories_per_module(1);
+            pool.max_tables_per_module(1);
+            pool.max_memory_size(1 << 32);
+            pool.table_elements(1 << 20);
+            pool.max_core_instance_size(64 << 20);
+            pool.max_unused_warm_slots(slots);
+            pool.linear_memory_keep_resident(1 << 20);
+            pool.total_gc_heaps(0);
+            c.allocation_strategy(wasmtime::InstanceAllocationStrategy::Pooling(pool));
+        }
+    }
+
     match Engine::new(&c) {
         Ok(engine) => Box::into_raw(Box::new(PzwtEngine {
             engine,
