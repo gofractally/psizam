@@ -85,7 +85,11 @@ namespace abi {
    void        pzwt_string_free(char*);
    PzwtEngine* pzwt_engine_new(const PzwtConfig*, PzwtError*);
    void        pzwt_engine_delete(PzwtEngine*);
+   int32_t     pzwt_wat_to_wasm(const char*, size_t, void (*)(void*, const uint8_t*, size_t), void*,
+                                PzwtError*);
    PzwtModule* pzwt_module_new(const PzwtEngine*, const uint8_t*, size_t, PzwtError*);
+   PzwtModule* pzwt_module_new_metered(const PzwtEngine*, const uint8_t*, size_t, const uint32_t*,
+                                       size_t, PzwtError*);
    int32_t     pzwt_module_serialize(const PzwtModule*, void (*)(void*, const uint8_t*, size_t),
                                      void*, PzwtError*);
    PzwtModule* pzwt_module_deserialize(const PzwtEngine*, const uint8_t*, size_t, PzwtError*);
@@ -97,6 +101,8 @@ namespace abi {
    void             pzwt_interrupter_fire(const PzwtInterrupter*);
    void             pzwt_interrupter_delete(PzwtInterrupter*);
    void        pzwt_context_memory(PzwtContext*, uint8_t** base, size_t* len);
+   void        pzwt_context_set_stack(PzwtContext*, uint32_t bytes);
+   uint32_t    pzwt_context_stack(PzwtContext*);
    PzwtLinker* pzwt_linker_new(const PzwtEngine*, const PzwtImport*, size_t, PzwtError*);
    void        pzwt_linker_delete(PzwtLinker*);
    PzwtInstance* pzwt_instantiate(PzwtContext*, const PzwtLinker*, const PzwtModule*, PzwtError*);
@@ -340,6 +346,19 @@ namespace detail {
    }
 }  // namespace detail
 
+// Assembles WebAssembly text into a binary module.
+inline std::vector<uint8_t> assemble(std::string_view wat)
+{
+   std::vector<uint8_t> out;
+   abi::PzwtError       e{};
+   auto sink = [](void* self, const uint8_t* data, size_t size) {
+      static_cast<std::vector<uint8_t>*>(self)->assign(data, data + size);
+   };
+   if (abi::pzwt_wat_to_wasm(wat.data(), wat.size(), sink, &out, &e))
+      detail::raise(e);
+   return out;
+}
+
 // ── module ──────────────────────────────────────────────────────────────────
 
 class module {
@@ -434,6 +453,21 @@ class runtime {
    module compile(std::string_view wat) const
    {
       return compile(std::span(reinterpret_cast<const uint8_t*>(wat.data()), wat.size()));
+   }
+
+   // Compiles a binary module with deterministic stack accounting. `costs`
+   // holds the byte cost of each defined function, in order, as psizam's
+   // validator computes them (see wasmtime_admission.hpp). Instances of the
+   // result overflow at exactly the point psizam's engines do, whatever the
+   // native frame sizes are; set the budget with instance::set_stack_remaining.
+   module compile_metered(std::span<const uint8_t> wasm, std::span<const uint32_t> costs) const
+   {
+      abi::PzwtError e{};
+      auto* p = abi::pzwt_module_new_metered(engine_.get(), wasm.data(), wasm.size(), costs.data(),
+                                             costs.size(), &e);
+      if (!p)
+         detail::raise(e);
+      return module(p);
    }
 
    // Trusts the bytes: wasmtime does not validate machine code it loads.
@@ -542,6 +576,13 @@ class instance {
       abi::pzwt_context_memory(state_->active, &base, &size);
       return {reinterpret_cast<char*>(base), size};
    }
+
+   // Stack bytes wasm may still use, for a module compiled with
+   // compile_metered. The counter is not reset between calls: set it before
+   // each top-level call. Without stack accounting, set does nothing and
+   // stack_remaining returns UINT32_MAX.
+   void     set_stack_remaining(uint32_t bytes) { abi::pzwt_context_set_stack(state_->active, bytes); }
+   uint32_t stack_remaining() { return abi::pzwt_context_stack(state_->active); }
 
    interrupter make_interrupter() { return interrupter(abi::pzwt_store_interrupter(store_.get())); }
 

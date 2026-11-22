@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <functional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -326,4 +327,208 @@ TEST_CASE("wasmtime: float and SIMD results agree bit for bit with psizam")
    CHECK(checked == std::size(float_parity_ops) - known_differences.size());
    WARN(still_different << " of " << known_differences.size()
                         << " known-different operations still differ from psizam");
+}
+
+// ── deterministic stack accounting ──────────────────────────────────────────
+
+#include <psizam/wasmtime_admission.hpp>
+
+namespace {
+
+struct stack_options : psizam::default_options {
+   static constexpr uint32_t max_func_local_bytes = 128 * 1024 * 1024;
+   static constexpr auto     max_func_local_bytes_flags =
+       psizam::max_func_local_bytes_flags_t::params | psizam::max_func_local_bytes_flags_t::locals |
+       psizam::max_func_local_bytes_flags_t::stack;
+   uint32_t max_stack_bytes = 65536;
+   stack_options()
+   {
+      gas_metering = false;
+      defer_start  = true;
+   }
+};
+
+// Functions of different shapes: parameters, locals of every width, operand
+// stack depth, early return, branches to the function label, indirect calls,
+// and a host call at each level that records the bytes remaining there.
+constexpr std::string_view stack_module = R"((module
+  (import "env" "observe" (func $observe (param i32) (result i32)))
+  (import "env" "reenter" (func $reenter (param i32) (result i32)))
+  (type $one (func (param i32) (result i32)))
+  (table 2 2 funcref)
+  (elem (i32.const 0) $leaf $wide)
+  (func $leaf (export "leaf") (param i32) (result i32) (local i64 i64)
+    (call $observe (i32.const 1)))
+  (func $wide (param i32) (result i32) (local v128 f64 f32 i32)
+    (i64.const 1) (i64.const 2) (i64.const 3) (i64.const 4) drop drop drop drop
+    (call $observe (i32.const 2)))
+  (func (export "outer") (param i32) (result i32) (local $v i32)
+    (drop (call $observe (i32.const 3)))
+    (local.set $v (call $leaf (i32.const 0)))
+    (drop (call $observe (i32.const 4)))
+    (local.get $v))
+  (func (export "indirect") (param i32) (result i32)
+    (call_indirect (type $one) (i32.const 0) (local.get 0)))
+  (func (export "early") (param i32) (result i32)
+    (if (local.get 0) (then (return (call $observe (i32.const 5)))))
+    (block (result i32) (br 1 (call $observe (i32.const 6)))))
+  (func $recursive (export "recursive") (param $n i32) (result i32) (local i64)
+    (if (result i32) (i32.eqz (local.get $n))
+      (then (call $leaf (i32.const 0)))
+      (else (call $recursive (i32.sub (local.get $n) (i32.const 1))))))
+  (func (export "nested") (param i32) (result i32)
+    (drop (call $observe (i32.const 7)))
+    (drop (call $reenter (local.get 0)))
+    (call $observe (i32.const 8)))
+  (func $bare (export "bare") (call $bare))
+  (func (export "trap") (param i32) (result i32) unreachable)
+))";
+
+struct stack_host {
+   std::function<uint32_t()>         remaining;
+   std::function<uint32_t(uint32_t)> nested;
+   std::vector<uint64_t>             seen;
+   uint32_t observe(uint32_t tag)
+   {
+      auto value = remaining();
+      seen.push_back((uint64_t(tag) << 32) | value);
+      return value;
+   }
+   uint32_t reenter(uint32_t n) { return nested(n); }
+};
+
+struct stack_outcome {
+   bool                  ok    = false;
+   uint32_t              value = 0;
+   uint32_t              after = 0;
+   std::vector<uint64_t> seen;
+   bool operator==(const stack_outcome&) const = default;
+};
+
+// One call with a fresh budget; `run` and `remaining` hide the engine.
+stack_outcome run_once(stack_host& h, uint32_t budget, const std::function<void(uint32_t)>& set,
+                       const std::function<uint32_t()>& call)
+{
+   h.seen.clear();
+   set(budget);
+   stack_outcome out;
+   try
+   {
+      out.value = call();
+      out.ok    = true;
+   }
+   catch (const std::exception&)
+   {
+   }
+   // After a completed call every byte has been given back. After a trap the
+   // engines leave different residue, and the embedder resets the budget
+   // before the next call, so only the completed case is compared.
+   out.after = out.ok ? h.remaining() : 0;
+   out.seen  = h.seen;
+   return out;
+}
+
+}  // namespace
+
+TEST_CASE("wasmtime: stack accounting matches psizam's engines byte for byte")
+{
+   // Assemble the text once with wasmtime so both engines get the same binary.
+   wt::engine_options options;
+   options.features |= wt::feature::reference_types;
+   wt::runtime<stack_host> rt(options);
+   rt.add<&stack_host::observe>("env", "observe").add<&stack_host::reenter>("env", "reenter");
+
+   psizam::wasm_code code = wt::assemble(stack_module);
+   stack_options     psizam_options;
+   auto              costs = wt::validate_and_cost(code, psizam_options);
+   REQUIRE(costs.size() == 9);
+   // 16 bytes of frame, plus parameters, locals and the deepest operand stack.
+   for (auto cost : costs)
+      CHECK(cost >= 16);
+
+   // Reference: psizam's JIT with the same options.
+   stack_host                                        ref_host;
+   psizam::wasm_allocator                            wa;
+   psizam::host_function_table                       table;
+   table.add<&stack_host::observe>("env", "observe");
+   table.add<&stack_host::reenter>("env", "reenter");
+   using reference_backend =
+       psizam::backend<psizam::registered_host_functions<stack_host>, psizam::jit, stack_options>;
+   reference_backend reference(code, std::move(table), &ref_host, &wa, psizam_options);
+   ref_host.remaining = [&] { return reference.get_context().get_remaining_call_depth(); };
+   ref_host.nested    = [&](uint32_t n) {
+      return reference.call_with_return(ref_host, "env", "recursive", n)->to_ui32();
+   };
+
+   stack_host               our_host;
+   wt::instance<stack_host> ours(rt, rt.compile_metered(code, costs), our_host);
+   our_host.remaining = [&] { return ours.stack_remaining(); };
+   our_host.nested    = [&](uint32_t n) { return ours.call<uint32_t, uint32_t>("recursive", n); };
+
+   auto both = [&](const char* name, uint32_t arg, uint32_t budget) {
+      auto expected = run_once(
+          ref_host, budget, [&](uint32_t b) { reference.get_context().set_max_call_depth(b); },
+          [&] { return reference.call_with_return(ref_host, "env", name, arg)->to_ui32(); });
+      auto actual = run_once(
+          our_host, budget, [&](uint32_t b) { ours.set_stack_remaining(b); },
+          [&] { return ours.call<uint32_t, uint32_t>(name, arg); });
+      INFO("export " << name << " arg " << arg << " budget " << budget);
+      CHECK(actual.ok == expected.ok);
+      CHECK(actual.value == expected.value);
+      CHECK(actual.after == expected.after);
+      CHECK(actual.seen == expected.seen);
+      return actual.ok;
+   };
+
+   for (uint32_t budget : {65536u, 4096u, 1000u, 200u})
+   {
+      both("leaf", 0, budget);
+      both("outer", 0, budget);
+      both("indirect", 0, budget);
+      both("indirect", 1, budget);
+      both("early", 0, budget);
+      both("early", 1, budget);
+      both("nested", 3, budget);
+      both("trap", 0, budget);
+      for (uint32_t depth : {0u, 1u, 2u, 7u, 50u, 500u, 5000u})
+         both("recursive", depth, budget);
+   }
+
+   // The exact budget at which each shape first fits is the same on both
+   // engines: sweep every byte across the boundary.
+   size_t succeeded = 0, failed = 0;
+   for (uint32_t budget = 0; budget <= 400; ++budget)
+      for (auto [name, arg] : {std::pair{"leaf", 0u}, {"outer", 0u}, {"indirect", 1u},
+                               {"recursive", 3u}, {"nested", 2u}})
+         (both(name, arg, budget) ? succeeded : failed)++;
+   CHECK(succeeded > 0);
+   CHECK(failed > 0);
+}
+
+TEST_CASE("wasmtime: an exhausted stack budget is reported as a stack overflow")
+{
+   wt::engine_options options;
+   options.features |= wt::feature::reference_types;
+   wt::runtime<stack_host> wide(options);
+   wide.add<&stack_host::observe>("env", "observe").add<&stack_host::reenter>("env", "reenter");
+
+   psizam::wasm_code code  = wt::assemble(stack_module);
+   stack_options     psizam_options;
+   auto              costs = wt::validate_and_cost(code, psizam_options);
+   stack_host        h;
+   wt::instance<stack_host> inst(wide, wide.compile_metered(code, costs), h);
+   h.remaining = [&] { return inst.stack_remaining(); };
+   h.nested    = [&](uint32_t) { return 0u; };
+
+   // A function with no locals still costs its 16-byte frame, so unbounded
+   // recursion ends at the budget, long before the native stack does.
+   inst.set_stack_remaining(1 << 20);
+   CHECK(trap_of([&] { inst.call("bare"); }) == wt::trap_kind::stack_overflow);
+   // A real unreachable is still reported as one.
+   inst.set_stack_remaining(1 << 20);
+   CHECK(trap_of([&] { inst.call<uint32_t, uint32_t>("trap", 0); }) == wt::trap_kind::unreachable);
+   // The instance keeps working once the budget is set again.
+   inst.set_stack_remaining(1 << 20);
+   CHECK(inst.call<uint32_t, uint32_t>("leaf", 0) > 0);
+   CHECK(inst.stack_remaining() == 1 << 20);
 }

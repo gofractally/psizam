@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use wasmtime::*;
 
+mod stack_meter;
+
 // ── configuration ───────────────────────────────────────────────────────────
 
 pub const PZWT_FEATURE_SIMD: u32 = 1 << 0;
@@ -218,6 +220,58 @@ pub unsafe extern "C" fn pzwt_engine_delete(engine: *mut PzwtEngine) {
 
 pub struct PzwtModule(Module);
 
+/// Assembles WebAssembly text into a binary module and hands it to `sink`.
+#[no_mangle]
+pub unsafe extern "C" fn pzwt_wat_to_wasm(
+    text: *const u8,
+    len: usize,
+    sink: unsafe extern "C" fn(*mut c_void, *const u8, usize),
+    sink_data: *mut c_void,
+    error: *mut PzwtError,
+) -> i32 {
+    match wat::parse_bytes(std::slice::from_raw_parts(text, len)) {
+        Ok(bytes) => {
+            sink(sink_data, bytes.as_ptr(), bytes.len());
+            PZWT_OK
+        }
+        Err(e) => {
+            set_error(error, PZWT_ERROR, 0, e.to_string());
+            PZWT_ERROR
+        }
+    }
+}
+
+/// Like `pzwt_module_new`, with deterministic stack accounting added first.
+/// `wasm` must be a binary module. `costs` gives the byte cost of each defined
+/// function, in order; the instance then follows the budget set with
+/// `pzwt_context_set_stack`.
+#[no_mangle]
+pub unsafe extern "C" fn pzwt_module_new_metered(
+    engine: *const PzwtEngine,
+    bytes: *const u8,
+    len: usize,
+    costs: *const u32,
+    costs_len: usize,
+    error: *mut PzwtError,
+) -> *mut PzwtModule {
+    let bytes = std::slice::from_raw_parts(bytes, len);
+    let costs = std::slice::from_raw_parts(costs, costs_len);
+    let metered = match stack_meter::add_stack_accounting(bytes, costs) {
+        Ok(m) => m,
+        Err(e) => {
+            set_error(error, PZWT_ERROR, 0, format!("stack accounting: {e}"));
+            return std::ptr::null_mut();
+        }
+    };
+    match Module::new(&(*engine).engine, &metered) {
+        Ok(m) => Box::into_raw(Box::new(PzwtModule(m))),
+        Err(e) => {
+            report(error, &e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pzwt_module_new(
     engine: *const PzwtEngine,
@@ -284,6 +338,8 @@ pub unsafe extern "C" fn pzwt_module_delete(module: *mut PzwtModule) {
 struct Data {
     host: *mut c_void,
     memory: Option<Memory>,
+    /// The stack counter of a module compiled with stack accounting.
+    stack: Option<Global>,
     limits: StoreLimits,
     interrupt: Arc<AtomicBool>,
 }
@@ -318,6 +374,7 @@ pub unsafe extern "C" fn pzwt_store_new(
     let data = Data {
         host,
         memory: None,
+        stack: None,
         limits: StoreLimitsBuilder::new()
             .memory_size(limits.max_memory_bytes as usize)
             .table_elements(limits.max_table_elements as usize)
@@ -417,6 +474,27 @@ pub unsafe extern "C" fn pzwt_context_memory(
             *base = std::ptr::null_mut();
             *len = 0;
         }
+    }
+}
+
+/// Sets the stack bytes available to wasm in this store. Does nothing for a
+/// module compiled without stack accounting.
+#[no_mangle]
+pub unsafe extern "C" fn pzwt_context_set_stack(context: *mut PzwtContext, bytes: u32) {
+    let cx = &mut (*context).0;
+    if let Some(stack) = cx.data().stack {
+        let _ = stack.set(&mut *cx, Val::I32(bytes as i32));
+    }
+}
+
+/// Stack bytes still available. Returns `u32::MAX` for a module compiled
+/// without stack accounting.
+#[no_mangle]
+pub unsafe extern "C" fn pzwt_context_stack(context: *mut PzwtContext) -> u32 {
+    let cx = &mut (*context).0;
+    match cx.data().stack {
+        Some(stack) => stack.get(&mut *cx).i32().unwrap_or(0) as u32,
+        None => u32::MAX,
     }
 }
 
@@ -581,6 +659,8 @@ pub unsafe extern "C" fn pzwt_instantiate(
         Ok(instance) => {
             let memory = instance.get_memory(&mut *cx, "memory");
             cx.data_mut().memory = memory;
+            let stack = instance.get_global(&mut *cx, stack_meter::STACK_EXPORT);
+            cx.data_mut().stack = stack;
             Box::into_raw(Box::new(PzwtInstance(instance)))
         }
         Err(e) => {
@@ -665,6 +745,18 @@ pub unsafe extern "C" fn pzwt_call(
     let values = std::ptr::slice_from_raw_parts_mut(values, count);
     match (*func).0.call_unchecked(&mut *cx, values) {
         Ok(()) => PZWT_OK,
-        Err(e) => report(error, &e),
+        Err(e) => {
+            // The injected overflow check marks the counter, then traps.
+            let overflowed = matches!(e.downcast_ref::<Trap>(), Some(Trap::UnreachableCodeReached))
+                && cx.data().stack.is_some_and(|stack| {
+                    stack.get(&mut *cx).i32() == Some(stack_meter::OVERFLOW_SENTINEL as i32)
+                });
+            if overflowed {
+                set_error(error, PZWT_TRAP, PZWT_TRAP_STACK_OVERFLOW, "stack overflow".into());
+                PZWT_TRAP
+            } else {
+                report(error, &e)
+            }
+        }
     }
 }

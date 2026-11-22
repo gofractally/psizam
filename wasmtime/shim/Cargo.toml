@@ -22,6 +22,12 @@ wasmtime = { version = "=51.0.0", default-features = false, features = [
     "wat",
 ] }
 
+# Used to rewrite modules for deterministic stack accounting. Must match the
+# versions wasmtime itself resolves to.
+wasmparser = "=0.263.0"
+wat = "=1.263.0"
+wasm-encoder = { version = "=0.263.0", features = ["wasmparser"] }
+
 [profile.release]
 opt-level = 3
 debug = 1

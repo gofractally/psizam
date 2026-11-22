@@ -590,7 +590,10 @@ dependencies = [
 name = "psizam-wasmtime-shim"
 version = "0.1.0"
 dependencies = [
+ "wasm-encoder",
+ "wasmparser",
  "wasmtime",
+ "wat",
 ]
 
 [[package]]
