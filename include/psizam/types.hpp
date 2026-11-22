@@ -304,6 +304,9 @@ namespace psizam {
       std::size_t                 jit_code_offset;
       std::uint32_t               jit_code_size = 0;
       std::uint32_t               stack_size = 0;
+      // Parser-defined logical byte charge, including the fixed 16-byte frame.
+      // Zero outside byte-limit mode. Unlike stack_size, no writer repurposes it.
+      std::uint32_t               byte_stack_usage = 0;
       const uint8_t*              body_start = nullptr;  // pointer to local_count byte in WASM binary
       std::vector<branch_hint>    branch_hints;          // sorted by offset
 

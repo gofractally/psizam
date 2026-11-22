@@ -1229,9 +1229,10 @@ namespace psizam::detail {
       };
 
       void parse_function_body_code(wasm_code_ptr& code, size_t bounds, const max_func_local_bytes_stack_checker<Options>& local_bytes_checker,
-                                    Writer& code_writer, const func_type& ft, const local_types_t& local_types) {
+                                    Writer& code_writer, const func_type& ft, const local_types_t& local_types,
+                                    uint32_t* byte_stack_usage_out = nullptr) {
          parse_function_body_code_impl(code, bounds, local_bytes_checker, code_writer, ft, local_types,
-                                       _nested_checker, imap, _mod->maximum_stack);
+                                       _nested_checker, imap, _mod->maximum_stack, byte_stack_usage_out);
       }
 
       // Thread-safe version: takes mutable state as parameters so each worker thread
@@ -1240,7 +1241,8 @@ namespace psizam::detail {
       void parse_function_body_code_impl(wasm_code_ptr& code, size_t bounds,
                                     const max_func_local_bytes_stack_checker<Options>& local_bytes_checker,
                                     WriterT& code_writer, const func_type& ft, const local_types_t& local_types,
-                                    Checker& nested_checker, DebugInfoBuilder& imap_ref, uint64_t& max_stack_out) {
+                                    Checker& nested_checker, DebugInfoBuilder& imap_ref, uint64_t& max_stack_out,
+                                    uint32_t* byte_stack_usage_out = nullptr) {
 
          // Initialize the control stack with the current function as the sole element
          operand_stack_type_tracker op_stack{local_bytes_checker, _options};
@@ -3167,7 +3169,14 @@ namespace psizam::detail {
          }
          if constexpr (has_max_stack_bytes<Options>)
          {
-            code_writer.set_stack_usage(op_stack.stack_usage._max);
+            const uint64_t usage = op_stack.stack_usage._max;
+            PSIZAM_ASSERT(usage <= UINT32_MAX - uint64_t{16}, wasm_parse_exception,
+                          "function stack usage exceeds byte metadata limit");
+            if (byte_stack_usage_out)
+               *byte_stack_usage_out = static_cast<uint32_t>(usage + 16);
+            code_writer.set_stack_usage(usage);
+         } else if (byte_stack_usage_out) {
+            *byte_stack_usage_out = 0;
          }
          PSIZAM_ASSERT( pc_stack.empty(), wasm_parse_exception, "function body too long" );
          max_stack_out = std::max(max_stack_out, static_cast<uint64_t>(op_stack.maximum_operand_depth) + local_types.locals_count());
@@ -3374,7 +3383,7 @@ namespace psizam::detail {
                      parse_function_body_code_impl(
                         _function_bodies[func_idx].first, fb.size,
                         _function_bodies[func_idx].second, w, ft, local_types,
-                        checker, dummy_imap, max_stack);
+                        checker, dummy_imap, max_stack, &fb.byte_stack_usage);
                      w.emit_epilogue(ft, fb.locals, func_idx);
                   });
                // Writer destructor triggers parallel compilation
@@ -3389,7 +3398,8 @@ namespace psizam::detail {
             local_types_t local_types(ft, fb.locals);
             imap.on_function_start(code_writer.get_addr(), _function_bodies[i].first.raw());
             code_writer.emit_prologue(ft, fb.locals, i);
-            parse_function_body_code(_function_bodies[i].first, fb.size, _function_bodies[i].second, code_writer, ft, local_types);
+            parse_function_body_code(_function_bodies[i].first, fb.size, _function_bodies[i].second, code_writer, ft, local_types,
+                                     &fb.byte_stack_usage);
             code_writer.emit_epilogue(ft, fb.locals, i);
             imap.on_function_end(code_writer.get_addr(), _function_bodies[i].first.bnds);
             code_writer.finalize(fb);

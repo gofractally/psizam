@@ -11,6 +11,9 @@ enable_testing()
 
 add_executable(psizam_proper_tail_tests proper_tail_tests.cpp)
 target_link_libraries(psizam_proper_tail_tests PRIVATE psizam psizam-exec Catch2::Catch2)
+if(PSIZAM_ENABLE_LLVM)
+   target_link_libraries(psizam_proper_tail_tests PRIVATE psizam-llvm)
+endif()
 target_compile_definitions(psizam_proper_tail_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
    PROPER_TAIL_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail.wasm"
    PROPER_TAIL_LARGE_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wasm")

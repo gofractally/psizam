@@ -40,6 +40,7 @@ struct tail_count_options : psizam::default_options {
 };
 struct tail_byte_options : psizam::default_options {
    uint32_t max_stack_bytes = 65536;
+   uint32_t compile_threads = 0;
    static constexpr uint32_t max_func_local_bytes = 1024 * 1024;
    static constexpr uint32_t stack_usage_for_call = 4096;
    static constexpr auto max_func_local_bytes_flags =
@@ -54,6 +55,17 @@ std::vector<uint8_t> fixture(const char* path = PROPER_TAIL_WASM) {
    std::ifstream in(path, std::ios::binary);
    REQUIRE(in.good());
    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+template<class Impl>
+std::vector<uint32_t> logical_costs(uint32_t threads) {
+   tail_byte_options options;
+   options.compile_threads = threads;
+   psizam::wasm_allocator allocator;
+   psizam::backend<functions, Impl, tail_byte_options> vm(fixture(), &allocator, options);
+   std::vector<uint32_t> result;
+   for (const auto& body : vm.get_module().code) result.push_back(body.byte_stack_usage);
+   return result;
 }
 
 TEMPLATE_TEST_CASE("AArch64 JIT1 proper tails replace signatures without native or logical growth",
@@ -99,6 +111,21 @@ TEMPLATE_TEST_CASE("AArch64 JIT1 proper tails replace signatures without native 
    vm.call("env", "set_fail", 0u);
    CHECK(vm.call_with_return("env", "cycle", 0u)->to_ui64() == UINT64_C(0x123456789abce54));
 }
+}
+
+TEST_CASE("Parser publishes identical logical byte costs for native admission", "[proper-tail][byte-metadata]") {
+   functions::add<&host>("env", "host");
+   functions::add<&sample>("env", "sample");
+   const auto reference = logical_costs<psizam::interpreter>(0);
+   REQUIRE(!reference.empty());
+   for (uint32_t cost : reference) CHECK(cost >= 16);
+   CHECK(logical_costs<psizam::jit>(0) == reference);
+   CHECK(logical_costs<psizam::jit2>(0) == reference);
+   CHECK(logical_costs<psizam::jit2>(2) == reference);
+#ifdef PSIZAM_ENABLE_LLVM_BACKEND
+   CHECK(logical_costs<psizam::jit_llvm>(0) == reference);
+   CHECK(logical_costs<psizam::jit_llvm>(2) == reference);
+#endif
 }
 
 TEST_CASE("AArch64 JIT1 tail and ordinary cleanup handle large argument areas", "[proper-tail][large-args]") {
