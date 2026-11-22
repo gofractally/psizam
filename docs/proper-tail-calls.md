@@ -35,8 +35,8 @@ The following metadata checkpoint consumes the reviewed shared table resolver
 and publishes private import code ranges plus proven native prologue allocation
 upper bounds. Serial and merged JIT2 publication runs on the owning thread after
 workers join. Result arrays are prepared before finalization. AArch64 import
-packing uses full-size SP adjustments and sufficient code capacity for large
-offset instructions. An additional correctness fixture verifies every one of
+packing uses full-size SP adjustments and the maintained contiguous code-buffer
+growth mechanism for large offset instructions. An additional correctness fixture verifies every one of
 2000 scalar imported arguments across ordinary and tail calls. These prologue
 bounds exclude incoming arguments, host C++ fallback arrays and nested native
 host continuations; the integrating physical policy must cover those separately.

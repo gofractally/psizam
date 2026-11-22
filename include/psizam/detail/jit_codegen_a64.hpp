@@ -133,14 +133,13 @@ namespace psizam::detail {
          _import_thunk_offsets.resize(num_imported);
          _import_thunk_stack_sizes.resize(num_imported);
          if (num_imported > 0) {
-            std::size_t host_functions_size = 0;
+            const uint64_t budget = uint64_t{384} * num_imported;
+            PSIZAM_ASSERT(budget <= std::numeric_limits<std::size_t>::max(),
+                          wasm_parse_exception, "native import code allocation overflow");
+            const auto host_functions_size = static_cast<std::size_t>(budget);
             for (uint32_t i = 0; i < num_imported; ++i) {
                const auto& ft = _mod.get_function_type(i);
                native_param_bytes(ft);
-               const uint64_t budget = 384 + uint64_t(ft.param_types.size()) * 48;
-               PSIZAM_ASSERT(budget <= std::numeric_limits<std::size_t>::max() - host_functions_size,
-                             wasm_parse_exception, "native import code allocation overflow");
-               host_functions_size += static_cast<std::size_t>(budget);
             }
             buf = _allocator.alloc<unsigned char>(host_functions_size);
             code = buf;

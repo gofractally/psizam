@@ -155,13 +155,13 @@ namespace psizam::detail {
 
          // Emit host function stubs
          const uint32_t num_imported = mod.get_imported_functions_size();
-         // Conservative code capacity, including large-offset load/store
-         // expansions. This is distinct from the native stack bound below.
+         // Initial estimate; emit32 uses maintained contiguous buffer growth
+         // before each write if the emitted import body needs more space.
          std::size_t host_functions_size = 0;
          for(uint32_t i = 0; i < num_imported; ++i) {
             const auto& ft = mod.get_function_type(i);
             native_param_bytes(ft); // reject unrepresentable native argument areas
-            const uint64_t budget = 384 + uint64_t(ft.param_types.size()) * 48;
+            const uint64_t budget = 200 + uint64_t(ft.param_types.size()) * 16 + 8 * _enable_backtrace;
             PSIZAM_ASSERT(budget <= std::numeric_limits<std::size_t>::max() - host_functions_size,
                           wasm_parse_exception, "native import code allocation overflow");
             host_functions_size += static_cast<std::size_t>(budget);
