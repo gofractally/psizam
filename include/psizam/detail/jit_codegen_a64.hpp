@@ -207,6 +207,31 @@ namespace psizam::detail {
             }
             _num_spill_slots = func.num_spill_slots;
             _use_regalloc = true;
+            // Checked mode keeps the read watermark in X26 and computes its
+            // bounds in X8. The allocator does not know the memory mode, so
+            // a value it placed in either would be overwritten by a bounds
+            // check or zeroed when the watermark is validated at a call.
+            // Move such values to spill slots, as x86-64 does for R15.
+            if (is_checked()) {
+               auto evict = [&](int8_t reg) {
+                  for (uint32_t v = 0; v < _num_vregs; ++v) {
+                     if (_vreg_map[v] != reg) continue;
+                     _vreg_map[v] = -1;
+                     if (_spill_map[v] < 0)
+                        _spill_map[v] = static_cast<int16_t>(_num_spill_slots++);
+                  }
+                  for (uint32_t iv = 0; iv < func.interval_count; ++iv) {
+                     auto& interval = func.intervals[iv];
+                     if (interval.phys_reg != reg) continue;
+                     interval.phys_reg = -1;
+                     if (interval.vreg < _num_vregs)
+                        interval.spill_slot = _spill_map[interval.vreg];
+                  }
+               };
+               evict(static_cast<int8_t>(phys_reg::x26));
+               evict(static_cast<int8_t>(phys_reg::x8));
+               func.num_spill_slots = _num_spill_slots;
+            }
          } else {
             _use_regalloc = false;
          }

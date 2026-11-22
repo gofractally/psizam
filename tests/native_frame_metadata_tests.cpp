@@ -57,7 +57,10 @@ TEMPLATE_TEST_CASE("Native fixed frames exclude incoming and dynamic operands", 
          };
          const auto bare = frame("bare");
          CHECK(bare >= fixed_linkage);
-         CHECK(frame("scalar") == bare + 4*native_slot);
+         // JIT1 keeps a local in a full native stack slot. JIT2 packs locals
+         // into 8-byte slots on both architectures.
+         const bool packed = std::is_same_v<TestType,psizam::jit2> || std::is_same_v<TestType,traced_jit2>;
+         CHECK(frame("scalar") == bare + 4*(packed ? uint64_t{8} : native_slot));
          CHECK(frame("vector") == frame("scalar"));
          CHECK(frame("params") == bare); // incoming argument storage is separate
          if constexpr (std::is_same_v<TestType,psizam::jit> || std::is_same_v<TestType,psizam::jit_profile>) {
