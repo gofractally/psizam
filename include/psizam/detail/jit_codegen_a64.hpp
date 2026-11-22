@@ -228,8 +228,17 @@ namespace psizam::detail {
                         interval.spill_slot = _spill_map[interval.vreg];
                   }
                };
-               evict(static_cast<int8_t>(phys_reg::x26));
-               evict(static_cast<int8_t>(phys_reg::x8));
+               // Allocator indices of X26 and X8 in the aarch64 register
+               // plan (jit_regalloc.hpp). Spelled as numbers because this
+               // generator is also compiled on x86-64, for cross compiling,
+               // where phys_reg names x86 registers.
+               constexpr int8_t x26_index = 18, x8_index = 6;
+#ifdef __aarch64__
+               static_assert(static_cast<int8_t>(phys_reg::x26) == x26_index);
+               static_assert(static_cast<int8_t>(phys_reg::x8) == x8_index);
+#endif
+               evict(x26_index);
+               evict(x8_index);
                func.num_spill_slots = _num_spill_slots;
             }
          } else {
