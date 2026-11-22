@@ -140,6 +140,15 @@ namespace psizam::detail {
       using typename base::imm32;
 
     public:
+      static constexpr psizam::native_guest_abi guest_call_abi =
+         psizam::native_guest_abi::jit_callee_cleanup;
+      const std::vector<std::pair<uint32_t, uint32_t>>& get_import_thunk_offsets() const {
+         return _import_thunk_offsets;
+      }
+      const std::vector<uint64_t>& get_import_thunk_stack_sizes() const {
+         return _import_thunk_stack_sizes;
+      }
+
       jit_codegen(growable_allocator& alloc, module& mod, growable_allocator& scratch_alloc,
                   bool enable_backtrace = false, bool stack_limit_is_bytes = false,
                   void* code_segment_base = nullptr)
@@ -285,9 +294,17 @@ namespace psizam::detail {
             buf = _allocator.alloc<unsigned char>(host_functions_size);
             code = buf;
             _code_end = buf + host_functions_size;
+            _import_thunk_offsets.resize(num_imported);
+            _import_thunk_stack_sizes.assign(num_imported, _enable_backtrace ? 48u : 40u);
             for (uint32_t i = 0; i < num_imported; ++i) {
+               auto* begin = code;
                start_function(code, i);
                emit_host_call(i);
+               _import_thunk_offsets[i] = {
+                  static_cast<uint32_t>(reinterpret_cast<const char*>(begin) -
+                                        reinterpret_cast<const char*>(_code_segment_base)),
+                  static_cast<uint32_t>(reinterpret_cast<const char*>(code) -
+                                        reinterpret_cast<const char*>(begin))};
             }
          }
       }
@@ -405,6 +422,8 @@ namespace psizam::detail {
 
          body.jit_code_offset = code_start - static_cast<unsigned char*>(_code_segment_base);
          body.jit_code_size = static_cast<uint32_t>(code - code_start);
+         body.native_stack_frame_bytes = _native_fixed_frame_bytes;
+         body.native_stack_frame_complete = true;
 
          // Reclaim unused code buffer tail to keep code compact.
          if (code < _code_end) {
@@ -610,7 +629,7 @@ namespace psizam::detail {
             this->emit_bytes(0x48, 0x89, 0x0f);
             this->emit_bytes(0x5d);
          }
-         this->emit_bytes(0xc3);
+         emit_guest_return(param_area_bytes(_mod.get_function_type(funcnum)), false);
       }
 
       // ──────── Function prologue/epilogue ────────
@@ -694,16 +713,17 @@ namespace psizam::detail {
          emit_gas_charge(static_cast<int64_t>(_mod.code[func.func_index].wasm_body_bytes)
                          + func.prologue_gas_extra);
 
-         // Count body local slots, accounting for v128 locals using 2 slots (16 bytes)
-         uint32_t body_local_slots = 0;
-         {
-            uint32_t param_count = func.type->param_types.size();
-            const auto& locals = _mod.code[func.func_index].locals;
-            for (uint32_t g = 0; g < locals.size(); ++g) {
-               uint32_t slots_per = (locals[g].type == types::v128) ? 2 : 1;
-               body_local_slots += locals[g].count * slots_per;
-            }
+         // Count in 64 bits before narrowing to the emitter's slot indices.
+         uint64_t body_local_slots64 = 0;
+         for (const auto& local : _mod.code[func.func_index].locals) {
+            const uint64_t slots = uint64_t(local.count) * (local.type == types::v128 ? 2u : 1u);
+            PSIZAM_ASSERT(body_local_slots64 <= UINT64_MAX - slots, wasm_parse_exception,
+                          "native local slot count overflow");
+            body_local_slots64 += slots;
          }
+         PSIZAM_ASSERT(body_local_slots64 <= UINT32_MAX, wasm_parse_exception,
+                       "native local slot count exceeds index range");
+         const uint32_t body_local_slots = static_cast<uint32_t>(body_local_slots64);
          _body_locals = body_local_slots;
 
          // Callee-saved register usage was computed during regalloc
@@ -723,8 +743,13 @@ namespace psizam::detail {
          _checked_r15_save = is_checked() ? 1u : 0u;
 
          // Allocate and zero-initialize: body locals + spill slots + callee-saved + EH saves + checked R15
-         uint32_t total_slots = body_local_slots + _num_spill_slots + _callee_saved_count
-                              + _eh_save_slots + _checked_r15_save;
+         const uint64_t total_slots64 = body_local_slots64 + uint64_t(_num_spill_slots) +
+                                       _callee_saved_count + _eh_save_slots + _checked_r15_save;
+         // Frame-relative loads/stores use signed 32-bit displacements.
+         PSIZAM_ASSERT(total_slots64 <= (uint64_t(INT32_MAX) - 8) / 8, wasm_parse_exception,
+                       "native fixed frame exceeds displacement range");
+         const uint32_t total_slots = static_cast<uint32_t>(total_slots64);
+         _native_fixed_frame_bytes = 8 + total_slots64 * 8;
          if (total_slots > 0) {
             this->emit_xor(eax, eax);
             for (uint32_t i = 0; i < total_slots; ++i) {
@@ -890,8 +915,6 @@ namespace psizam::detail {
 
          // ── Return ──
          case ir_op::return_:
-            // Checked mode: validate watermark before early return
-            emit_validate_watermark();
             if (inst.rr.src1 != ir_vreg_none) {
                if (inst.value_type() == types::v128) {
                   // v128 return: load into xmm0 for caller
@@ -900,9 +923,7 @@ namespace psizam::detail {
                   this->emit_pop_raw(rax);
                }
             }
-            this->emit_mov(rbp, rsp);
-            this->emit_pop_raw(rbp);
-            this->emit(base::RET);
+            emit_function_return(func);
             break;
 
          // ── Unreachable ──
@@ -2122,11 +2143,6 @@ namespace psizam::detail {
       }
 
       void emit_function_epilogue(ir_function& func) {
-         emit_byte_stack_leave(func);
-         // Checked mode: validate watermark before return, catching any
-         // deferred reads since the last gas charge point.
-         emit_validate_watermark();
-
          if (func.type->return_count > 1) {
             // Multi-value return: values already stored to _multi_return by
             // multi_return_store IR ops (emitted in emit_end/emit_return).
@@ -2151,22 +2167,28 @@ namespace psizam::detail {
                }
             }
          }
-         // Restore callee-saved registers from frame
-         if (_use_regalloc && _callee_saved_used) {
-            int32_t save_offset = -static_cast<int32_t>((_body_locals + _num_spill_slots + 1) * 8);
-            if (_callee_saved_used & 1)  { this->emit_mov(*(rbp + save_offset), rbx); save_offset -= 8; }
-            if (_callee_saved_used & 2)  { this->emit_mov(*(rbp + save_offset), r12); save_offset -= 8; }
-            if (_callee_saved_used & 4)  { this->emit_mov(*(rbp + save_offset), r13); save_offset -= 8; }
-            if (_callee_saved_used & 8)  { this->emit_mov(*(rbp + save_offset), r14); save_offset -= 8; }
-            if (_callee_saved_used & 16) { this->emit_mov(*(rbp + save_offset), r15); save_offset -= 8; }
+         emit_function_return(func);
+      }
+
+      // Every return channel is populated before the common activation release.
+      void emit_function_return(ir_function& func) {
+         emit_byte_stack_leave(func);
+         emit_validate_watermark();
+         emit_restore_callee_saved();
+         emit_guest_return(param_area_bytes(*func.type), true);
+      }
+
+      void emit_guest_return(uint32_t params, bool frame) {
+         if (frame) {
+            this->emit_mov(*(rbp + 8), rcx);
+            this->emit_mov(*rbp, r10);
+            this->emit(base::LEA, *(rbp + static_cast<int32_t>(params + 8)), rsp);
+            this->emit_mov(r10, rbp);
+         } else if (params) {
+            this->emit_mov(*rsp, rcx);
+            this->emit(base::LEA, *(rsp + static_cast<int32_t>(params)), rsp);
          }
-         // Phase 3 checked mode: restore R15 from dedicated frame slot
-         if (is_checked() && !_use_regalloc) {
-            this->emit_mov(*(rbp + checked_r15_save_offset()), r15);
-         }
-         // Restore frame
-         this->emit_mov(rbp, rsp);
-         this->emit_pop_raw(rbp);
+         if (frame || params) this->emit_mov(rcx, *rsp);
          this->emit(base::RET);
       }
 
@@ -2602,12 +2624,6 @@ namespace psizam::detail {
             emit_call_depth_dec();
             void* branch = emit_call32();
             register_call(branch, funcnum);
-            // Args were pushed by arg instructions — pop them
-            uint32_t arg_bytes = 0;
-            for (uint32_t p = 0; p < ft.param_types.size(); ++p)
-               arg_bytes += (ft.param_types[p] == types::v128) ? 16 : 8;
-            if (arg_bytes > 0)
-               this->emit_add(arg_bytes, rsp);
             emit_call_depth_inc();
             // Store result. For multi-value returns, the callee writes results
             // to ctx->_multi_return[] and separate ir_op::multi_return_load
@@ -2676,11 +2692,6 @@ namespace psizam::detail {
                emit_call_depth_dec();
                this->emit_bytes(0xff, 0x50, 0x08); // call *8(%rax)
             }
-            // Remove args, store result
-            uint32_t arg_bytes = 0;
-            for (uint32_t p = 0; p < ft.param_types.size(); ++p)
-               arg_bytes += (ft.param_types[p] == types::v128) ? 16 : 8;
-            if (arg_bytes > 0) this->emit_add(arg_bytes, rsp);
             emit_call_depth_inc();
             // For multi-value returns, the callee writes all return values to
             // ctx->_multi_return[] and the IR writer emits separate
@@ -2690,8 +2701,7 @@ namespace psizam::detail {
             // whichever register regalloc reused for it.
             if (ft.return_count == 1 && inst.dest != ir_vreg_none) {
                if (ft.return_type == types::v128) {
-                  this->emit_sub(16, rsp);
-                  this->emit_vmovdqu(xmm0, *rsp);
+                  store_xmm_to_v128(xmm0, inst.dest);
                } else {
                   store_rax_vreg(inst.dest);
                }
@@ -2977,8 +2987,6 @@ namespace psizam::detail {
 
          // Return
          case ir_op::return_: {
-            // Checked mode: validate watermark before early return
-            emit_validate_watermark();
             if (inst.rr.src1 != ir_vreg_none) {
                if (inst.value_type() == types::v128) {
                   load_v128_to_xmm(inst.rr.src1, xmm0);
@@ -2986,18 +2994,7 @@ namespace psizam::detail {
                   load_vreg_rax(inst.rr.src1);
                }
             }
-            // Restore callee-saved registers before returning
-            if (_callee_saved_used) {
-               int32_t save_offset = -static_cast<int32_t>((_body_locals + _num_spill_slots + 1) * 8);
-               if (_callee_saved_used & 1)  { this->emit_mov(*(rbp + save_offset), rbx); save_offset -= 8; }
-               if (_callee_saved_used & 2)  { this->emit_mov(*(rbp + save_offset), r12); save_offset -= 8; }
-               if (_callee_saved_used & 4)  { this->emit_mov(*(rbp + save_offset), r13); save_offset -= 8; }
-               if (_callee_saved_used & 8)  { this->emit_mov(*(rbp + save_offset), r14); save_offset -= 8; }
-               if (_callee_saved_used & 16) { this->emit_mov(*(rbp + save_offset), r15); save_offset -= 8; }
-            }
-            this->emit_mov(rbp, rsp);
-            this->emit_pop_raw(rbp);
-            this->emit(base::RET);
+            emit_function_return(func);
             return true;
          }
 
@@ -6936,19 +6933,9 @@ namespace psizam::detail {
          return result;
       }
 
-      // Pop params and push result after a call
+      // The callee removed parameters; only return values are marshalled.
       void emit_call_multipop(const func_type& ft) {
-         uint32_t total_size = 0;
-         for (uint32_t i = 0; i < ft.param_types.size(); ++i) {
-            total_size += (ft.param_types[i] == types::v128) ? 16 : 8;
-         }
-         if (total_size != 0) {
-            this->emit_add(total_size, rsp);
-         }
-         if (ft.return_count > 1) {
-            // Multi-value: separate multi_return_load instructions handle the loads
-            // Don't push anything here — avoid double-push
-         } else if (ft.return_count != 0) {
+         if (ft.return_count == 1) {
             if (ft.return_type == types::v128) {
                this->emit_sub(16, rsp);
                this->emit_vmovdqu(xmm0, *rsp);
@@ -6958,40 +6945,12 @@ namespace psizam::detail {
          }
       }
 
-      // ──────── Tail call helpers ────────
-
-      // Compute total byte size of param area for a function type
-      uint32_t param_area_bytes(const func_type& ft) {
-         uint32_t bytes = 0;
-         for (uint32_t i = 0; i < ft.param_types.size(); ++i)
-            bytes += (ft.param_types[i] == types::v128) ? 16 : 8;
-         return bytes;
-      }
-
-      // Copy K arguments from RSP (pushed by arg instructions) to param slots at [rbp+16].
-      // After calling this, the K args remain on the x86 stack (caller cleans up).
-      void emit_copy_args_to_params(const func_type& callee_ft) {
-         uint32_t K = callee_ft.param_types.size();
-         // Args on x86 stack: arg[0] at RSP+(K-1)*8, arg[1] at RSP+(K-2)*8, ..., arg[K-1] at RSP
-         // (assuming non-v128; for v128: *16 bytes)
-         // Param slots: param[K-1] at rbp+16, param[K-2] at rbp+16+slot_size(K-1), ...
-         int32_t src_offset = 0; // from RSP, bottom of pushed args (arg[K-1] first)
-         int32_t dst_offset = 16; // from RBP, param[K-1] first
-         for (uint32_t i = K; i > 0; --i) {
-            uint32_t pi = i - 1; // param index: K-1, K-2, ..., 0
-            if (callee_ft.param_types[pi] == types::v128) {
-               // 16-byte v128: use xmm temp
-               this->emit_vmovdqu(*(rsp + src_offset), xmm0);
-               this->emit_vmovdqu(xmm0, *(rbp + dst_offset));
-               src_offset += 16;
-               dst_offset += 16;
-            } else {
-               this->emit_mov(*(rsp + src_offset), rax);
-               this->emit_mov(rax, *(rbp + dst_offset));
-               src_offset += 8;
-               dst_offset += 8;
-            }
-         }
+      static uint32_t param_area_bytes(const func_type& ft) {
+         uint64_t bytes = 0;
+         for (auto type : ft.param_types) bytes += type == types::v128 ? 16u : 8u;
+         PSIZAM_ASSERT(bytes <= INT32_MAX - 16u, wasm_parse_exception,
+                       "native parameter area too large");
+         return static_cast<uint32_t>(bytes);
       }
 
       void emit_restore_callee_saved() {
@@ -7009,151 +6968,87 @@ namespace psizam::detail {
          }
       }
 
-      void emit_tail_call(ir_function& func, const ir_inst& inst) {
-         uint32_t funcnum = inst.call.index;
-         uint32_t cur_funcnum = func.func_index + _mod.get_imported_functions_size();
-         const func_type& callee_ft = _mod.get_function_type(funcnum);
-         const func_type* cur_ft = func.type;
-         uint32_t K = callee_ft.param_types.size();
-         uint32_t M = cur_ft->param_types.size();
-         uint32_t callee_arg_bytes = param_area_bytes(callee_ft);
-         uint32_t cur_param_bytes = param_area_bytes(*cur_ft);
-
-         if (funcnum == cur_funcnum) {
-            // ── Self-recursive tail call ──
-            // Copy new args from x86 stack to param slots
-            emit_copy_args_to_params(callee_ft);
-            // Pop the args from x86 stack
-            if (callee_arg_bytes > 0)
-               this->emit_add(callee_arg_bytes, rsp);
-            // Re-zero body locals (spills and callee-saved saves stay)
-            if (_body_locals > 0) {
-               this->emit_xor(eax, eax);
-               for (uint32_t i = 0; i < _body_locals; ++i)
-                  this->emit_mov(rax, *(rbp - static_cast<int32_t>((i + 1) * 8)));
-            }
-            emit_ref_local_init(func);
-            // Reset RSP to frame bottom (rbp - total_slots*8)
-            uint32_t total_slots = _body_locals + _num_spill_slots + _callee_saved_count
-                                 + _checked_r15_save;
-            this->emit_mov(rbp, rsp);
-            if (total_slots > 0)
-               this->emit_sub(static_cast<uint32_t>(total_slots * 8), rsp);
-            // Checked mode: re-zero R15 watermark for the next iteration
-            if (is_checked())
-               this->emit_xor(general_register32(15), general_register32(15));
-            // Re-charge the callee's prologue gas explicitly — the jmp
-            // target (_body_start) is past emit_function_prologue's
-            // emit_gas_charge, so without this every self-recursive
-            // return_call iteration skipped its body_bytes+extra cost.
-            // Jit1, interp, and jit_llvm all re-run the prologue via
-            // register_call/call-site semantics, so they didn't miss it
-            // (surfaced by fuzz gas oracle GAS DELTA on regressions
-            // 1823 and 4772: jit2 535 vs others 12035, 2328 vs 235128).
-            emit_gas_charge(static_cast<int64_t>(_mod.code[func.func_index].wasm_body_bytes)
-                            + func.prologue_gas_extra);
-            // JMP to body_start (after prologue)
-            this->emit_bytes(0xe9); // jmp rel32
-            int32_t rel = static_cast<int32_t>(static_cast<char*>(_body_start) - (reinterpret_cast<char*>(code) + 4));
-            this->emit_operand32(static_cast<uint32_t>(rel));
-         } else if (callee_arg_bytes <= cur_param_bytes) {
-            // ── Cross-function tail call, K ≤ M (by byte size) ──
-            emit_byte_stack_leave(func);
-            // Copy new args to param slots
-            emit_copy_args_to_params(callee_ft);
-            // Pop args from x86 stack
-            if (callee_arg_bytes > 0)
-               this->emit_add(callee_arg_bytes, rsp);
-            // Restore callee-saved registers
-            emit_restore_callee_saved();
-            // Teardown frame: MOV rbp, rsp; POP rbp
-            this->emit_mov(rbp, rsp);
-            this->emit_pop_raw(rbp);
-            // JMP to callee (rel32, uses same relocation as call)
-            void* branch = this->emit_jmp32();
-            register_call(branch, funcnum);
-         } else {
-            // ── Fallback: K > M — can't fit extra params, use CALL+RET ──
-            emit_byte_stack_leave(func);
-            // Skip call depth tracking (tail call semantics: no depth change)
-            void* branch = this->emit_call32();
-            register_call(branch, funcnum);
-            emit_call_multipop(callee_ft);
-            // Return
-            emit_restore_callee_saved();
-            this->emit_mov(rbp, rsp);
-            this->emit_pop_raw(rbp);
-            this->emit(base::RET);
+      // R11 holds an already-validated indirect target across replacement.
+      void emit_tail_replace_frame(ir_function& func, const func_type& target) {
+         emit_validate_watermark();
+         emit_byte_stack_leave(func);
+         // Save slots must be read before an overlapping larger target copy.
+         emit_restore_callee_saved();
+         const auto incoming = param_area_bytes(*func.type);
+         const auto outgoing = param_area_bytes(target);
+         this->emit_mov(*rbp, r8);
+         this->emit_mov(*(rbp + 8), r9);
+         this->emit(base::LEA, *(rbp + static_cast<int32_t>(incoming + 16)), r10);
+         if (outgoing) {
+            this->emit(base::LEA, *(rsp + static_cast<int32_t>(outgoing)), rdx);
+            this->emit_mov(outgoing / 8, ecx);
+            auto* loop = code;
+            this->emit_sub(8, rdx);
+            this->emit_sub(8, r10);
+            this->emit_mov(*rdx, rax);
+            this->emit_mov(rax, *r10);
+            this->emit_bytes(0xff, 0xc9); // DEC ECX
+            base::fix_branch(this->emit_branchcc32(base::JNZ), loop);
          }
+         this->emit_sub(8, r10);
+         this->emit_mov(r10, rsp);
+         this->emit_mov(r9, *rsp);
+         this->emit_mov(r8, rbp);
+      }
+
+      void emit_tail_call(ir_function& func, const ir_inst& inst) {
+         const auto& target = _mod.get_function_type(inst.call.index);
+         emit_tail_replace_frame(func, target);
+         register_call(this->emit_jmp32(), inst.call.index);
       }
 
       void emit_tail_call_indirect(ir_function& func, const ir_inst& inst) {
-         emit_byte_stack_leave(func);
-         uint32_t packed_fti = inst.call.index;
-         uint32_t fti = packed_fti & 0xFFFF;
-         uint32_t table_idx = packed_fti >> 16;
-         const func_type& ft = _mod.types[fti];
-         const func_type* cur_ft = func.type;
-         uint32_t callee_arg_bytes = param_area_bytes(ft);
-         uint32_t cur_param_bytes = param_area_bytes(*cur_ft);
-
-         // Element index was pushed by an arg instruction — pop it
+         const uint32_t fti = inst.call.index & 0xffff;
+         const uint32_t table_idx = inst.call.index >> 16;
+         const auto& ft = _mod.types[fti];
          this->emit_pop_raw(rax);
-
-         // Resolve the function pointer (same as call_indirect)
          if (table_idx != 0) {
             this->emit_push_raw(rdi);
             this->emit_push_raw(rsi);
             this->emit_mov(eax, ecx);
-            this->emit_mov(static_cast<uint32_t>(table_idx), edx);
-            this->emit_mov(static_cast<uint32_t>(fti), esi);
+            this->emit_mov(table_idx, edx);
+            this->emit_mov(fti, esi);
             this->emit_mov(rsp, rax);
             this->emit_bytes(0x48, 0x83, 0xe4, 0xf0);
             this->emit_push_raw(rax);
-            this->emit_push_raw(rax); // preserve 16-byte call alignment
+            this->emit_push_raw(rax);
             this->emit_bytes(0x48, 0xb8);
+            emit_reloc(reloc_symbol::llvm_resolve_indirect);
             this->emit_operand_ptr(reinterpret_cast<const void*>(&__psizam_resolve_indirect));
             this->emit_bytes(0xff, 0xd0);
             this->emit_pop_raw(rsp);
-            this->emit_bytes(0x48, 0x85, 0xc0);
-            base::fix_branch(this->emit_branchcc32(base::JE), call_indirect_handler);
             this->emit_pop_raw(rsi);
             this->emit_pop_raw(rdi);
-            // rax = code_ptr
-            // For indirect tail calls: always use CALL+RET fallback since we
-            // don't know the target at compile time
-            this->emit_bytes(0xff, 0xd0); // call rax
+            this->emit(base::TEST, rax, rax);
+            base::fix_branch(this->emit_branchcc32(base::JE), call_indirect_handler);
+            this->emit_mov(rax, r11);
          } else {
             if (_mod.indirect_table(0)) {
                this->emit_mov(*(rsi + wasm_allocator::table0_size_offset()), ecx);
                this->emit_cmp(ecx, eax);
             } else {
-               uint32_t table_size = _mod.tables[0].limits.initial;
-               this->emit_cmp(table_size, eax);
+               this->emit_cmp(_mod.tables[0].limits.initial, eax);
             }
             base::fix_branch(this->emit_branchcc32(base::JAE), call_indirect_handler);
-            this->emit_bytes(0x48, 0xc1, 0xe0, 0x04); // shlq $4, %rax
+            this->emit_bytes(0x48, 0xc1, 0xe0, 0x04);
             if (_mod.indirect_table(0)) {
                this->emit_mov(*(rsi + wasm_allocator::table_offset()), rcx);
                this->emit_add(rcx, rax);
             } else {
-               this->emit_bytes(0x48, 0x8d, 0x84, 0x06);
-               this->emit_operand32(static_cast<uint32_t>(wasm_allocator::table_offset()));
+               this->emit(base::LEA, *(rax + rsi + wasm_allocator::table_offset()), rax);
             }
             this->emit_bytes(0x81, 0x38);
             this->emit_operand32(fti);
             base::fix_branch(this->emit_branchcc32(base::JNE), type_error_handler);
-            // For indirect: CALL+RET fallback (target not known at compile time)
-            this->emit_bytes(0xff, 0x50, 0x08); // call *8(%rax)
+            this->emit_mov(*(rax + 8), r11);
          }
-
-         // Pop params, handle return value
-         emit_call_multipop(ft);
-         // Return from current function
-         emit_restore_callee_saved();
-         this->emit_mov(rbp, rsp);
-         this->emit_pop_raw(rbp);
-         this->emit(base::RET);
+         emit_tail_replace_frame(func, ft);
+         this->emit_bytes(0x41, 0xff, 0xe3); // JMP R11
       }
 
       // ──────── Binary op helpers ────────
@@ -7350,6 +7245,8 @@ namespace psizam::detail {
       void* stack_overflow_handler = nullptr;
       void* memory_handler = nullptr;
       std::vector<func_reloc> _func_relocations;
+      std::vector<std::pair<uint32_t, uint32_t>> _import_thunk_offsets;
+      std::vector<uint64_t> _import_thunk_stack_sizes;
       // Scratch allocator for per-function transient data (reclaimed after each function)
       jit_scratch_allocator* _scratch = nullptr;
       // Per-function block address tracking (set during compile_function)
@@ -7372,6 +7269,7 @@ namespace psizam::detail {
       uint32_t _num_vregs = 0;
       uint32_t _num_spill_slots = 0;
       uint32_t _body_locals = 0;
+      uint64_t _native_fixed_frame_bytes = UINT64_MAX;
       void* _body_start = nullptr;  // for self-recursive tail calls
       bool _use_regalloc = false;
       uint32_t _callee_saved_used = 0;

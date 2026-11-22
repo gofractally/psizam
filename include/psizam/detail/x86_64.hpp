@@ -84,6 +84,16 @@ namespace psizam::detail {
          _mod(mod), _allocator(alloc), _code_segment_base(_allocator.start_code()),
          _enable_backtrace(enable_backtrace), _stack_limit_is_bytes(stack_limit_is_bytes),
          _compile_result(result) {
+         _mod.native_guest_abi = psizam::native_guest_abi::jit_callee_cleanup;
+         if (_compile_result) {
+            _compile_result->native_guest_abi = _mod.native_guest_abi;
+            _compile_result->body_stack_sizes.assign(_mod.code.size(), UINT64_MAX);
+            _compile_result->native_stack_frames_complete = false;
+         }
+         for (auto& body : _mod.code) {
+            body.native_stack_frame_bytes = UINT64_MAX;
+            body.native_stack_frame_complete = false;
+         }
          _code_start = _allocator.alloc<unsigned char>(128);
          _code_end = _code_start + 128;
          code = _code_start;
@@ -112,9 +122,19 @@ namespace psizam::detail {
          _code_start = _allocator.alloc<unsigned char>(host_functions_size);
          _code_end = _code_start + host_functions_size;
          // code already set
+         if (_compile_result) {
+            _compile_result->import_thunk_offsets.resize(num_imported);
+            _compile_result->import_thunk_stack_sizes.assign(num_imported, _enable_backtrace ? 48u : 40u);
+         }
          for(uint32_t i = 0; i < num_imported; ++i) {
+            auto* begin = code;
             start_function(code, i);
             emit_host_call(i);
+            if (_compile_result) {
+               _compile_result->import_thunk_offsets[i] = {
+                  static_cast<uint32_t>(reinterpret_cast<const char*>(begin) - reinterpret_cast<const char*>(_code_segment_base)),
+                  static_cast<uint32_t>(reinterpret_cast<const char*>(code) - reinterpret_cast<const char*>(begin))};
+            }
          }
          assert(code <= _code_end);
          _allocator.reclaim(code, _code_end - code);
@@ -245,7 +265,7 @@ namespace psizam::detail {
       // Prologue max includes the gas_charge universal-memory-deadline
       // sequence (~40 bytes).
       static constexpr std::size_t max_prologue_size = 128;
-      static constexpr std::size_t max_epilogue_size = 16; // single-value epilogue
+      static constexpr std::size_t max_epilogue_size = 48; // includes wide callee cleanup
 
       // gas_state redesign — universal memory-deadline shape:
       //
@@ -337,6 +357,7 @@ namespace psizam::detail {
 
       void emit_prologue(const func_type& /*ft*/, const std::vector<local_entry>& locals, uint32_t funcnum) {
          _tail_stack_immediates.clear();
+         _current_code_index = funcnum;
          _ft = &_mod.types[_mod.functions[funcnum]];
          _params = function_parameters{_ft};
          _locals = function_locals{locals};
@@ -344,7 +365,7 @@ namespace psizam::detail {
          const std::size_t instruction_size_ratio_upper_bound = (_fp != fp_mode::fast) ? (_enable_backtrace?63:49) : 79;
          // Multi-value epilogue needs ~16 bytes per return value for the mov pairs
          std::size_t epilogue_size = (_ft->return_types.size() > 1)
-            ? _ft->return_types.size() * 16 + 16
+            ? _ft->return_types.size() * 16 + max_epilogue_size
             : max_epilogue_size;
          std::size_t code_size = max_prologue_size + _mod.code[funcnum].size * instruction_size_ratio_upper_bound + epilogue_size;
          _code_start = _allocator.alloc<unsigned char>(code_size);
@@ -367,10 +388,11 @@ namespace psizam::detail {
             emit_gas_charge(static_cast<int64_t>(_mod.code[funcnum].wasm_body_bytes));
          uint64_t count = 0;
          for(uint32_t i = 0; i < locals.size(); ++i) {
-            count += locals[i].count;
-            if(locals[i].type == types::v128) {
-               count += locals[i].count;
-            }
+            const uint64_t slots = uint64_t(locals[i].count) *
+                                   (locals[i].type == types::v128 ? 2u : 1u);
+            PSIZAM_ASSERT(count <= UINT64_MAX - slots, wasm_parse_exception,
+                          "native local slot count overflow");
+            count += slots;
          }
          _local_count = count;
          if (_local_count > 0) {
@@ -455,10 +477,6 @@ namespace psizam::detail {
                mr_idx      += slot_count;
                slots_above += slot_count;
             }
-            // Restore frame
-            emit_mov(rbp, rsp);
-            emit_pop(rbp);
-            emit(RET);
          } else {
             if(ft.return_count != 0) {
                if(ft.return_type == types::v128) {
@@ -468,12 +486,32 @@ namespace psizam::detail {
                   emit_pop(rax);
                }
             }
-            if (_local_count > 0 || (ft.return_count != 0 && ft.return_type == types::v128)) {
-               emit_mov(rbp, rsp);
-            }
-            emit_pop(rbp);
-            emit(RET);
          }
+         emit_guest_return(native_param_bytes(ft), true);
+      }
+
+      static uint32_t native_param_bytes(const func_type& ft) {
+         uint64_t bytes = 0;
+         for (auto type : ft.param_types) bytes += type == types::v128 ? 16u : 8u;
+         PSIZAM_ASSERT(bytes <= INT32_MAX - 16u, wasm_parse_exception,
+                       "native parameter area too large");
+         return static_cast<uint32_t>(bytes);
+      }
+
+      // Preserve the real return instruction and scalar/vector result channels.
+      // Relocate the original RA rather than using RET's limited imm16 cleanup.
+      void emit_guest_return(uint32_t params, bool frame) {
+         if (frame) {
+            emit_mov(*(rbp + 8), rcx);
+            emit_mov(*rbp, r10);
+            emit(LEA, *(rbp + static_cast<int32_t>(params + 8)), rsp);
+            emit_mov(r10, rbp);
+         } else if (params) {
+            emit_mov(*rsp, rcx);
+            emit(LEA, *(rsp + static_cast<int32_t>(params)), rsp);
+         }
+         if (frame || params) emit_mov(rcx, *rsp);
+         emit(RET);
       }
       static constexpr uint32_t get_depth_for_type(uint8_t type) {
          if(type == types::v128) {
@@ -700,7 +738,7 @@ namespace psizam::detail {
       void emit_call_indirect(const func_type& ft, uint32_t functypeidx, uint32_t table_idx = 0)
       {
          COUNT_INSTR();
-         auto icount = variable_size_instr(37, 64);
+         auto icount = variable_size_instr(37, 128);
          emit_check_call_depth();
          emit_pop(rax);
 
@@ -712,8 +750,10 @@ namespace psizam::detail {
             emit_mov(eax, ecx);  // elem_idx → arg4
             emit_mov(table_idx, edx); // table_idx → arg3
             emit_mov(functypeidx, esi); // type_idx → arg2
+            emit_align_stack(rax);
             emit_mov(&__psizam_resolve_indirect, rax);
             emit(CALL, rax);
+            emit_restore_stack();
             // rax = code_ptr (null on error)
             emit_pop(rsi);
             emit_pop(rdi);
@@ -748,81 +788,84 @@ namespace psizam::detail {
          emit_check_call_depth_end();
       }
 
-      // Tail calls: narrow TCO when callee is an internal function with a
-      // signature identical to the current function's and no params. Falls back
-      // to call+return for all other cases (imports, mismatched sigs, any
-      // params, stack-bytes-limit mode). Frame-reuse for the narrow case means
-      // deep return_call chains no longer blow the native stack.
-      void emit_tail_call(const func_type& ft, uint32_t funcnum) {
-         uint32_t imported_count = _mod.get_imported_functions_size();
-         bool is_import = funcnum < imported_count;
-         bool same_sig = _ft
-             && ft.param_types == _ft->param_types
-             && ft.return_types == _ft->return_types;
-         bool tco_ok = !is_import
-             && same_sig
-             && ft.param_types.empty()
-             && !_stack_limit_is_bytes;
-         if (!tco_ok) {
-            emit_tail_byte_adjust(false);
-            emit_call(ft, funcnum);
-            emit_tail_byte_adjust(true);
-            return;
+      // Replace the activation while retaining the ordinary caller's
+      // completion SP S=B+16+incoming. Staged arguments move toward higher
+      // addresses, so the copy must run high-to-low before restoring the caller.
+      // R11 may hold an indirect target and is deliberately left untouched.
+      void emit_tail_replace_frame(const func_type& ft) {
+         set_branch_target();
+         emit_tail_byte_adjust(false);
+         const auto incoming = native_param_bytes(*_ft);
+         const auto outgoing = native_param_bytes(ft);
+         emit_mov(*rbp, r8);
+         emit_mov(*(rbp + 8), r9);
+         emit(LEA, *(rbp + static_cast<int32_t>(incoming + 16)), r10);
+         if (outgoing) {
+            emit(LEA, *(rsp + static_cast<int32_t>(outgoing)), rdx);
+            emit_mov(outgoing / 8, ecx);
+            auto* loop = code;
+            set_branch_target();
+            emit_sub(8, rdx);
+            emit_sub(8, r10);
+            emit_mov(*rdx, rax);
+            emit_mov(rax, *r10);
+            emit_bytes(0xff, 0xc9); // DEC ECX
+            fix_branch(emit_branchcc32(JNZ), loop);
          }
-         // Restore caller's frame — matches emit_epilogue's teardown.
-         emit_mov(rbp, rsp);
-         emit_pop(rbp);
-         // jmp callee (patched via register_call). Callee runs its own
-         // prologue on the restored stack so deep chains don't grow the
-         // native stack.
-         emit_bytes(0xe9);
-         void* branch = emit_branch_target32();
-         register_call(branch, funcnum);
+         emit_sub(8, r10);
+         emit_mov(r10, rsp);
+         emit_mov(r9, *rsp);
+         emit_mov(r8, rbp);
+         set_branch_target();
       }
+
+      void emit_tail_call(const func_type& ft, uint32_t funcnum) {
+         emit_validate_watermark();
+         emit_tail_replace_frame(ft);
+         emit_bytes(0xe9);
+         register_call(emit_branch_target32(), funcnum);
+      }
+
       void emit_tail_call_indirect(const func_type& ft, uint32_t functypeidx, uint32_t table_idx = 0) {
-         bool same_sig = _ft
-             && ft.param_types == _ft->param_types
-             && ft.return_types == _ft->return_types;
-         bool tco_ok = same_sig
-             && ft.param_types.empty()
-             && !_stack_limit_is_bytes
-             && table_idx == 0;
-         if (!tco_ok) {
-            emit_tail_byte_adjust(false);
-            emit_call_indirect(ft, functypeidx, table_idx);
-            emit_tail_byte_adjust(true);
-            return;
-         }
-         COUNT_INSTR();
-         auto icount = variable_size_instr(30, 60);
-         // Pop index into rax.
+         emit_validate_watermark();
+         set_branch_target();
          emit_pop(rax);
-         // Bounds check.
-         if (_mod.indirect_table(0)) {
-            emit_mov(*(rsi + wasm_allocator::table0_size_offset()), ecx);
-            emit_cmp(ecx, eax);
+         if (table_idx != 0) {
+            emit_push(rdi);
+            emit_push(rsi);
+            emit_mov(eax, ecx);
+            emit_mov(table_idx, edx);
+            emit_mov(functypeidx, esi);
+            emit_align_stack(rax);
+            emit_mov(&__psizam_resolve_indirect, rax);
+            emit(CALL, rax);
+            emit_restore_stack();
+            emit_pop(rsi);
+            emit_pop(rdi);
+            emit(TEST, rax, rax);
+            fix_branch(emit_branchcc32(JE), call_indirect_handler);
+            emit_mov(rax, r11);
          } else {
-            std::uint32_t table_size = _mod.tables[0].limits.initial;
-            emit_cmp(table_size, eax);
+            if (_mod.indirect_table(0)) {
+               emit_mov(*(rsi + wasm_allocator::table0_size_offset()), ecx);
+               emit_cmp(ecx, eax);
+            } else {
+               emit_cmp(_mod.tables[0].limits.initial, eax);
+            }
+            fix_branch(emit_branchcc32(JAE), call_indirect_handler);
+            emit(SHL_imm8, imm8{4}, rax);
+            if (_mod.indirect_table(0)) {
+               emit_mov(*(rsi + wasm_allocator::table_offset()), rcx);
+               emit_add(rcx, rax);
+            } else {
+               emit(LEA, *(rax + rsi + wasm_allocator::table_offset()), rax);
+            }
+            emit_cmp(functypeidx, *dword_ptr(rax));
+            fix_branch(emit_branchcc32(JNE), type_error_handler);
+            emit_mov(*(rax + 8), r11);
          }
-         fix_branch(emit_branchcc32(JAE), call_indirect_handler);
-         emit(SHL_imm8, imm8{4}, rax);
-         if (_mod.indirect_table(0)) {
-            emit_mov(*(rsi + wasm_allocator::table_offset()), rcx);
-            emit_add(rcx, rax);
-         } else {
-            emit(LEA, *(rax + rsi + wasm_allocator::table_offset()), rax);
-         }
-         // Type check against functypeidx.
-         emit_cmp(functypeidx, *dword_ptr(rax));
-         fix_branch(emit_branchcc32(JNE), type_error_handler);
-         // Load function pointer into rax.
-         emit_mov(*(rax + 8), rax);
-         // Restore caller's frame, then JMP to rax (no-link branch).
-         emit_mov(rbp, rsp);
-         emit_pop(rbp);
-         // jmp rax  →  FF /4  with ModR/M = 0xE0
-         emit_bytes(0xFF, 0xE0);
+         emit_tail_replace_frame(ft);
+         emit_bytes(0x41, 0xff, 0xe3); // JMP R11
       }
 
       void emit_drop(uint8_t type) {
@@ -1410,6 +1453,7 @@ namespace psizam::detail {
          }
 
          // ── 2. Call __psizam_eh_enter(ctx, catch_count, catch_data) ──
+         emit_mov(ebx, *(rdi + 16)); // snapshot the live register-backed budget
          // Save catch_data ptr before pushing ctx/mem
          emit_mov(rsp, rdx);           // rdx = catch_data (arg3)
          emit_push(rdi);
@@ -5235,9 +5279,21 @@ namespace psizam::detail {
 
       using fn_type = native_value(*)(void* context, void* memory);
       void finalize(function_body& body) {
+         PSIZAM_ASSERT(_local_count <= (UINT64_MAX - 8) / 8, wasm_parse_exception,
+                       "native fixed frame size overflow");
+         auto& published = _mod.code[_current_code_index];
+         if (!published.native_stack_frame_complete) ++_native_frame_count;
+         body.native_stack_frame_bytes = 8 + _local_count * 8;
+         body.native_stack_frame_complete = true;
+         published.native_stack_frame_bytes = body.native_stack_frame_bytes;
+         published.native_stack_frame_complete = true;
          body.jit_code_size = static_cast<uint32_t>(code - _code_start);
          _allocator.reclaim(code, _code_end - code);
          body.jit_code_offset = _code_start - (unsigned char*)_code_segment_base;
+         if (_compile_result) {
+            _compile_result->body_stack_sizes[_current_code_index] = body.native_stack_frame_bytes;
+            _compile_result->native_stack_frames_complete = _native_frame_count == _mod.code.size();
+         }
       }
 
       // returns the current write address
@@ -6309,6 +6365,8 @@ namespace psizam::detail {
       void* stack_overflow_handler;
       void* memory_handler;
       uint64_t _local_count;
+      uint32_t _current_code_index = 0;
+      size_t _native_frame_count = 0;
       uint32_t _table_element_size;
 
       // Parser hook: set before emit_br/br_if/br_table/return for multi-value
@@ -6601,61 +6659,22 @@ namespace psizam::detail {
       // \post the result (if any) is at the top of the stack
       void emit_multipop(const func_type& ft) {
          if (ft.return_types.size() > 1) {
-            // Multi-value return: pop params, then push N results from ctx->_multi_return.
-            // Each v128 occupies 2 slots (16B) both in _multi_return and on the
-            // operand stack; scalars occupy 1 slot (8B). Pushing every result
-            // as a single qword corrupted the stack for any mixed-type multi-
-            // return that included v128 (observed as SIGBUS crashing the
-            // subsequent op in fuzz regression mismatch_940_seed711811333).
-            auto icount = variable_size_instr(0, 7 + ft.return_types.size() * 18);
-            uint32_t total_size = 0;
-            for(uint32_t i = 0; i < ft.param_types.size(); ++i) {
-               total_size += (ft.param_types[i] == v128) ? 16 : 8;
-            }
-            if(total_size != 0) {
-               emit_add(total_size, rsp);
-            }
-            // Push return values from ctx->_multi_return (result[0] first = deepest).
-            // mr_idx tracks the 8B slot within _multi_return for the current result.
+            auto icount = variable_size_instr(0, ft.return_types.size() * 18);
             uint32_t mr_idx = 0;
-            for (uint32_t i = 0; i < ft.return_types.size(); i++) {
-               if (ft.return_types[i] == types::v128) {
+            for (auto type : ft.return_types) {
+               if (type == types::v128) {
                   emit_vmovdqu(*(rdi + multi_return_offset + static_cast<int32_t>(mr_idx * 8)), xmm0);
                   emit_push_v128(xmm0);
                   mr_idx += 2;
                } else {
                   emit_mov(*(rdi + multi_return_offset + static_cast<int32_t>(mr_idx * 8)), rax);
                   emit_push(rax);
-                  mr_idx += 1;
+                  ++mr_idx;
                }
             }
-            return;
-         }
-         auto icount = variable_size_instr(0, 12);
-         uint32_t total_size = 0;
-         for(uint32_t i = 0; i < ft.param_types.size(); ++i) {
-            if(ft.param_types[i] == v128) {
-               total_size += 16;
-            } else {
-               total_size += 8;
-            }
-            if(total_size > 0x7fffffffu) {
-               unimplemented();
-            }
-         }
-         if (ft.return_count && ft.return_type == types::v128) {
-            if (total_size != 16)
-            {
-               emit_add(total_size - 16, rsp);
-            }
-            emit_vmovups(xmm0, *rsp);
-         } else {
-            if(total_size != 0) {
-               emit_add(total_size, rsp);
-            }
-            if (ft.return_count != 0) {
-               emit_push(rax);
-            }
+         } else if (ft.return_count) {
+            if (ft.return_type == types::v128) emit_push_v128(xmm0);
+            else emit_push(rax);
          }
       }
 
@@ -7556,7 +7575,7 @@ namespace psizam::detail {
             emit_bytes(0x48, 0x89, 0x0f);
             emit_bytes(0x5d);
          }
-         emit_bytes(0xc3);
+         emit_guest_return(native_param_bytes(_mod.get_function_type(funcnum)), false);
       }
 
       // Needs to run before saving %rdi.  Returns the number of bytes pushed onto the stack.
