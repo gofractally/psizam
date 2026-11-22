@@ -749,3 +749,13 @@ target_compile_definitions(psizam_proper_tail_jit2_tests PRIVATE CATCH_CONFIG_NO
 add_dependencies(psizam_proper_tail_jit2_tests psizam_proper_tail_fixture psizam_proper_tail_large_fixture)
 add_test(NAME psizam_proper_tail_jit2_tests COMMAND psizam_proper_tail_jit2_tests)
 set_tests_properties(psizam_proper_tail_jit2_tests PROPERTIES TIMEOUT 120 LABELS "execution;resource;abi")
+
+# Every ordinary C++ host continuation must retain a quota reservation even
+# when its guest caller used a proper tail call. Finite diagnostic, not timing.
+add_executable(psizam_host_tail_reentry_tests host_tail_reentry_tests.cpp)
+target_link_libraries(psizam_host_tail_reentry_tests PRIVATE psizam psizam-exec Catch2::Catch2)
+target_compile_definitions(psizam_host_tail_reentry_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
+   PROPER_TAIL_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail.wasm")
+add_dependencies(psizam_host_tail_reentry_tests psizam_proper_tail_fixture)
+add_test(NAME psizam_host_tail_reentry_tests COMMAND psizam_host_tail_reentry_tests)
+set_tests_properties(psizam_host_tail_reentry_tests PROPERTIES TIMEOUT 60 LABELS "execution;resource;abi")
