@@ -473,6 +473,15 @@ namespace psizam::detail {
          _mod->stack_limit_is_bytes = has_max_stack_bytes<Options>;
          debug.set(std::move(imap));
          debug.relocate(_allocator.get_code_start());
+         // A writer that generates code after the parse reported no addresses
+         // to the map above. Its code is complete now, so map each function's
+         // final range instead; otherwise no trap address ever resolves.
+         if constexpr (requires { requires Writer::debug_map_from_function_bounds; } &&
+                       requires { debug.set_function_bounds(mod, static_cast<const void*>(nullptr),
+                                                            static_cast<const void*>(nullptr)); }) {
+            debug.set_function_bounds(mod, static_cast<const void*>(code_ptr.raw() - code_ptr.offset()),
+                                      static_cast<const void*>(_allocator.get_code_start()));
+         }
       }
 
       inline uint32_t parse_magic(wasm_code_ptr& code) {

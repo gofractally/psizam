@@ -195,6 +195,10 @@ namespace psizam::detail {
 
    template<typename CodeGen>
    class ir_writer_impl {
+    public:
+      // Native code is generated after each function, or the whole module,
+      // has been parsed: the parser's per-instruction addresses are not final.
+      static constexpr bool debug_map_from_function_bounds = true;
       using codegen_t = CodeGen;
     public:
       // Subclass access to IR data for alternative codegen pipelines (e.g., LLVM)

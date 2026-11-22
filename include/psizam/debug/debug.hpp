@@ -100,6 +100,12 @@ namespace psizam::debug
 
       void relocate(const void* new_base) { code_begin = new_base; }
 
+      // Replace the map with one entry per function, from the module's final
+      // code layout. Defined below, with rebuild_from_module.
+      inline void set_function_bounds(const psizam::module& mod,
+                                      const void*           wasm_base,
+                                      const void*           native_code_base);
+
       std::uint32_t translate(const void* pc) const
       {
          std::size_t diff = (reinterpret_cast<const char*>(pc) -
@@ -203,6 +209,13 @@ namespace psizam::debug
                     reinterpret_cast<const char*>(wasm_base) +
                         b.locs.fn_locs.back().wasm_end);
       map.set(std::move(b));
+   }
+
+   inline void debug_instr_map::set_function_bounds(const psizam::module& mod,
+                                                    const void*           wasm_base,
+                                                    const void*           native_code_base)
+   {
+      rebuild_from_module(*this, mod, wasm_base, native_code_base);
    }
 
    template <typename Backend>

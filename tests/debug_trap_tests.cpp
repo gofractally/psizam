@@ -366,6 +366,25 @@ TEST_CASE("rebuild_from_module produces correct fn_locs for jit2",
 }
 
 #if defined(PSIZAM_ENABLE_LLVM_BACKEND)
+// An embedder that only constructs a backend must get a usable map: a trap
+// observer translating return addresses is exactly that embedder.
+TEST_CASE("jit2 fills the debug map with final function bounds on its own",
+          "[debug][jit2]") {
+   auto code = load_fixture("trap_guest.wasm");
+   using rhf_t = registered_host_functions<dwarf_host, detail::execution_interface>;
+   rhf_t::add<&dwarf_host::host_capture>("env", "capture");
+   using backend_t = backend<rhf_t, jit2, default_options, psizam::debug::debug_instr_map>;
+   dwarf_host hs;
+   backend_t  bkend(code, hs, &wa);
+   auto& dbg = bkend.get_debug();
+   REQUIRE(dbg.locs.fn_locs.size() == 2);
+   for (const auto& fn : dbg.locs.fn_locs) {
+      auto* pc = reinterpret_cast<const char*>(dbg.code_begin) + fn.code_prologue;
+      CHECK(dbg.translate(pc) == fn.wasm_begin);
+      CHECK(dbg.translate(pc + 4) == fn.wasm_begin);
+   }
+}
+
 TEST_CASE("rebuild_from_module produces correct fn_locs for jit_llvm",
           "[debug][llvm]") {
    auto code = load_fixture("trap_guest.wasm");

@@ -24,6 +24,8 @@ namespace psizam::detail {
    class ir_writer_llvm_aot : public ir_writer {
     public:
       static constexpr bool compile_import_only_module = true;
+      // LLVM embedders build their own map from the linked artifact.
+      static constexpr bool debug_map_from_function_bounds = false;
       ir_writer_llvm_aot(growable_allocator& alloc, std::size_t source_bytes, module& mod,
                          bool enable_backtrace = false, bool stack_limit_is_bytes = false,
                          uint32_t compile_threads = 0)
