@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstring>
 #include <optional>
+#include <limits>
 #include <variant>
 #include <vector>
 
@@ -154,19 +155,39 @@ namespace psizam::detail {
 
          // Emit host function stubs
          const uint32_t num_imported = mod.get_imported_functions_size();
-         // Base: ~140 bytes per stub + 16 bytes per param (for stack args + reg loads) + backtrace
+         // Conservative code capacity, including large-offset load/store
+         // expansions. This is distinct from the native stack bound below.
          std::size_t host_functions_size = 0;
          for(uint32_t i = 0; i < num_imported; ++i) {
-            uint32_t nparams = mod.get_function_type(i).param_types.size();
-            host_functions_size += 200 + nparams * 16 + 8 * _enable_backtrace;
+            const auto& ft = mod.get_function_type(i);
+            native_param_bytes(ft); // reject unrepresentable native argument areas
+            const uint64_t budget = 384 + uint64_t(ft.param_types.size()) * 48;
+            PSIZAM_ASSERT(budget <= std::numeric_limits<std::size_t>::max() - host_functions_size,
+                          wasm_parse_exception, "native import code allocation overflow");
+            host_functions_size += static_cast<std::size_t>(budget);
+         }
+         if (_compile_result) {
+            _compile_result->import_thunk_offsets.resize(num_imported);
+            _compile_result->import_thunk_stack_sizes.resize(num_imported);
          }
          if (num_imported > 0) {
             _code_start = _allocator.alloc<unsigned char>(host_functions_size);
             _code_end = _code_start + host_functions_size;
             code = _code_start;
             for(uint32_t i = 0; i < num_imported; ++i) {
+               auto* start = code;
                start_function(code, i);
                emit_host_call(i);
+               if (_compile_result) {
+                  const auto offset = start - static_cast<unsigned char*>(_code_segment_base);
+                  const auto size = code - start;
+                  PSIZAM_ASSERT(offset >= 0 && uint64_t(offset) <= UINT32_MAX &&
+                                size > 0 && uint64_t(size) <= UINT32_MAX,
+                                wasm_parse_exception, "native import metadata offset overflow");
+                  _compile_result->import_thunk_offsets[i] = {uint32_t(offset), uint32_t(size)};
+                  _compile_result->import_thunk_stack_sizes[i] =
+                     32 + ((uint64_t(mod.get_function_type(i).param_types.size()) * 8 + 15) & ~uint64_t{15});
+               }
             }
             assert(code <= _code_end);
             _allocator.reclaim(code, _code_end - code);
@@ -4725,7 +4746,7 @@ namespace psizam::detail {
             emit32(0xF9400000 | ((offset / 8) << 10) | (rn << 5) | rt);
          } else {
             emit_mov_imm64(X8, offset);
-            emit32(0x8B080000 | (rn << 5) | X8); // ADD X8, Xn, X8
+            emit32(0x8B286000 | (rn << 5) | X8); // ADD X8, Xn, X8, UXTX (supports SP)
             emit32(0xF9400100 | rt); // LDR Xt, [X8]
          }
       }
@@ -5005,7 +5026,7 @@ namespace psizam::detail {
          // forward-indexed copy walks both arrays in lockstep.
          uint32_t buf_size = num_params > 0 ? ((num_params * 8 + 15) / 16) * 16 : 0;
          if (buf_size > 0) {
-            emit32(0xD1000000 | ((buf_size & 0xFFF) << 10) | (SP << 5) | SP);
+            emit_add_imm_sp(-static_cast<int32_t>(buf_size));
          }
 
          emit32(0x910003E1); // MOV X1, SP (buffer pointer)
@@ -5025,7 +5046,7 @@ namespace psizam::detail {
          emit32(0xD63F0100); // BLR X8
 
          if (buf_size > 0) {
-            emit32(0x91000000 | ((buf_size & 0xFFF) << 10) | (SP << 5) | SP);
+            emit_add_imm_sp(static_cast<int32_t>(buf_size));
          }
 
          emit32(0xA8C153F3); // LDP X19, X20, [SP], #16

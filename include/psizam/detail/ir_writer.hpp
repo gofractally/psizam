@@ -324,6 +324,7 @@ namespace psizam::detail {
          // Finalize the code segment (all functions already compiled in finalize()).
          if (_codegen) {
             _codegen->finalize_code();
+            publish_native_compile_metadata(*_codegen, 0);
 #if defined(PSIZAM_JIT_SIGNAL_DIAGNOSTICS) && !defined(PSIZAM_COMPILE_ONLY)
             // Build function range table for crash diagnostics
             {
@@ -3424,6 +3425,57 @@ namespace psizam::detail {
       uint32_t _num_functions = 0;
       ir_function* _func = nullptr;
       pzam_compile_result* _compile_result = nullptr;
+      // Runs only on the owning thread, after codegen or all worker joins.
+      // Result arrays are allocated in set_compile_result, not this destructor
+      // publication path. No shared-module writes occur in worker constructors.
+      void publish_native_compile_metadata(const codegen_t& generator, uint64_t code_offset) {
+         constexpr auto abi = [] {
+            if constexpr (requires { codegen_t::guest_call_abi; })
+               return codegen_t::guest_call_abi;
+            else
+               return psizam::native_guest_abi::legacy_caller_cleanup;
+         }();
+         _mod.native_guest_abi = abi;
+         if (!_compile_result) return;
+         auto& output = *_compile_result;
+         output.native_guest_abi = abi;
+         if (code_offset > UINT32_MAX) {
+            output.error = "native import code base overflow";
+            return;
+         }
+         if constexpr (requires { generator.get_import_thunk_offsets(); }) {
+            const auto& ranges = generator.get_import_thunk_offsets();
+            if (ranges.size() != output.import_thunk_offsets.size()) {
+               output.error = "native import target count mismatch";
+               return;
+            }
+            for (size_t i = 0; i < ranges.size(); ++i) {
+               const auto [offset, size] = ranges[i];
+               const uint64_t merged = code_offset + offset;
+               if (!size || merged > UINT32_MAX || merged + size > uint64_t{UINT32_MAX} + 1) {
+                  output.error = "native import target range overflow";
+                  return;
+               }
+               output.import_thunk_offsets[i] = {uint32_t(merged), size};
+            }
+         } else if (abi != psizam::native_guest_abi::legacy_caller_cleanup &&
+                    !output.import_thunk_offsets.empty()) {
+            output.error = "missing native import target metadata";
+            return;
+         }
+         if constexpr (requires { generator.get_import_thunk_stack_sizes(); }) {
+            const auto& bounds = generator.get_import_thunk_stack_sizes();
+            if (bounds.size() != output.import_thunk_stack_sizes.size()) {
+               output.error = "native import frame count mismatch";
+               return;
+            }
+            for (size_t i = 0; i < bounds.size(); ++i)
+               output.import_thunk_stack_sizes[i] = bounds[i];
+         } else if (abi != psizam::native_guest_abi::legacy_caller_cleanup &&
+                    !output.import_thunk_stack_sizes.empty()) {
+            output.error = "missing native import frame bounds";
+         }
+      }
       mem_safety    _mem_mode     = mem_safety::guarded;
       checked_mode  _checked_kind = checked_mode::strict;
       bool _skip_codegen = false;           // Set by subclasses to bypass native codegen
@@ -3609,6 +3661,7 @@ namespace psizam::detail {
 
          // Post-merge: finalize the merged code buffer
          _allocator.end_code<true>(_merge_final_base);
+         publish_native_compile_metadata(*workers[0].codegen, workers[0].final_offset);
 
          // Collect PIC relocations from all workers
          if (_compile_result) {
@@ -3686,7 +3739,14 @@ namespace psizam::detail {
       void* _merge_final_base = nullptr;  // Shared between phases
 #endif
     public:
-      void set_compile_result(pzam_compile_result* r) { _compile_result = r; }
+      void set_compile_result(pzam_compile_result* r) {
+         _compile_result = r;
+         if (r) {
+            const auto count = _mod.get_imported_functions_size();
+            r->import_thunk_offsets.assign(count, {0, 0});
+            r->import_thunk_stack_sizes.assign(count, 0);
+         }
+      }
 #if !defined(__wasi__)
       void set_parse_callback(parse_callback_t cb) { _parse_callback = std::move(cb); }
 #endif

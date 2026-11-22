@@ -2,6 +2,7 @@
 #include <catch2/catch.hpp>
 #include <psizam/backend.hpp>
 #include <psizam/host_function.hpp>
+#include <psizam/detail/pzam_compile_result.hpp>
 #include <fstream>
 #include <iterator>
 #include <functional>
@@ -68,6 +69,39 @@ std::vector<uint32_t> logical_costs(uint32_t threads) {
    return result;
 }
 
+template<class Writer>
+void verify_import_metadata(uint32_t threads, bool backtrace) {
+   auto wasm = fixture();
+   psizam::module mod;
+   mod.allocator.use_default_memory();
+   tail_byte_options options;
+   options.compile_threads = threads;
+   psizam::detail::pzam_compile_result output;
+   psizam::detail::null_debug_info debug;
+   psizam::detail::binary_parser<Writer, tail_byte_options> parser(mod.allocator, options, backtrace, true);
+   parser.set_compile_result(&output);
+   parser.parse_module(wasm, mod, debug);
+   mod.finalize();
+   REQUIRE(output.error.empty());
+   CHECK(output.native_guest_abi == mod.native_guest_abi);
+   const auto count = mod.get_imported_functions_size();
+   REQUIRE(output.import_thunk_offsets.size() == count);
+   REQUIRE(output.import_thunk_stack_sizes.size() == count);
+   REQUIRE(mod.native_function_ptrs.size() == mod.get_functions_total());
+   for (uint32_t i = 0; i < count; ++i) {
+      const auto [offset, size] = output.import_thunk_offsets[i];
+      CHECK(size > 0);
+      CHECK(uint64_t(offset) + size <= mod.allocator.get_actual_code_size());
+      CHECK(mod.native_function_ptrs[i] == mod.allocator._code_base + offset);
+#if defined(__aarch64__)
+      CHECK(output.import_thunk_stack_sizes[i] >=
+         32 + ((uint64_t(mod.get_function_type(i).param_types.size()) * 8 + 15) & ~uint64_t{15}));
+#else
+      CHECK(output.import_thunk_stack_sizes[i] >= (backtrace ? 48 : 40));
+#endif
+   }
+}
+
 TEMPLATE_TEST_CASE("AArch64 JIT1 proper tails replace signatures without native or logical growth",
                    "[proper-tail][resource]", tail_count_options, tail_byte_options, traced_tail_byte_options) {
    functions::add<&host>("env", "host");
@@ -126,6 +160,37 @@ TEST_CASE("Parser publishes identical logical byte costs for native admission", 
    CHECK(logical_costs<psizam::jit_llvm>(0) == reference);
    CHECK(logical_costs<psizam::jit_llvm>(2) == reference);
 #endif
+}
+
+TEST_CASE("Native import target metadata follows actual serial and merged code", "[proper-tail][import-metadata]") {
+   verify_import_metadata<psizam::detail::machine_code_writer>(0, false);
+   verify_import_metadata<psizam::detail::machine_code_writer>(0, true);
+   verify_import_metadata<psizam::detail::ir_writer>(0, false);
+   verify_import_metadata<psizam::detail::ir_writer>(2, true);
+}
+
+TEMPLATE_TEST_CASE("Large imports retain every argument across ordinary and tail calls", "[proper-tail][large-import]",
+                   psizam::interpreter, psizam::jit, psizam::jit2) {
+   uint32_t calls = 0;
+   psizam::host_function_table table;
+   psizam::host_function_table::entry entry;
+   entry.module_name = "env"; entry.func_name = "large";
+   entry.signature.params.assign(2000, psizam::types::i64);
+   entry.signature.ret = {psizam::types::i64};
+   entry.slow_dispatch = [&](void*, psizam::native_value* args, char*) {
+      for (uint32_t i = 0; i < 2000; ++i)
+         if (args[i].i64 != UINT64_C(0x10203040) + i)
+            throw std::runtime_error("large import argument mismatch");
+      ++calls;
+      return psizam::native_value{UINT64_C(0x123456789abcdef)};
+   };
+   table.add_entry(std::move(entry));
+   auto wasm = fixture(PROPER_TAIL_IMPORT_WASM);
+   psizam::wasm_allocator allocator;
+   psizam::backend<std::nullptr_t, TestType, tail_byte_options> vm(wasm, std::move(table), nullptr, &allocator);
+   CHECK(vm.call_with_return("env", "ordinary_host")->to_ui64() == UINT64_C(0x123456789abce54));
+   CHECK(vm.call_with_return("env", "tail_host")->to_ui64() == UINT64_C(0x123456789abcdef));
+   CHECK(calls == 2);
 }
 
 TEST_CASE("AArch64 JIT1 tail and ordinary cleanup handle large argument areas", "[proper-tail][large-args]") {

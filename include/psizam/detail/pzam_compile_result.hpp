@@ -18,7 +18,9 @@ namespace psizam::detail {
       // Private typed import targets, indexed by imported function index.
       // Offsets are relative to the same code blob as function/body offsets.
       std::vector<std::pair<uint32_t, uint32_t>> import_thunk_offsets;
-      std::vector<uint64_t>        import_thunk_stack_sizes; // native prologue bytes where available
+      // Proven native prologue allocation upper bounds. LLVM may report exact
+      // allocations; host C++ helpers/reentry and incoming arguments are separate.
+      std::vector<uint64_t>        import_thunk_stack_sizes;
       psizam::native_guest_abi     native_guest_abi = psizam::native_guest_abi::legacy_caller_cleanup;
       std::vector<uint64_t>        entry_stack_sizes;  // native prologue bytes, LLVM only
       std::vector<uint64_t>        body_stack_sizes;

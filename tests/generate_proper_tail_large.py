@@ -31,3 +31,17 @@ text = f"""(module
     (i64.add (i64.const 101) (call $small (local.get 0))))
 )"""
 pathlib.Path(sys.argv[1]).write_text(text + "\n")
+
+if len(sys.argv) > 2:
+    # Exercises >4095-byte import packing and >32760-byte stack load offsets.
+    imports = 2000
+    import_params = " ".join("i64" for _ in range(imports))
+    import_args = " ".join(f"(i64.const {0x10203040 + i})" for i in range(imports))
+    pathlib.Path(sys.argv[2]).write_text(f"""(module
+      (import "env" "large" (func $large (param {import_params}) (result i64)))
+      (memory 1)
+      (func (export "ordinary_host") (result i64)
+        (i64.add (i64.const 101) (call $large {import_args})))
+      (func (export "tail_host") (result i64)
+        (return_call $large {import_args}))
+    )\n""")

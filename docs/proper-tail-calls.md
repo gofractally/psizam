@@ -31,6 +31,18 @@ separate integration prerequisites. Other native backends and LLVM have not yet
 been ported by this checkpoint, so the new long-tail matrix is not qualified on
 those targets.
 
+The following metadata checkpoint consumes the reviewed shared table resolver
+and publishes private import code ranges plus proven native prologue allocation
+upper bounds. Serial and merged JIT2 publication runs on the owning thread after
+workers join. Result arrays are prepared before finalization. AArch64 import
+packing uses full-size SP adjustments and sufficient code capacity for large
+offset instructions. An additional correctness fixture verifies every one of
+2000 scalar imported arguments across ordinary and tail calls. These prologue
+bounds exclude incoming arguments, host C++ fallback arrays and nested native
+host continuations; the integrating physical policy must cover those separately.
+LLVM can publish exact prologue allocations in the same bound fields. Artifact
+format persistence and ABI rejection remain the integrating owner's work.
+
 For frame replacement, let `B` be the current frame pointer, `M` its incoming
 native argument bytes and `K` the target's argument bytes. The retained ordinary
 caller continuation expects completion at `S = B + 16 + M`. Stage the target

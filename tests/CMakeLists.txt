@@ -16,7 +16,8 @@ if(PSIZAM_ENABLE_LLVM)
 endif()
 target_compile_definitions(psizam_proper_tail_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
    PROPER_TAIL_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail.wasm"
-   PROPER_TAIL_LARGE_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wasm")
+   PROPER_TAIL_LARGE_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wasm"
+   PROPER_TAIL_IMPORT_WASM="${CMAKE_CURRENT_BINARY_DIR}/proper_tail_import.wasm")
 add_test(NAME psizam_proper_tail_tests COMMAND psizam_proper_tail_tests)
 set_tests_properties(psizam_proper_tail_tests PROPERTIES TIMEOUT 60 LABELS "execution;resource;abi")
 # WABT removes opt-in switches when proposals become enabled by default.
@@ -40,13 +41,15 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/proper_tail.wasm"
    DEPENDS proper_tail.wat VERBATIM)
 add_custom_target(psizam_proper_tail_fixture DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/proper_tail.wasm")
 add_dependencies(psizam_proper_tail_tests psizam_proper_tail_fixture)
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wasm"
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wasm" "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_import.wasm"
    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/generate_proper_tail_large.py"
-      "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wat"
+      "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wat" "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_import.wat"
    COMMAND "${PSIZAM_WAT2WASM}" ${PSIZAM_WAT2WASM_FEATURE_FLAGS}
       "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wat" -o "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wasm"
+   COMMAND "${PSIZAM_WAT2WASM}" ${PSIZAM_WAT2WASM_FEATURE_FLAGS}
+      "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_import.wat" -o "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_import.wasm"
    DEPENDS generate_proper_tail_large.py VERBATIM)
-add_custom_target(psizam_proper_tail_large_fixture DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wasm")
+add_custom_target(psizam_proper_tail_large_fixture DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_large.wasm" "${CMAKE_CURRENT_BINARY_DIR}/proper_tail_import.wasm")
 add_dependencies(psizam_proper_tail_tests psizam_proper_tail_large_fixture)
 add_subdirectory(validation)
 

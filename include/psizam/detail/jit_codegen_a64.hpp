@@ -37,6 +37,7 @@
 #include <cstring>
 #include <variant>
 #include <vector>
+#include <limits>
 
 namespace psizam::detail {
 
@@ -99,6 +100,14 @@ namespace psizam::detail {
       // (always at offset 16, after _bottom_frame and _top_frame pointers)
       static constexpr int32_t call_depth_offset() { return 16; }
 
+      static uint32_t native_param_bytes(const func_type& ft) {
+         uint64_t bytes = 0;
+         for (uint8_t type : ft.param_types)
+            bytes += type == types::v128 ? 32 : 16;
+         PSIZAM_ASSERT(bytes <= INT32_MAX, wasm_parse_exception, "native parameter area too large");
+         return static_cast<uint32_t>(bytes);
+      }
+
       // ──────── Entry point and error handlers ────────
 
       void emit_entry_and_error_handlers() {
@@ -120,14 +129,33 @@ namespace psizam::detail {
 
          // Host function stubs
          const uint32_t num_imported = _mod.get_imported_functions_size();
+         _import_thunk_offsets.resize(num_imported);
+         _import_thunk_stack_sizes.resize(num_imported);
          if (num_imported > 0) {
-            const std::size_t host_functions_size = 384 * num_imported;
+            std::size_t host_functions_size = 0;
+            for (uint32_t i = 0; i < num_imported; ++i) {
+               const auto& ft = _mod.get_function_type(i);
+               native_param_bytes(ft);
+               const uint64_t budget = 384 + uint64_t(ft.param_types.size()) * 48;
+               PSIZAM_ASSERT(budget <= std::numeric_limits<std::size_t>::max() - host_functions_size,
+                             wasm_parse_exception, "native import code allocation overflow");
+               host_functions_size += static_cast<std::size_t>(budget);
+            }
             buf = _allocator.alloc<unsigned char>(host_functions_size);
             code = buf;
             _code_end = buf + host_functions_size;
             for (uint32_t i = 0; i < num_imported; ++i) {
+               auto* start = code;
                start_function(code, i);
                emit_host_call(i);
+               const auto offset = start - static_cast<unsigned char*>(_code_segment_base);
+               const auto size = code - start;
+               PSIZAM_ASSERT(offset >= 0 && uint64_t(offset) <= UINT32_MAX &&
+                             size > 0 && uint64_t(size) <= UINT32_MAX,
+                             wasm_parse_exception, "native import metadata offset overflow");
+               _import_thunk_offsets[i] = {uint32_t(offset), uint32_t(size)};
+               _import_thunk_stack_sizes[i] =
+                  32 + ((uint64_t(_mod.get_function_type(i).param_types.size()) * 8 + 15) & ~uint64_t{15});
             }
          }
       }
@@ -451,7 +479,7 @@ namespace psizam::detail {
             emit32(0x91400000 | ((imm >> 12) << 10) | (rn << 5) | rd);
          } else {
             emit_mov_imm64(X16, imm);
-            emit32(0x8B100000 | (rn << 5) | rd); // ADD Xd, Xn, X16
+            emit32(0x8B306000 | (rn << 5) | rd); // ADD Xd, Xn, X16, UXTX (supports SP)
          }
       }
 
@@ -463,7 +491,7 @@ namespace psizam::detail {
             emit32(0xD1400000 | ((imm >> 12) << 10) | (rn << 5) | rd);
          } else {
             emit_mov_imm64(X16, imm);
-            emit32(0xCB100000 | (rn << 5) | rd); // SUB Xd, Xn, X16
+            emit32(0xCB306000 | (rn << 5) | rd); // SUB Xd, Xn, X16, UXTX
          }
       }
 
@@ -4751,6 +4779,8 @@ namespace psizam::detail {
       // Function relocation: variant holds either pending branches (vector)
       // or resolved address (void*). Matches JIT1's approach in aarch64.hpp.
       std::vector<std::variant<std::vector<void*>, void*>> _func_relocations;
+      std::vector<std::pair<uint32_t, uint32_t>> _import_thunk_offsets;
+      std::vector<uint64_t> _import_thunk_stack_sizes;
       static constexpr uint32_t MAX_VENEER_ISLANDS = 64; // supports up to ~3.8GB of code
       veneer_island _veneer_islands[MAX_VENEER_ISLANDS];
       uint32_t _num_veneer_islands = 0;
@@ -4786,6 +4816,8 @@ namespace psizam::detail {
 
       relocation_recorder _reloc_recorder;
     public:
+      const auto& get_import_thunk_offsets() const { return _import_thunk_offsets; }
+      const auto& get_import_thunk_stack_sizes() const { return _import_thunk_stack_sizes; }
       const relocation_recorder& relocations() const { return _reloc_recorder; }
 
       void* get_code_segment_base() const { return _code_segment_base; }
