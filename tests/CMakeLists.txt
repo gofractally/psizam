@@ -803,3 +803,16 @@ if(PSIZAM_ENABLE_LLVM)
    add_test(NAME psizam_proper_tail_aot_tests COMMAND psizam_proper_tail_aot_tests)
    set_tests_properties(psizam_proper_tail_aot_tests PROPERTIES TIMEOUT 180 LABELS "compiler;resource;abi;llvm")
 endif()
+
+# Lazy worker initialization must preserve serial compile policy.
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/jit-worker-policy.wasm"
+   COMMAND "${PSIZAM_WAT2WASM}" "${CMAKE_CURRENT_SOURCE_DIR}/jit-worker-policy.wat"
+      -o "${CMAKE_CURRENT_BINARY_DIR}/jit-worker-policy.wasm"
+   DEPENDS jit-worker-policy.wat VERBATIM)
+add_executable(psizam_jit_worker_policy_tests jit_worker_policy_tests.cpp
+   "${CMAKE_CURRENT_BINARY_DIR}/jit-worker-policy.wasm")
+target_link_libraries(psizam_jit_worker_policy_tests PRIVATE psizam psizam-exec Catch2::Catch2)
+target_compile_definitions(psizam_jit_worker_policy_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
+   JIT_WORKER_POLICY_WASM="${CMAKE_CURRENT_BINARY_DIR}/jit-worker-policy.wasm")
+add_test(NAME psizam_jit_worker_policy_tests COMMAND psizam_jit_worker_policy_tests)
+set_tests_properties(psizam_jit_worker_policy_tests PROPERTIES TIMEOUT 60 LABELS "execution;quick;policy")

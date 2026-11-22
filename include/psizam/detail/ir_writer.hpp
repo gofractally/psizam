@@ -441,19 +441,7 @@ namespace psizam::detail {
             _opt_scratch_alloc.use_default_memory();
 #endif
             _codegen.emplace(_allocator, _mod, _codegen_scratch, _enable_backtrace, _stack_limit_is_bytes);
-            // AOT code must match the FP policy recorded in its section.
-            // The parser also forwards a build-dependent default; it must not
-            // override an explicit compilation result's policy.
-            if (_compile_result) {
-               _codegen->set_fp_mode(_compile_result->softfloat
-                                     ? fp_mode::softfloat
-                                     : fp_mode::fast);
-            }
-            else if (_requested_fp) {
-               _codegen->set_fp_mode(*_requested_fp);
-            }
-            _codegen->set_mem_mode(_mem_mode);
-            _codegen->set_checked_kind(_checked_kind);
+            configure_codegen(*_codegen);
             _codegen->emit_entry_and_error_handlers();
          }
       }
@@ -3425,6 +3413,17 @@ namespace psizam::detail {
       uint32_t _num_functions = 0;
       ir_function* _func = nullptr;
       pzam_compile_result* _compile_result = nullptr;
+      // Apply the same immutable policy before serial or worker code emission,
+      // including entry handlers and import thunks. An explicit artifact policy
+      // takes precedence over the parser's build-dependent floating-point default.
+      void configure_codegen(codegen_t& generator) const {
+         if (_compile_result)
+            generator.set_fp_mode(_compile_result->softfloat ? fp_mode::softfloat : fp_mode::fast);
+         else if (_requested_fp)
+            generator.set_fp_mode(*_requested_fp);
+         generator.set_mem_mode(_mem_mode);
+         generator.set_checked_kind(_checked_kind);
+      }
       // Runs only on the owning thread, after codegen or all worker joins.
       // Result arrays are allocated in set_compile_result, not this destructor
       // publication path. No shared-module writes occur in worker constructors.
@@ -3575,6 +3574,7 @@ namespace psizam::detail {
 #endif
                   ws.codegen.emplace(ws.code_alloc, _mod, ws.codegen_scratch,
                                    _enable_backtrace, _stack_limit_is_bytes);
+                  configure_codegen(*ws.codegen);
                   ws.codegen->emit_entry_and_error_handlers();
                   ws.code_base = ws.codegen->get_code_segment_base();
                }
