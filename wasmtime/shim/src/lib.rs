@@ -32,8 +32,9 @@ pub const PZWT_FEATURE_SATURATING_FLOAT_TO_INT: u32 = 1 << 8;
 /// behaviour (fused relaxed madd). `Strict` is the WebAssembly deterministic
 /// profile (unfused relaxed madd); modules are rewritten before compiling to
 /// get it, since wasmtime has no setting for it.
-pub const PZWT_FLOAT_PERFORMANCE: u32 = 0;
-pub const PZWT_FLOAT_STRICT: u32 = 1;
+// Numbered as psizam numbers them.
+pub const PZWT_FLOAT_STRICT: u32 = 0;
+pub const PZWT_FLOAT_PERFORMANCE: u32 = 1;
 
 #[repr(C)]
 pub struct PzwtConfig {
@@ -174,7 +175,7 @@ pub unsafe extern "C" fn pzwt_engine_new(
     error: *mut PzwtError,
 ) -> *mut PzwtEngine {
     let config = &*config;
-    if config.float_profile > PZWT_FLOAT_STRICT {
+    if config.float_profile > PZWT_FLOAT_PERFORMANCE {
         set_error(error, PZWT_ERROR, 0, "unknown float profile".into());
         return std::ptr::null_mut();
     }

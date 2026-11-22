@@ -169,7 +169,8 @@ namespace feature {
 // performance fuses (one rounding), strict follows the WebAssembly
 // deterministic profile (two roundings). wasmtime has no setting for the
 // strict form, so under it modules are rewritten before they are compiled.
-enum class float_profile : uint32_t { performance = 0, strict = 1 };
+// Numbered as psizam::float_profile is.
+enum class float_profile : uint32_t { strict = 0, performance = 1 };
 
 struct engine_options {
    uint32_t      features = feature::simd | feature::relaxed_simd | feature::bulk_memory |

@@ -315,36 +315,19 @@ namespace {
 struct float_options {
    static constexpr auto fp                  = psizam::fp_mode::softfloat;
    static constexpr bool enable_relaxed_simd = true;
-};
-
-// Operations where psizam at this commit is known to differ from wasmtime's
-// deterministic behaviour. Both are deterministic; they made different choices.
-//  - promote/demote: psizam keeps a NaN's sign and payload; wasmtime (and the
-//    WebAssembly deterministic profile) return the positive canonical NaN.
-//  - relaxed_min/max: psizam behaves like pmin/pmax; wasmtime (and the
-//    profile) like regular min/max.
-//  - relaxed_madd/nmadd: psizam is unfused (the profile's choice); wasmtime is
-//    fused. This is the one point where the two float profiles differ.
-const std::set<std::string> rounding_differences = {
-    "f32x4_relaxed_madd", "f32x4_relaxed_nmadd", "f64x2_relaxed_madd", "f64x2_relaxed_nmadd",
-};
-const std::set<std::string> other_differences = {
-    "f32_demote",        "f64_promote",       "f32x4_demote",      "f64x2_promote",
-    "f32x4_relaxed_min", "f32x4_relaxed_max", "f64x2_relaxed_min", "f64x2_relaxed_max",
+   psizam::float_profile float_profile       = psizam::float_profile::strict;
 };
 }  // namespace
 
-TEST_CASE("wasmtime: float and SIMD results agree bit for bit with psizam")
+TEST_CASE("wasmtime: float and SIMD results agree bit for bit with psizam in both profiles")
 {
    auto code = psizam::read_wasm(FLOAT_PARITY_WASM);
-   psizam::wasm_allocator                                      wa;
-   psizam::backend<std::nullptr_t, psizam::jit, float_options> reference(code, &wa,
-                                                                         float_options{});
    struct none {};
    none n;
-   // psizam's relaxed madd is unfused today, which is the strict profile. So
-   // under strict the madd operations must match it too, and under
-   // performance they must not.
+   // The profiles differ only in how relaxed multiply-add rounds. In each one
+   // every operation, over every pair of edge-case inputs, must produce the
+   // same bits on wasmtime as on psizam.
+   uint64_t madd_strict = 0, madd_performance = 0;
    for (auto profile : {wt::float_profile::strict, wt::float_profile::performance})
    {
       const bool strict = profile == wt::float_profile::strict;
@@ -354,31 +337,24 @@ TEST_CASE("wasmtime: float and SIMD results agree bit for bit with psizam")
       wt::runtime<none>  rt(options);
       wt::instance<none> wasmtime(rt, rt.compile(std::span<const uint8_t>(code)), n);
 
-      size_t checked = 0, still_different = 0;
+      float_options psizam_options;
+      psizam_options.float_profile =
+          strict ? psizam::float_profile::strict : psizam::float_profile::performance;
+      psizam::wasm_allocator                                      wa;
+      psizam::backend<std::nullptr_t, psizam::jit, float_options> reference(code, &wa,
+                                                                            psizam_options);
       for (const char* op : float_parity_ops)
       {
          auto ours   = wasmtime.call<uint64_t>(op);
          auto theirs = reference.call_with_return("env", op)->to_ui64();
-         if (other_differences.count(op))
-         {
-            still_different += ours != theirs;
-            continue;
-         }
          INFO("operation " << op);
-         if (rounding_differences.count(op) && !strict)
-         {
-            CHECK(ours != theirs);
-            continue;
-         }
          CHECK(ours == theirs);
-         ++checked;
+         if (std::string_view(op) == "f32x4_relaxed_madd")
+            (strict ? madd_strict : madd_performance) = ours;
       }
-      CHECK(checked == std::size(float_parity_ops) - other_differences.size() -
-                           (strict ? 0 : rounding_differences.size()));
-      WARN((strict ? "strict: " : "performance: ")
-           << still_different << " of " << other_differences.size()
-           << " operations psizam is known to define differently still differ");
    }
+   // And the profiles really are different where they are meant to be.
+   CHECK(madd_strict != madd_performance);
 }
 
 // ── deterministic stack accounting ──────────────────────────────────────────

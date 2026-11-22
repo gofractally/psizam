@@ -31,8 +31,9 @@ struct options : psizam::default_options {
    static constexpr bool     enable_tail_calls          = false;
    static constexpr bool     enable_exception_handling  = false;
    static constexpr uint32_t max_memory_section_elements = 1;
-   uint32_t max_stack_bytes = 65536;
-   uint32_t max_pages       = 512;
+   uint32_t              max_stack_bytes = 65536;
+   uint32_t              max_pages       = 512;
+   psizam::float_profile float_profile   = psizam::float_profile::strict;
    options()
    {
       gas_metering = false;
@@ -98,7 +99,7 @@ int main(int argc, char** argv)
    engine.features = wt::feature::simd | wt::feature::relaxed_simd | wt::feature::bulk_memory |
                      wt::feature::sign_extension | wt::feature::saturating_float_to_int |
                      wt::feature::reference_types | wt::feature::multi_value | wt::feature::threads;
-   // psizam's relaxed madd is unfused, which is the strict profile.
+   // Both engines run the same float profile: strict unless asked otherwise.
    engine.fp           = wt::float_profile::strict;
    engine.native_stack = 64ull << 20;
    int first = 1;
@@ -115,6 +116,9 @@ int main(int argc, char** argv)
       std::ifstream     in(argv[m], std::ios::binary);
       psizam::wasm_code code((std::istreambuf_iterator<char>(in)), {});
       options           policy;
+      policy.float_profile = engine.fp == wt::float_profile::strict
+                                 ? psizam::float_profile::strict
+                                 : psizam::float_profile::performance;
       std::vector<uint32_t> costs;
       try
       {
