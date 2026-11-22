@@ -737,6 +737,8 @@ namespace psizam::detail {
       void parse_memory_type(wasm_code_ptr& code, memory_type& mt) {
          uint8_t raw_flags = *code++;
          PSIZAM_ASSERT(raw_flags <= 0x07, wasm_parse_exception, "invalid memory flags");
+         PSIZAM_ASSERT(!is_memory16_profile(_mod->execution_profile) || !(raw_flags & 0x02),
+                       wasm_parse_exception, "memory16 requires unshared memory");
          mt.is_memory64    = (raw_flags & 0x04) != 0;
          mt.limits.flags   = (raw_flags & 0x01) != 0;  // has_maximum
          if (mt.is_memory64) {

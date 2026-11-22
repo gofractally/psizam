@@ -861,6 +861,24 @@ target_compile_definitions(psizam_memory16_tests PRIVATE CATCH_CONFIG_NO_POSIX_S
 add_test(NAME execution.memory16 COMMAND psizam_memory16_tests)
 set_tests_properties(execution.memory16 PROPERTIES TIMEOUT 300 LABELS "execution;memory16;resource")
 
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/memory16-cli.wasm"
+   COMMAND "${PSIZAM_WAT2WASM}" "${CMAKE_CURRENT_SOURCE_DIR}/memory16_cli.wat"
+      -o "${CMAKE_CURRENT_BINARY_DIR}/memory16-cli.wasm"
+   DEPENDS memory16_cli.wat VERBATIM)
+add_executable(psizam_memory16_cli_artifact memory16_cli_artifact.cpp
+   "${CMAKE_CURRENT_BINARY_DIR}/memory16-cli.wasm")
+target_link_libraries(psizam_memory16_cli_artifact PRIVATE psizam psizam-exec)
+set(_memory16_cli_llvm)
+if(PSIZAM_ENABLE_LLVM)
+   set(_memory16_cli_llvm --llvm)
+endif()
+add_test(NAME memory16_cli
+   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/memory16_cli_test.py"
+      --wasi "$<TARGET_FILE:psizam-wasi>" --compile "$<TARGET_FILE:pzam-compile>"
+      --artifact "$<TARGET_FILE:psizam_memory16_cli_artifact>"
+      --wasm "${CMAKE_CURRENT_BINARY_DIR}/memory16-cli.wasm" ${_memory16_cli_llvm})
+set_tests_properties(memory16_cli PROPERTIES TIMEOUT 300 LABELS "execution;memory16;cli")
+
 # Binary marker emission is independent of the deferred Rust p16 toolchain.
 set(PSIZAM_MEMORY16_SDK_CC "" CACHE FILEPATH "Wasm C compiler for memory16 marker emission checks")
 if(NOT PSIZAM_MEMORY16_SDK_CC AND EXISTS "${PSIZAM_WASI_SDK}/bin/clang")

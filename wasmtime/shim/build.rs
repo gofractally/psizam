@@ -37,6 +37,29 @@ fn locked_wasmtime_source(lock: &str) -> Option<&str> {
     source
 }
 
+fn source_identity<'a>(lock: &'a str, explicit: Option<&'a str>) -> Option<&'a str> {
+    if let Some(locked) = locked_wasmtime_source(lock) {
+        return Some(locked);
+    }
+    // Only a unique path dependency (no Cargo source entry) may use the
+    // caller's source receipt. A registry or invalid git source must not be
+    // relabeled by a stale environment variable.
+    let mut packages = lock.split("[[package]]").skip(1).filter(|package| {
+        package
+            .lines()
+            .any(|line| line.trim() == "name = \"wasmtime\"")
+    });
+    let package = packages.next()?;
+    if packages.next().is_some()
+        || package
+            .lines()
+            .any(|line| line.trim().starts_with("source ="))
+    {
+        return None;
+    }
+    explicit
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=PSIZAM_WASMTIME_BUILD_ID");
     println!("cargo:rerun-if-changed=Cargo.lock");
@@ -45,13 +68,10 @@ fn main() {
         Path::new(&env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("Cargo.lock"),
     )
     .expect("read the shim's locked Wasmtime dependency");
-    let identity = explicit
-        .as_deref()
-        .or_else(|| locked_wasmtime_source(&lock))
-        .expect(
-            "Wasmtime must be a pinned git fork, or a local path build must set \
+    let identity = source_identity(&lock, explicit.as_deref()).expect(
+        "Wasmtime must be a pinned git fork, or a local path build must set \
          PSIZAM_WASMTIME_BUILD_ID to the fork HEAD plus its source-state receipt",
-        );
+    );
     assert!(
         !identity.is_empty() && identity.len() <= 4096 && !identity.chars().any(char::is_control),
         "PSIZAM_WASMTIME_BUILD_ID must be a nonempty single-line source identity"
@@ -61,7 +81,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::locked_wasmtime_source;
+    use super::{locked_wasmtime_source, source_identity};
 
     #[test]
     fn identity_is_the_pinned_runtime_source() {
@@ -71,6 +91,27 @@ mod tests {
              [[package]]\nname = \"wasmtime\"\nversion = \"51.0.0\"\nsource = \"{source}\"\n"
         );
         assert_eq!(locked_wasmtime_source(&lock), Some(source));
+    }
+
+    #[test]
+    fn locked_source_wins_and_only_path_builds_use_explicit_receipts() {
+        let source = "git+https://github.com/gofractally/wasmtime?rev=888ad2b9c6b2889baa2d316709c26a5cda9c340d#888ad2b9c6b2889baa2d316709c26a5cda9c340d";
+        let lock = format!("[[package]]\nname = \"wasmtime\"\nsource = \"{source}\"\n");
+        for explicit in [None, Some("stale-local-development-receipt"), Some("")] {
+            assert_eq!(source_identity(&lock, explicit), Some(source));
+        }
+        let path = "[[package]]\nname = \"wasmtime\"\nversion = \"51.0.0\"\n";
+        assert_eq!(
+            source_identity(path, Some("local-source-receipt")),
+            Some("local-source-receipt")
+        );
+        assert_eq!(source_identity(path, None), None);
+        let registry = "[[package]]\nname = \"wasmtime\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n";
+        assert_eq!(source_identity(registry, Some("stale-receipt")), None);
+        assert_eq!(
+            source_identity(&format!("{path}{path}"), Some("ambiguous")),
+            None
+        );
     }
 
     #[test]

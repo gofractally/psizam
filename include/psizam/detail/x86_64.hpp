@@ -7680,7 +7680,9 @@ namespace psizam::detail {
 
       static void init_memory(void* ctx /*rdi*/, uint32_t x /*esi*/, uint32_t d /*edx*/, uint32_t s /*ecx*/, uint32_t n /*r8d*/) {
          auto* context = static_cast<jit_execution_context<false>*>(ctx);
-         context->init_linear_memory(x, d, s, n);
+         longjmp_on_exception([&]() {
+            context->init_linear_memory(x, d, s, n);
+         });
       }
 
       static void drop_data(void* ctx /*rdi*/, uint32_t x /*esi*/) {

@@ -21,6 +21,7 @@ wasm_code fixture(bool tagged = true) {
 
 struct parallel_options : default_options { uint32_t compile_threads = 4; };
 struct parallel_jit2 : jit2 {};
+struct reuse_options : default_options { uint32_t max_pages = 2; };
 
 uint32_t host_span(std::span<const uint32_t> values) { return values.empty() ? 0 : values.front(); }
 uint32_t host_pointer(const uint32_t* value) { return *value; }
@@ -140,6 +141,108 @@ TEMPLATE_TEST_CASE("memory16: untagged one-page wasm retains ordinary semantics"
    CHECK_THROWS(b.call_with_return("env", "read", 65536u));
 }
 
+TEMPLATE_TEST_CASE("memory16: reinitialization preserves the compiled profile", "[memory16][reuse]", MEMORY16_BACKENDS) {
+   SECTION("tagged and forced profiles survive default guarded options") {
+      for (bool tagged : {false, true}) {
+         CAPTURE(tagged);
+         reuse_options initial;
+         if (!tagged) initial.memory_mode = mem_safety::memory16;
+         wasm_allocator memory;
+         backend<std::nullptr_t, TestType, reuse_options> b(fixture(tagged), &memory, initial);
+         b.call_with_return("env", "store_offset", UINT32_MAX, 0xaabbccddu);
+         reuse_options next;
+         CHECK_NOTHROW(b.initialize(nullptr, next));
+         REQUIRE(memory.is_memory16());
+         CHECK(b.call_with_return("env", "read", 65536u)->to_ui32() == 42);
+         CHECK(b.call_with_return("env", "grow", 1u)->to_ui32() == UINT32_MAX);
+         CHECK(std::all_of(memory.get_base_ptr<uint8_t>() + 65536,
+                          memory.get_base_ptr<uint8_t>() + memory16_accessible_bytes,
+                          [](auto byte) { return byte == 0; }));
+      }
+   }
+   SECTION("ordinary profile switch rejects before changing current state") {
+      auto code = fixture(false);
+      const uint8_t layout[] = {5, 4, 1, 1, 1, 1};
+      auto position = std::search(code.begin(), code.end(), std::begin(layout), std::end(layout));
+      REQUIRE(position != code.end());
+      position[5] = 2;
+      reuse_options initial;
+      wasm_allocator memory;
+      backend<std::nullptr_t, TestType, reuse_options> b(code, &memory, initial);
+      b.call_with_return("env", "store", 0u, 99u);
+      reuse_options invalid;
+      invalid.memory_mode = mem_safety::memory16;
+      invalid.max_pages = 1;
+      CHECK_THROWS_AS(b.initialize(nullptr, invalid), wasm_interpreter_exception);
+      CHECK_FALSE(memory.is_memory16());
+      CHECK(b.call_with_return("env", "size")->to_ui32() == 1);
+      CHECK(b.call_with_return("env", "word", 0u)->to_ui32() == 99);
+      CHECK_THROWS(b.call_with_return("env", "read", 65536u));
+      CHECK(b.call_with_return("env", "grow", 1u)->to_ui32() == 1);
+      CHECK(b.call_with_return("env", "word", 65536u)->to_ui32() == 0);
+      CHECK_NOTHROW(b.initialize(nullptr, initial));
+      CHECK(b.call_with_return("env", "size")->to_ui32() == 1);
+      CHECK_THROWS(b.call_with_return("env", "read", 65536u));
+      CHECK(b.call_with_return("env", "grow", 1u)->to_ui32() == 1);
+      CHECK(b.call_with_return("env", "word", 65536u)->to_ui32() == 0);
+   }
+}
+
+TEST_CASE("memory16: nested host modes restore on return and exception", "[memory16][host][reentry]") {
+   struct state { bool psizam_memory16; };
+   for (bool initial : {false, true}) {
+      state host{initial};
+      {
+         detail::host_memory16_scope<state, true> outer(&host);
+         CHECK(host.psizam_memory16);
+         {
+            detail::host_memory16_scope<state, false> ordinary(&host);
+            CHECK_FALSE(host.psizam_memory16);
+            {
+               detail::host_memory16_scope<state, true> nested(&host);
+               CHECK(host.psizam_memory16);
+            }
+            CHECK_FALSE(host.psizam_memory16);
+         }
+         CHECK(host.psizam_memory16);
+         try {
+            detail::host_memory16_scope<state, false> ordinary(&host);
+            CHECK_FALSE(host.psizam_memory16);
+            throw 1;
+         } catch (int) {}
+         CHECK(host.psizam_memory16);
+      }
+      CHECK(host.psizam_memory16 == initial);
+   }
+}
+
+TEMPLATE_TEST_CASE("memory16: low-level rebind rejects stale profile options", "[memory16][reuse]", MEMORY16_BACKENDS) {
+   auto code = fixture(false);
+   const uint8_t layout[] = {5, 4, 1, 1, 1, 1};
+   auto position = std::search(code.begin(), code.end(), std::begin(layout), std::end(layout));
+   REQUIRE(position != code.end());
+   position[4] = position[5] = 2;
+   // Keep the ordinary module alive beyond the rebound context's lifetime.
+   wasm_allocator ordinary_memory;
+   backend<std::nullptr_t, TestType, reuse_options> ordinary(code, &ordinary_memory);
+   wasm_allocator memory;
+   backend<std::nullptr_t, TestType, reuse_options> small(fixture(), &memory);
+   auto& context = small.get_context();
+   memory.get_base_ptr<uint8_t>()[65536] = 0x55;
+   context.set_module(&ordinary.get_module());
+   CHECK_THROWS_AS(context.reset(), wasm_interpreter_exception);
+   REQUIRE(memory.is_memory16());
+   CHECK(memory.get_current_page() == 1);
+   CHECK(memory.get_base_ptr<uint8_t>()[65536] == 0x55);
+   context.set_mem_mode(mem_safety::guarded);
+   context.set_max_pages(2);
+   CHECK_NOTHROW(context.reset());
+   CHECK_FALSE(memory.is_memory16());
+   CHECK(memory.get_current_page() == 2);
+   CHECK(memory.get_base_ptr<uint8_t>()[0] == 42);
+   CHECK(memory.get_base_ptr<uint8_t>()[65536] == 0);
+}
+
 TEST_CASE("memory16: profiles are explicit and validated before compilation", "[memory16]") {
    auto code = fixture();
    CHECK(read_execution_profile(code) == memory16_p16_v1);
@@ -174,20 +277,37 @@ TEST_CASE("memory16: profiles are explicit and validated before compilation", "[
    REQUIRE(it != code.end());
    it[5] = 2;
    CHECK_THROWS(backend<std::nullptr_t, jit2>(code, nullptr));
+   auto shared = fixture(false);
+   it = std::search(shared.begin(), shared.end(), std::begin(memory), std::end(memory));
+   REQUIRE(it != shared.end());
+   it[3] = 3; // limits include maximum + shared; valid ordinary Wasm
+   CHECK_NOTHROW(backend<std::nullptr_t, jit2>(shared, nullptr));
+   auto tagged_shared = shared;
+   append_execution_profile(tagged_shared, memory16_p16_v1);
+   CHECK_THROWS(backend<std::nullptr_t, jit2>(tagged_shared, nullptr));
+   default_options forced;
+   forced.memory_mode = mem_safety::memory16;
+   CHECK_THROWS(backend<std::nullptr_t, jit2>(shared, nullptr, forced));
 }
 
 TEST_CASE("memory16: pzam carries and validates the execution profile", "[memory16]") {
 #ifdef PSIZAM_ENABLE_LLVM_BACKEND
-   auto tier = GENERATE(pzam_tier_flags::jit2, pzam_tier_flags::llvm_O1,
+   auto tier = GENERATE(pzam_tier_flags::jit1, pzam_tier_flags::jit2, pzam_tier_flags::llvm_O1,
                         pzam_tier_flags::llvm_O2, pzam_tier_flags::llvm_O3);
 #else
-   auto tier = pzam_tier_flags::jit2;
+   auto tier = GENERATE(pzam_tier_flags::jit1, pzam_tier_flags::jit2);
 #endif
    CAPTURE(uint32_t(tier));
    auto bytes = pzam_compile(fixture(), {.arch = pzam_arch_flags::all, .tier = tier});
    auto file = pzam_load(bytes);
    REQUIRE(file.metadata.execution_profile == memory16_p16_v1);
    REQUIRE(file.code_sections.size() == 2);
+   const auto expected_tier = tier == pzam_tier_flags::jit1 ? pzam_opt_tier::jit1
+      : tier == pzam_tier_flags::jit2 ? pzam_opt_tier::jit2
+      : tier == pzam_tier_flags::llvm_O1 ? pzam_opt_tier::llvm_O1
+      : tier == pzam_tier_flags::llvm_O2 ? pzam_opt_tier::llvm_O2 : pzam_opt_tier::llvm_O3;
+   CHECK(file.code_sections[0].opt_tier == uint8_t(expected_tier));
+   CHECK(file.code_sections[1].opt_tier == uint8_t(expected_tier));
    REQUIRE(file.code_sections[0].execution_profile == memory16_p16_v1);
    auto loaded = psizam::detail::load_pzam(file);
    struct free_code { void* ptr; ~free_code() { jit_allocator::instance().free(ptr); } } cleanup{loaded.exec_code};

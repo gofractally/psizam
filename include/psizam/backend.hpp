@@ -677,6 +677,14 @@ namespace psizam {
 
       // Only dynamic options matter.  Parser options will be ignored.
       inline backend& initialize(host_t* host, const Options& new_options) {
+         // Address lowering is fixed at compilation; changing only the context
+         // would disagree with both generated code and the artifact profile.
+         if constexpr (requires { new_options.memory_mode; }) {
+            PSIZAM_ASSERT(new_options.memory_mode != mem_safety::memory16 ||
+                          is_memory16_profile(mod->execution_profile),
+                          wasm_interpreter_exception,
+                          "cannot select memory16 after module compilation");
+         }
          ctx->set_max_call_depth(detail::choose_stack_limit(new_options));
          ctx->set_max_pages(detail::get_max_pages(new_options));
          detail::apply_mem_safety_options(*ctx, new_options);

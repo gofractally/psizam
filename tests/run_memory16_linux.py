@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Qualify a frozen memory16 source on Linux without modifying its checkout.
 
-Uses an existing PSIO checkout and installed tools. New isolated build/results
-directories only; no package installation, fetch, Git mutation or engine fallback.
+Uses an existing PSIO checkout and installed tools. New result directories; an
+explicitly requested build-cache reuse must match the frozen source location.
+No package installation, Git mutation or engine fallback.
 """
 import argparse
 import fcntl
@@ -47,9 +48,12 @@ def main():
     parser.add_argument("--llvm-dir", type=Path)
     parser.add_argument("--sdk-cc", type=Path)
     parser.add_argument("--wasi-sdk", type=Path)
+    parser.add_argument("--wat2wasm", type=Path)
     parser.add_argument("--extra-source", type=Path, action="append", default=[])
-    parser.add_argument("--wasmtime-build-id", required=True)
+    parser.add_argument("--wasmtime-build-id", default="",
+                        help="development path source receipt; omit for lock-derived Git identity")
     parser.add_argument("--jobs", type=int, default=4)
+    parser.add_argument("--reuse-build", action="store_true")
     parser.add_argument("--compiler", default="/usr/bin/clang++-20")
     parser.add_argument("--cargo", default=str(Path.home() / ".cargo/bin/cargo"))
     parser.add_argument("--lock", type=Path, default=Path.home() / ".cache/psibase-foundation-qualification.lock")
@@ -62,8 +66,11 @@ def main():
     results.mkdir(parents=True, exist_ok=False)
     args.lock.parent.mkdir(parents=True, exist_ok=True)
     record = {"status": "starting", "commands": [], "jobs": args.jobs, "source": str(source)}
-    env = dict(os.environ, CARGO_BUILD_JOBS=str(args.jobs), RUSTUP_TOOLCHAIN="1.98.0", GIT_OPTIONAL_LOCKS="0",
-               PSIZAM_WASMTIME_BUILD_ID=args.wasmtime_build_id)
+    env = dict(os.environ, CARGO_BUILD_JOBS=str(args.jobs), RUSTUP_TOOLCHAIN="1.98.0", GIT_OPTIONAL_LOCKS="0")
+    env.pop("PSIZAM_WASMTIME_BUILD_ID", None)
+    if args.wasmtime_build_id:
+        env["PSIZAM_WASMTIME_BUILD_ID"] = args.wasmtime_build_id
+    record["wasmtime_build_id_override"] = args.wasmtime_build_id or None
 
     def save():
         (results / "qualification.json").write_text(json.dumps(record, indent=2) + "\n")
@@ -91,8 +98,18 @@ def main():
             record["before"] = source_identity(source)
             record["psio"] = source_identity(args.psio.resolve())
             record["extra_sources_before"] = {str(p.resolve()): source_identity(p.resolve()) for p in args.extra_source}
+            if args.wat2wasm:
+                tool = args.wat2wasm.resolve()
+                record["wat2wasm"] = {"path": str(tool), "sha256": hashlib.sha256(tool.read_bytes()).hexdigest(),
+                    "version": subprocess.check_output([str(tool), "--version"], text=True).strip()}
             if build.exists() and any(build.iterdir()):
-                raise RuntimeError("use a new isolated build directory")
+                cache = build / "CMakeCache.txt"
+                if not args.reuse_build or not cache.is_file():
+                    raise RuntimeError("use a new isolated build directory or explicit --reuse-build")
+                expected = "CMAKE_HOME_DIRECTORY:INTERNAL=" + str(source)
+                if expected not in cache.read_text().splitlines():
+                    raise RuntimeError("build cache belongs to another source directory")
+                record["reused_cmake_cache_sha256"] = hashlib.sha256(cache.read_bytes()).hexdigest()
             build.mkdir(parents=True, exist_ok=True)
             configure = ["cmake", "-S", str(source), "-B", str(build), "-G", "Ninja",
                 "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_C_COMPILER=/usr/bin/clang-20",
@@ -107,24 +124,39 @@ def main():
                 configure += ["-DPSIZAM_MEMORY16_SDK_CC=" + str(args.sdk_cc.resolve())]
             if args.wasi_sdk:
                 configure += ["-DPSIZAM_WASI_SDK=" + str(args.wasi_sdk.resolve())]
+            if args.wat2wasm:
+                for variable in ("PSIZAM_WAT2WASM", "PSIZAM_CALL_WAT2WASM", "PSIZAM_BACKTRACE_WAT2WASM"):
+                    configure += ["-D" + variable + "=" + str(args.wat2wasm.resolve())]
             run("configure", configure, 180)
             targets = ["psizam_memory16_tests", "psizam_wasmtime_memory16_tests",
-                "psizam_wasmtime_backend_tests", "psizam_engine_parity_tests", "psizam_pzam_compile_tests"]
+                "psizam_wasmtime_backend_tests", "psizam_engine_parity_tests", "psizam_pzam_compile_tests",
+                "psizam_memory16_cli_artifact", "psizam-wasi", "pzam-compile",
+                "psizam_signal_tests", "psizam_thread_stack_tests", "psizam_runtime_release_tests",
+                "psizam_jit1_backtrace_tests", "psizam_table_limit_tests", "psizam_byte_stack_tests",
+                "psizam_jit_worker_policy_tests", "psizam_regalloc_tests", "psizam_pzam_format_tests",
+                "unit_tests", "jit2_tests"]
             if args.llvm_dir:
                 targets += ["psizam_private_atomic_tests"]
             run("build", ["cmake", "--build", str(build), "--parallel", str(args.jobs), "--target", *targets], 3600)
-            tests = "^(execution\\.memory16|execution\\.wasmtime-memory16|execution\\.wasmtime-backend|execution\\.engine-parity|execution\\.private-atomics|pzam_compile_api|memory16_sdk_emission)$"
+            tests = "^(execution\\.memory16|execution\\.wasmtime-memory16|execution\\.wasmtime-backend|execution\\.engine-parity|execution\\.private-atomics|pzam_compile_api|memory16_sdk_emission|memory16_cli|psizam_signal_tests|psizam_thread_stack_tests|runtime_release|execution\\.jit1-backtrace|execution\\.table-growth-policy|execution\\.byte-stack|psizam_jit_worker_policy_tests|execution\\.regalloc|pzam_format)$"
             run("tests", ["ctest", "--test-dir", str(build), "--verbose", "--output-on-failure", "--no-tests=error", "--parallel", "2", "-R", tests], 1800)
+            run("unit-tests", [str(build / "bin/unit_tests")], 600)
+            run("jit2-tests", [str(build / "bin/jit2_tests")], 600)
             record["status"] = "passed"
         except Exception as error:
             record.update(status="failed", error=str(error))
         finally:
             record["after"] = source_identity(source)
+            record["psio_after"] = source_identity(args.psio.resolve())
             record["extra_sources_after"] = {str(p.resolve()): source_identity(p.resolve()) for p in args.extra_source}
             if record.get("before", {}).get("source_sha256") != record["after"]["source_sha256"]:
                 record.update(status="failed", error="source changed during qualification")
             if record.get("extra_sources_before") != record["extra_sources_after"]:
                 record.update(status="failed", error="dependency source changed during qualification")
+            if record.get("psio") != record["psio_after"]:
+                record.update(status="failed", error="PSIO source changed during qualification")
+            if args.wat2wasm and record.get("wat2wasm", {}).get("sha256") != hashlib.sha256(args.wat2wasm.resolve().read_bytes()).hexdigest():
+                record.update(status="failed", error="WAT compiler changed during qualification")
             save()
     return 0 if record["status"] == "passed" else 1
 

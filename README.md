@@ -12,6 +12,12 @@ preparation, not a newly certified stable release. See [extraction](docs/extract
 for source provenance and [compiler bootstrap](docs/compiler-bootstrap.md) for the
 Wasm compiler chain and its verification gate.
 
+The opt-in [memory16 execution profile](docs/memory16.md) uses compact private
+memory with deterministic address masking and padding. Select it through the
+native runtime options, `--memory16` in the command-line tools, or the
+[Wasmtime backend's runtime option](docs/wasmtime-memory16.md). Untagged modules
+use ordinary WebAssembly semantics by default.
+
 ## Build independently
 
 Install the independent psio C++ package first. Dependencies are CMake 3.20+,

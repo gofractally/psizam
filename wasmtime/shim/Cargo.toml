@@ -9,11 +9,11 @@ description = "C ABI over wasmtime for the psizam wasmtime backend"
 [lib]
 crate-type = ["staticlib"]
 
-# The wasmtime version is consensus-relevant: pin it exactly. The psizam fork
-# (deterministic stack accounting, strict relaxed-madd profile) will be wired in
-# through [patch.crates-io] here; until then only upstream behaviour is exposed.
+# Pin both the package version and the fork revision. Memory16 admission,
+# address lowering and compact allocation belong to the canonical fork;
+# the revision also participates in the compiled-artifact identity.
 [dependencies]
-wasmtime = { path = "../../../wasmtime/crates/wasmtime", version = "=51.0.0", default-features = false, features = [
+wasmtime = { git = "https://github.com/gofractally/wasmtime", rev = "888ad2b9c6b2889baa2d316709c26a5cda9c340d", version = "=51.0.0", default-features = false, features = [
     "runtime",
     "cranelift",
     "std",

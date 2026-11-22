@@ -1,7 +1,10 @@
 # Wasmtime memory16 integration
 
-The Wasmtime backend uses the psizam Wasmtime fork through the Rust shim in
-`wasmtime/shim`. Memory16 changes execution of the Wasm32 instruction set;
+The Wasmtime backend uses the [gofractally Wasmtime fork](https://github.com/gofractally/wasmtime)
+through the Rust shim in `wasmtime/shim`. Enable the native backend with
+`-DPSIZAM_ENABLE_WASMTIME=ON`. Cargo fetches the exact fork revision pinned in
+the shim's manifest and lockfile; no neighboring Wasmtime checkout is required.
+Memory16 changes execution of the Wasm32 instruction set;
 it does not compile Rust guest code with 16-bit pointers.
 
 `psizam::wasmtime::engine_options::memory16` is false by default. A valid
@@ -21,6 +24,11 @@ wait traps on unshared memory; notify returns 0 with memory16's masked,
 unaligned address semantics. Shared-memory execution remains disabled.
 
 `instance::memory()` and host callback spans expose only logical memory.
+In memory16, an empty host span accepts the endpoint 65536 but rejects larger
+addresses. Ordinary mode retains its existing empty-span behavior. The shim
+passes the actual callback caller's profile through its C ABI, including for
+unexported memory in start functions and reentry; the engine override is not
+used to infer a caller's mode.
 `instance::memory_storage()` exposes complete mutable storage for trusted
 snapshot/restore code, including memory16 padding. For ordinary memories it
 returns the normal logical memory span. Storage spans must not outlive the

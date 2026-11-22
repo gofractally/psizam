@@ -136,7 +136,7 @@ fn report(out: *mut PzwtError, error: &Error) -> i32 {
 /// Bump when the module rewriting in stack_meter.rs changes what is compiled.
 const REWRITE_REVISION: u32 = 1;
 /// The C ABI and memory16-v1 runtime contract are part of artifact identity.
-const SHIM_ABI_REVISION: u32 = 2;
+const SHIM_ABI_REVISION: u32 = 3;
 const MEMORY16_PROFILE_REVISION: u32 = 1;
 
 /// Identifies what this build compiles a module into: the wasmtime version,
@@ -751,6 +751,8 @@ pub type PzwtHostFn = unsafe extern "C" fn(
     host: *mut c_void,
     memory: *mut u8,
     memory_len: usize,
+    // Actual caller memory profile, independent of the engine override.
+    memory16: u8,
     values: *mut ValRaw,
 ) -> i32;
 
@@ -820,9 +822,23 @@ pub unsafe extern "C" fn pzwt_linker_new(
                     let data = caller.data();
                     (data.host, data.memory)
                 };
-                let (base, len) = match memory {
-                    Some(m) if needs_memory => (m.data_ptr(&caller), m.data_size(&caller)),
-                    _ => (std::ptr::null_mut(), 0),
+                // A start function can call a host before Data.memory has
+                // been cached, and its memory need not be exported. Resolve
+                // memory16 from the actual caller instance, never the source
+                // override or a previously cached store memory's profile.
+                let actual_memory16 = if needs_memory {
+                    caller.psizam_memory16_memory()
+                } else {
+                    None
+                };
+                let memory = actual_memory16.or(memory);
+                let (base, len, memory16) = match memory {
+                    Some(m) if needs_memory => (
+                        m.data_ptr(&caller),
+                        m.data_size(&caller),
+                        u8::from(actual_memory16.is_some()),
+                    ),
+                    _ => (std::ptr::null_mut(), 0, 0),
                 };
                 let mut context = caller.as_context_mut();
                 let status = callback(
@@ -831,6 +847,7 @@ pub unsafe extern "C" fn pzwt_linker_new(
                     host,
                     base,
                     len,
+                    memory16,
                     values.as_mut_ptr() as *mut ValRaw,
                 );
                 if status == 0 {
@@ -878,7 +895,8 @@ pub unsafe extern "C" fn pzwt_instantiate(
             // memory under a reserved name; otherwise use the usual one.
             let memory = instance
                 .get_memory(&mut *cx, stack_meter::MEMORY_EXPORT)
-                .or_else(|| instance.get_memory(&mut *cx, "memory"));
+                .or_else(|| instance.get_memory(&mut *cx, "memory"))
+                .or_else(|| instance.psizam_memory16_memory(&*cx));
             cx.data_mut().memory = memory;
             let stack = instance.get_global(&mut *cx, stack_meter::STACK_EXPORT);
             cx.data_mut().stack = stack;

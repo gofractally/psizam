@@ -291,6 +291,9 @@ namespace psizam::detail {
       template<typename Module>
       inline void reset(Module& mod) {
          PSIZAM_ASSERT(_mod->error == nullptr, wasm_interpreter_exception, _mod->error);
+         PSIZAM_ASSERT(_mem_mode != mem_safety::memory16 || is_memory16_profile(mod.execution_profile),
+                       wasm_interpreter_exception,
+                       "memory16 context requires a matching compiled profile");
          if (is_memory16_profile(mod.execution_profile)) {
             _mem_mode = mem_safety::memory16;
             _max_pages = std::min(_max_pages, uint32_t{1});

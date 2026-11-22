@@ -231,7 +231,7 @@ namespace psizam {
             e.memory16_trampoline = &detail::memory16_host_call<&detail::fast_void_trampoline<Func, host_cls, ret, args, true>, void>;
             e.memory16_rev_trampoline = &detail::memory16_host_call<&detail::fast_void_trampoline_rev<Func, host_cls, ret, args, true>, void>;
          } else {
-            e.trampoline = &detail::slow_void_trampoline<Func, host_cls, ret, args>;
+            e.trampoline = &detail::slow_void_trampoline<Func, host_cls, ret, args, false, TypeConverter>;
             e.memory16_trampoline = reinterpret_cast<host_trampoline_t>(
                &detail::memory16_host_call<&slow_trampoline_fwd<Func, host_cls, TypeConverter, ret, args, std::tuple<>, true>, host_cls>);
             e.memory16_rev_trampoline = reinterpret_cast<host_trampoline_t>(

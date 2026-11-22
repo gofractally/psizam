@@ -9,6 +9,8 @@
 #include "memory16_test_support.hpp"
 
 #include <cstring>
+#include <functional>
+#include <iostream>
 #include <optional>
 #include <string_view>
 
@@ -18,10 +20,14 @@ using namespace psizam;
 
 struct host {
    uint32_t calls = 0;
+   bool request_far = false;
+   std::function<uint32_t()> nested;
    uint32_t bytes(std::span<const char> value) {
       ++calls;
       return value.empty() ? 0 : uint8_t(value.front());
    }
+   uint32_t go_far() { return request_far; }
+   uint32_t reenter() { return nested(); }
 };
 
 wt::engine_options options(bool force = false) {
@@ -84,6 +90,15 @@ constexpr selection selections[] = {
    {memory16_p16_v1, false}, {memory16_p32_v1, false},
    {0, true}, {memory16_p16_v1, true}, {memory16_p32_v1, true},
 };
+}
+
+TEST_CASE("memory16: shipping identity binds the canonical fork and shim ABI", "[memory16][artifact][release]") {
+   const auto identity = wt::build_identity();
+   std::cout << "Wasmtime build identity: " << identity << '\n';
+   CHECK(identity.find("git+https://github.com/gofractally/wasmtime") != std::string_view::npos);
+   CHECK(identity.find("888ad2b9c6b2889baa2d316709c26a5cda9c340d") != std::string_view::npos);
+   CHECK(identity.find(" ABI 3 ") != std::string_view::npos);
+   CHECK(identity.find(" memory16-v1;") != std::string_view::npos);
 }
 
 TEST_CASE("memory16: native and Wasmtime agree on all physical bytes", "[memory16][parity]") {
@@ -220,4 +235,78 @@ TEST_CASE("memory16: malformed profiles and unsupported memory shapes reject", "
    REQUIRE(position != code.end());
    position[2] = 0x80; position[3] = 0x80; position[4] = 4;
    rejects(code);
+   code = fixture(0);
+   position = std::search(code.begin(), code.end(), std::begin(memory), std::end(memory));
+   REQUIRE(position != code.end());
+   position[3] = 3;
+   CHECK_NOTHROW(runtime.compile(code)); // ordinary shared memory is unchanged
+   wt::runtime<host> forced(options(true));
+   CHECK_THROWS(forced.compile(code));
+   append_execution_profile(code, memory16_p32_v1);
+   CHECK_THROWS(runtime.compile(code));
+}
+
+TEST_CASE("memory16: unexported start callbacks use actual caller bounds", "[memory16][host][start]") {
+   for (auto selected : selections) {
+      CAPTURE(selected.profile, selected.force);
+      wt::runtime<host> runtime(options(selected.force));
+      runtime.add<&host::bytes>("env", "span").add<&host::go_far>("env", "go_far")
+         .add<&host::reenter>("env", "reenter");
+      auto module = runtime.compile(fixture(selected.profile, MEMORY16_PARITY_START_WASM));
+      host valid;
+      wt::instance<host> instance(runtime, module, valid);
+      CHECK(valid.calls == 2); // nonempty data + logical end with zero length
+      REQUIRE(instance.memory().size() == memory16_test::logical_bytes);
+      auto image = instance.memory_storage();
+      REQUIRE(image.size() == memory16_test::physical_bytes);
+      CHECK(uint8_t(image[65532]) == 42);
+      const std::vector<char> snapshot(image.begin(), image.end());
+      CHECK(std::all_of(image.begin() + 65536, image.end(), [](auto byte) { return byte == 0; }));
+      image[65536] = 0x33;
+      image.back() = 0x55;
+      host fresh_host;
+      wt::instance<host> fresh(runtime, module, fresh_host);
+      auto fresh_image = fresh.memory_storage();
+      REQUIRE(fresh_image.size() == snapshot.size());
+      CHECK(std::equal(snapshot.begin(), snapshot.end(), fresh_image.begin()));
+      CHECK(image[65536] == 0x33);
+      CHECK(image.back() == 0x55);
+      std::copy(snapshot.begin(), snapshot.end(), image.begin());
+      CHECK(std::equal(snapshot.begin(), snapshot.end(), image.begin()));
+      CHECK(instance.call<uint32_t>("empty_end") == 0);
+      CHECK_THROWS_AS(instance.call<uint32_t>("empty_far"), wt::host_memory_error);
+      host invalid;
+      invalid.request_far = true;
+      CHECK_THROWS_AS((wt::instance<host>(runtime, module, invalid)), wt::host_memory_error);
+      CHECK(invalid.calls == 2); // rejected before the third C++ host callback
+   }
+   wt::runtime<host> ordinary{options()};
+   ordinary.add<&host::bytes>("env", "span").add<&host::go_far>("env", "go_far")
+      .add<&host::reenter>("env", "reenter");
+   auto module = ordinary.compile(fixture(0, MEMORY16_PARITY_START_WASM));
+   host h;
+   h.request_far = true;
+   wt::instance<host> instance(ordinary, module, h);
+   CHECK(h.calls == 3);
+   CHECK(instance.call<uint32_t>("empty_far") == 0); // preserve ordinary policy
+}
+
+TEST_CASE("memory16: host reentry restores each actual caller's bounds", "[memory16][host][reentry]") {
+   wt::runtime<host> runtime{options()};
+   runtime.add<&host::bytes>("env", "span").add<&host::go_far>("env", "go_far")
+      .add<&host::reenter>("env", "reenter");
+   auto standard = runtime.compile(fixture(0, MEMORY16_PARITY_START_WASM));
+   auto small = runtime.compile(fixture(memory16_p32_v1, MEMORY16_PARITY_START_WASM));
+   host h;
+   wt::instance<host> ordinary(runtime, standard, h);
+   wt::instance<host> memory16(runtime, small, h);
+   h.nested = [&] { return ordinary.call<uint32_t>("empty_far"); };
+   CHECK(memory16.call<uint32_t>("reenter") == 0);
+   CHECK_THROWS_AS(memory16.call<uint32_t>("empty_far"), wt::host_memory_error);
+   h.nested = [&] { return memory16.call<uint32_t>("empty_end"); };
+   CHECK(memory16.call<uint32_t>("reenter") == 0); // same-instance nested call
+   h.nested = [&] { return memory16.call<uint32_t>("empty_far"); };
+   CHECK_THROWS_AS(ordinary.call<uint32_t>("reenter"), wt::host_memory_error);
+   CHECK(ordinary.call<uint32_t>("empty_far") == 0);
+   CHECK_THROWS_AS(memory16.call<uint32_t>("empty_far"), wt::host_memory_error);
 }

@@ -69,7 +69,7 @@ namespace abi {
       uint8_t  v128[16];
    };
    using PzwtHostFn = int32_t (*)(void* env, PzwtContext*, void* host, uint8_t* memory,
-                                  size_t memory_len, PzwtValue* values);
+                                  size_t memory_len, uint8_t memory16, PzwtValue* values);
    struct PzwtImport {
       const char*    module;
       size_t         module_len;
@@ -214,6 +214,7 @@ namespace detail {
    struct memory_view {
       uint8_t* base;
       size_t   size;
+      bool     memory16 = false;
    };
 
    // How one C++ parameter or result maps onto wasm values.
@@ -255,8 +256,8 @@ namespace detail {
       static void store(abi::PzwtValue* v, double x) { std::memcpy(&v->f64, &x, 8); }
    };
    // A span is (i32 pointer, i32 length) into the caller's linear memory.
-   // An empty span is accepted wherever it points, matching psizam's engines,
-   // which validate by touching the last byte.
+   // Ordinary mode accepts an empty span wherever it points. Memory16 checks
+   // the complete logical range, including a zero-length range's start.
    template <typename T, std::size_t Extent>
    struct value_traits<std::span<T, Extent>,
                        std::enable_if_t<Extent == std::dynamic_extent && alignof(T) == 1>> {
@@ -266,9 +267,12 @@ namespace detail {
          uint64_t ptr   = static_cast<uint32_t>(v[0].i32);
          uint64_t count = static_cast<uint32_t>(v[1].i32);
          if (count == 0)
+         {
+            if (m.memory16 && ptr > m.size)
+               throw host_memory_error("host span is outside linear memory");
             return {};
-         uint64_t bytes = count * sizeof(T);
-         if (ptr > m.size || bytes > m.size - ptr)
+         }
+         if (ptr > m.size || count > (m.size - ptr) / sizeof(T))
             throw host_memory_error("host span is outside linear memory");
          return {reinterpret_cast<T*>(m.base + ptr), static_cast<size_t>(count)};
       }
@@ -320,14 +324,14 @@ namespace detail {
       static constexpr bool needs_memory = (reads_memory<std::decay_t<Args>> || ...);
 
       static int32_t invoke(void*, abi::PzwtContext* context, void* host, uint8_t* memory,
-                            size_t memory_len, abi::PzwtValue* values) noexcept
+                            size_t memory_len, uint8_t memory16, abi::PzwtValue* values) noexcept
       {
          auto* state = static_cast<store_state*>(host);
          auto* saved = std::exchange(state->active, context);
          int32_t status = 0;
          try
          {
-            memory_view m{memory, memory_len};
+            memory_view m{memory, memory_len, memory16 != 0};
             size_t      slot = 0;
             // Braced initialization fixes left-to-right evaluation, so each
             // argument reads the slots that follow the previous one.

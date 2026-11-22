@@ -92,6 +92,14 @@ unmarked libraries cannot be verified from this metadata alone.
 explicit valid p16/p32 module marker takes precedence over this fallback. The
 default remains `mem_safety::guarded`, and an untagged one-page module retains
 ordinary WebAssembly semantics.
+This selection is immutable after compilation or artifact loading.
+`backend::initialize(host, new_options)` rejects an attempt to switch an
+ordinary compiled module to memory16 before changing runtime state. A stored
+memory16 profile remains active when initialized with default/guarded options.
+Low-level users rebinding an execution context to an ordinary module must
+reapply its ordinary memory mode and page limit before resetting it. Reset
+rejects a leftover memory16 mode paired with an ordinary compiled profile
+before changing allocator or execution state.
 
 ## AOT files and testing
 
@@ -101,6 +109,10 @@ compact memory automatically. Existing exact-version validation invalidates
 older cached artifacts; rebuild them when upgrading. The canonical PZAM API
 compiles each requested architecture and tier independently and preserves the
 current FP, private guest ABI, native source ranges and embedder identity.
+PZAM contains compiled code and module initialization metadata, not a live
+instance snapshot. A runtime snapshot must separately preserve all 131086
+physical bytes, including writable padding; a fresh instance starts with those
+bytes zeroed before active data initialization.
 
 The memory16 qualification suite exercises interpreter, JIT1, JIT2, parallel
 JIT2, LLVM when available, and saved native artifacts: wrap boundaries, live

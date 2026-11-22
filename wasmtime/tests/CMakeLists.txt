@@ -37,13 +37,19 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/memory16-host-bytes.wasm"
    COMMAND "${PSIZAM_WAT2WASM}" "${PROJECT_SOURCE_DIR}/tests/memory16_host_bytes.wat"
       -o "${CMAKE_CURRENT_BINARY_DIR}/memory16-host-bytes.wasm"
    DEPENDS "${PROJECT_SOURCE_DIR}/tests/memory16_host_bytes.wat" VERBATIM)
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/memory16-host-start.wasm"
+   COMMAND "${PSIZAM_WAT2WASM}" "${PROJECT_SOURCE_DIR}/tests/memory16_host_start.wat"
+      -o "${CMAKE_CURRENT_BINARY_DIR}/memory16-host-start.wasm"
+   DEPENDS "${PROJECT_SOURCE_DIR}/tests/memory16_host_start.wat" VERBATIM)
 add_executable(psizam_wasmtime_memory16_tests memory16_parity_tests.cpp
    "${CMAKE_CURRENT_BINARY_DIR}/memory16-parity.wasm"
-   "${CMAKE_CURRENT_BINARY_DIR}/memory16-host-bytes.wasm")
+   "${CMAKE_CURRENT_BINARY_DIR}/memory16-host-bytes.wasm"
+   "${CMAKE_CURRENT_BINARY_DIR}/memory16-host-start.wasm")
 target_include_directories(psizam_wasmtime_memory16_tests PRIVATE "${PROJECT_SOURCE_DIR}/tests")
 target_link_libraries(psizam_wasmtime_memory16_tests PRIVATE psizam psizam-exec psizam-wasmtime Catch2::Catch2)
 target_compile_definitions(psizam_wasmtime_memory16_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
    MEMORY16_PARITY_WASM="${CMAKE_CURRENT_BINARY_DIR}/memory16-parity.wasm"
-   MEMORY16_PARITY_HOST_WASM="${CMAKE_CURRENT_BINARY_DIR}/memory16-host-bytes.wasm")
+   MEMORY16_PARITY_HOST_WASM="${CMAKE_CURRENT_BINARY_DIR}/memory16-host-bytes.wasm"
+   MEMORY16_PARITY_START_WASM="${CMAKE_CURRENT_BINARY_DIR}/memory16-host-start.wasm")
 add_test(NAME execution.wasmtime-memory16 COMMAND psizam_wasmtime_memory16_tests)
 set_tests_properties(execution.wasmtime-memory16 PROPERTIES TIMEOUT 300 LABELS "execution;wasmtime;memory16;resource")

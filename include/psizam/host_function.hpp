@@ -647,19 +647,19 @@ namespace psizam {
       }
 
       // Opt-in hook for hosts which consume raw integer offsets (e.g. WASI).
-      // Only memory16 trampolines change the flag; nested calls restore it.
+      // Every trampoline sets its actual mode; nested calls restore it.
       template<typename Cls, bool Memory16>
       struct host_memory16_scope {
          Cls* host;
          bool previous = false;
          explicit host_memory16_scope(Cls* host) : host(host) {
-            if constexpr (Memory16 && requires { host->psizam_memory16; }) {
+            if constexpr (requires { host->psizam_memory16; }) {
                previous = host->psizam_memory16;
-               host->psizam_memory16 = true;
+               host->psizam_memory16 = Memory16;
             }
          }
          ~host_memory16_scope() {
-            if constexpr (Memory16 && requires { host->psizam_memory16; })
+            if constexpr (requires { host->psizam_memory16; })
                host->psizam_memory16 = previous;
          }
       };
