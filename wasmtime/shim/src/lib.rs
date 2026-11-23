@@ -50,6 +50,14 @@ pub struct PzwtConfig {
     /// Force memory16-v1/p32 on untagged modules. Declared profiles are still
     /// honored when this is zero. This changes execution, not the guest ABI.
     pub memory16: u8,
+    /// If nonzero, instances draw their memory and table from this many
+    /// preallocated slots instead of mapping and unmapping them each time. A
+    /// slot stays warm for the module that last used it. Instantiation fails,
+    /// without running anything, when no slot is free or the module does not
+    /// fit one; the embedder then needs an engine without a pool.
+    pub pool_instances: u32,
+    /// Table elements each pooled slot can hold.
+    pub pool_table_elements: u32,
 }
 
 pub const PZWT_OK: i32 = 0;
@@ -136,7 +144,7 @@ fn report(out: *mut PzwtError, error: &Error) -> i32 {
 /// Bump when the module rewriting in stack_meter.rs changes what is compiled.
 const REWRITE_REVISION: u32 = 1;
 /// The C ABI and memory16-v1 runtime contract are part of artifact identity.
-const SHIM_ABI_REVISION: u32 = 3;
+const SHIM_ABI_REVISION: u32 = 4;
 const MEMORY16_PROFILE_REVISION: u32 = 1;
 
 /// Identifies what this build compiles a module into: the wasmtime version,
@@ -199,6 +207,22 @@ pub unsafe extern "C" fn pzwt_engine_new(
     // each module's declared/resolved profile in its own memory metadata, so
     // ordinary and memory16 instances can share this Engine and Linker.
     c.psizam_memory16(config.memory16 != 0);
+
+    if config.pool_instances != 0 {
+        let slots = config.pool_instances;
+        let mut pool = PoolingAllocationConfig::new();
+        pool.total_core_instances(slots)
+            .total_memories(slots)
+            .total_tables(slots)
+            .total_component_instances(0)
+            .total_gc_heaps(0)
+            // Any wasm32 memory fits; the store's limiter enforces the real cap.
+            .max_memory_size(1usize << 32)
+            .table_elements(config.pool_table_elements as usize)
+            .max_core_instance_size(4 << 20)
+            .max_unused_warm_slots(slots);
+        c.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    }
 
     // Deterministic floating point: positive canonical NaN from every float
     // operation, and one fixed behaviour for each relaxed SIMD instruction.

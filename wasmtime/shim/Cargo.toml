@@ -25,6 +25,8 @@ wasmtime = { git = "https://github.com/gofractally/wasmtime", rev = "3bc32a5e2af
     # null collector never collects, which is all that needs.
     "gc",
     "gc-null",
+    # Preallocated instance slots (engine option pool_instances).
+    "pooling-allocator",
 ] }
 
 # Used to rewrite modules for deterministic stack accounting. Must match the

@@ -797,3 +797,55 @@ TEST_CASE("wasmtime: wide arithmetic matches 128-bit host arithmetic, plain and 
       CHECK(mismatches == 0);
    }
 }
+
+TEST_CASE("wasmtime: pooled instances start from the module's initial state and fall back when the pool cannot serve")
+{
+   struct no_host {};
+   constexpr std::string_view counter = R"((module
+     (memory (export "memory") 1 4)
+     (data (i32.const 8) "\07\00\00\00")
+     (global $g (mut i32) (i32.const 3))
+     (func (export "bump") (result i32)
+       (i32.store (i32.const 8) (i32.add (i32.load (i32.const 8)) (i32.const 1)))
+       (i32.store (i32.const 60000) (i32.const 99))
+       (global.set $g (i32.add (global.get $g) (i32.const 1)))
+       (i32.add (i32.load (i32.const 8)) (global.get $g)))
+     (func (export "far") (result i32) (i32.load (i32.const 60000)))
+     (func (export "grow") (result i32) (memory.grow (i32.const 2)))
+     (func (export "pages") (result i32) (memory.size))))";
+   wt::engine_options pooled_options;
+   pooled_options.pool_instances = 2;
+   wt::runtime<no_host> pooled(pooled_options);
+   wt::runtime<no_host> on_demand;
+   const auto           module = pooled.compile(counter);
+   no_host              h;
+
+   // Every instance sees the data segment, a zeroed heap, the initial global
+   // and the initial size, whatever the slot's previous user did.
+   for (int round = 0; round < 50; ++round)
+   {
+      wt::instance<no_host> inst(pooled, module, h);
+      REQUIRE(inst.call<uint32_t>("far") == 0);
+      REQUIRE(inst.call<uint32_t>("pages") == 1);
+      REQUIRE(inst.call<uint32_t>("bump") == 12);
+      REQUIRE(inst.call<uint32_t>("bump") == 14);
+      if (round % 2)
+         REQUIRE(inst.call<uint32_t>("grow") == 1);
+   }
+
+   // Two slots: a third live instance cannot be created, and nothing ran.
+   {
+      wt::instance<no_host> first(pooled, module, h);
+      wt::instance<no_host> second(pooled, module, h);
+      CHECK_THROWS_AS((wt::instance<no_host>(pooled, module, h)), wt::instantiation_error);
+      // The same compiled code runs in a runtime without a pool.
+      const auto            artifact = module.serialize();
+      wt::instance<no_host> third(on_demand, on_demand.load(artifact), h);
+      CHECK(third.call<uint32_t>("bump") == 12);
+      CHECK(first.call<uint32_t>("bump") == 12);
+      CHECK(second.call<uint32_t>("bump") == 12);
+   }
+   // The slots are free again.
+   wt::instance<no_host> again(pooled, module, h);
+   CHECK(again.call<uint32_t>("bump") == 12);
+}

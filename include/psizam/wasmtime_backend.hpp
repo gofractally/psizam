@@ -50,6 +50,8 @@ namespace abi {
       uint64_t native_stack;
       uint8_t  epoch_interruption;
       uint8_t  memory16;
+      uint32_t pool_instances;
+      uint32_t pool_table_elements;
    };
    struct PzwtError {
       int32_t status;
@@ -143,6 +145,12 @@ enum class trap_kind : int32_t {
    atomic_wait_non_shared    = 12,
 };
 
+// No instance could be created, and no wasm ran: the module does not link, or
+// the runtime's instance pool has no free slot or cannot hold this module.
+struct instantiation_error : error {
+   using error::error;
+};
+
 struct trap : error {
    trap_kind kind;
    trap(trap_kind kind, const std::string& what) : error(what), kind(kind) {}
@@ -190,6 +198,15 @@ struct engine_options {
    // Force memory16-v1 with the p32 ABI for untagged modules. Valid module
    // declarations select their own profile even when this override is false.
    bool     memory16           = false;
+   // If nonzero, instances take their memory and table from this many
+   // preallocated slots; a slot stays warm for the module that last used it,
+   // so creating an instance of a recently used module maps nothing. Creating
+   // an instance then fails with `error` (never a trap, and before any wasm
+   // runs) when no slot is free or the module does not fit a slot, for
+   // example a memory16 module. Keep a second runtime without a pool for
+   // those; compiled modules move between the two with serialize/load.
+   uint32_t pool_instances      = 0;
+   uint32_t pool_table_elements = 20000;
 };
 
 struct instance_limits {
@@ -482,7 +499,8 @@ class runtime {
       abi::PzwtConfig config{options.features, static_cast<uint32_t>(options.fp),
                              options.max_wasm_stack ? options.max_wasm_stack
                                                     : options.native_stack / 2,
-                             options.native_stack, options.epoch_interruption, options.memory16};
+                             options.native_stack, options.epoch_interruption, options.memory16,
+                             options.pool_instances, options.pool_table_elements};
       abi::PzwtError  e{};
       auto*           p = abi::pzwt_engine_new(&config, &e);
       if (!p)
@@ -587,7 +605,15 @@ class instance {
       abi::PzwtError e{};
       auto* p = abi::pzwt_instantiate(state_->active, rt.linker(), m.ptr_.get(), &e);
       if (!p)
+      {
+         if (e.status != 1 && e.status != 2)
+         {
+            std::string message = e.message ? e.message : "wasmtime could not create the instance";
+            abi::pzwt_string_free(e.message);
+            throw instantiation_error(message);
+         }
          fail(e);
+      }
       instance_.reset(p);
    }
 
