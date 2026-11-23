@@ -1,11 +1,63 @@
 # psizam Known Issues
 
+## Engine status (2026-11-23)
+
+psibase runs services on the **wasmtime backend** (`wasmtime/`), and that is the
+engine changes are qualified on. **JIT2 is not planned for use**: its known
+problems are written down here and are not scheduled to be fixed. LLVM AOT and
+LLVM JIT are paused. The interpreter and JIT1 remain the reference engines the
+others are compared with in psizam's own tests.
+
+One dependency on JIT2 remains outside this repository: psibase's `psitest`
+runs test modules on `psibase::NativeVM`, which is JIT2 with backtraces in a
+default build. Until `psitest` moves to another engine, a JIT2 fault can
+surface as a failing service test.
+
+### JIT2: known problems, not scheduled
+
+- **Wide arithmetic inside a function that uses exception handling, x86-64.**
+  JIT2 does not allocate registers for a function with `try_table` and falls
+  back to stack-mode code generation (see the SIGBUS workaround below). The
+  wide-arithmetic instructions are lowered in the IR writer to several
+  single-result instructions that read their operands more than once, which
+  stack mode cannot represent: it pops an operand at its first use. Such a
+  function is expected to compute wrong values. Not tested. psibase disables
+  exception handling, and arm64 has no stack mode, so neither is affected.
+- **Wide add and subtract are slow.** `i64.add128`/`i64.sub128` become five IR
+  instructions (two adds, a carry compare, an extend, an add) instead of
+  add/adc. Correct on both architectures; `i64.mul_wide_*` is one multiply plus
+  one high-multiply.
+- **Debug instruction map with parallel compilation.** Constructing a backend
+  with `debug::debug_instr_map`, `enable_backtrace` and `compile_threads > 1`
+  throws "function wasm is out of order": workers report function addresses
+  to the map in completion order.
+- **Host-call argument order.** JIT2 passes host-call arguments in reverse
+  Wasm stack order through "rev" trampolines; LLVM AOT passes them forward.
+  The two were to be unified on the forward order and were not.
+- **psibase single-engine builds unverified.** psibase built with
+  `PSIBASE_VM_BACKEND=JIT2` has not been run since its execution context
+  changed for the watchdog-only CPU budget (gofractally/psibase#2228).
+- Fixed in November 2026 and worth knowing if older builds are in use, x86-64
+  only: runtime helper calls from JIT1 ran on a misaligned stack (a throwing
+  helper crashed in the unwinder); a direct host call from JIT2 did not restore
+  the caller's stack budget after a re-entrant call; JIT2 trap stubs left no
+  frame for a trap observer to walk.
+
+### Other red tests on `main`
+
+- `memory_grow_2` spec cases, all four native engines (multi-memory, below).
+- `psizam_host_tail_reentry_tests`, left red on purpose
+  (gofractally/psizam#2).
+- x86-64 only: `Test call depth dynamic - psizam::jit_llvm`
+  (gofractally/psizam#1).
+
 ## Test Summary
 
 | Platform | Failures | Total | Pass Rate |
 |----------|----------|-------|-----------|
 | macOS aarch64, full CTest (2026-09-17) | 4 (memory_grow_2 × 4 backends) | 17,689 | 99.98% |
-| Linux x86_64 | (stale — re-measure after submodule bump) | | |
+| macOS aarch64, full CTest (2026-11-22, `2e93ecd`) | 5 (memory_grow_2 × 4, host_tail_reentry) | 17,704 | 99.97% |
+| Linux x86_64, CTest without spec tests (2026-11-23, `2e93ecd`) | 2 (jit_llvm call depth, host_tail_reentry) | 913 | 99.78% |
 
 The four multiple-memory failures are ordinary test failures, not expected-failure
 passes. The saved LLVM O2 and saved JIT1 scalar suites each pass 3,050 of 3,051
