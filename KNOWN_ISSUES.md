@@ -2,16 +2,35 @@
 
 ## Engine status (2026-11-23)
 
-psibase runs services on the **wasmtime backend** (`wasmtime/`), and that is the
-engine changes are qualified on. **JIT2 is not planned for use**: its known
-problems are written down here and are not scheduled to be fixed. LLVM AOT and
-LLVM JIT are paused. The interpreter and JIT1 remain the reference engines the
-others are compared with in psizam's own tests.
+| Engine | Status |
+|---|---|
+| wasmtime backend (`wasmtime/`) | **The engine.** psibase runs services on it and changes are qualified on it. |
+| LLVM AOT | The second engine. Paused: not currently built or tested by psibase. |
+| Interpreter, JIT1, JIT2 | **Experimental.** Kept as cross-checks for the two above, not for use in production. |
 
-One dependency on JIT2 remains outside this repository: psibase's `psitest`
-runs test modules on `psibase::NativeVM`, which is JIT2 with backtraces in a
-default build. Until `psitest` moves to another engine, a JIT2 fault can
-surface as a failing service test.
+The interpreter, JIT1 and JIT2 are largely compatible with each other and with
+wasmtime: psizam's own suite runs every test on all of them, and the
+differences that remain are the minor ones listed in this file. They are kept
+because an independent implementation is the best test of the engines that are
+used: the wide-arithmetic and memory16 work was checked by running one module
+on every engine against an oracle. Their known failures are documented here
+instead of being scheduled. Any of them could be revived later for something
+wasmtime lacks, source-level debugging being the obvious case (JIT1 and JIT2
+can map machine code back to Wasm and register with a debugger).
+
+One use of an experimental engine remains outside this repository: psibase's
+`psitest` runs test modules on `psibase::NativeVM`, which is JIT2 with
+backtraces in a default build (gofractally/psibase#2231). Until that moves, a
+JIT2 fault can surface as a failing service test.
+
+### Interpreter and JIT1: known problems, not scheduled
+
+- Both fail the `memory_grow_2` spec cases with the other native engines
+  (multi-memory, below). No other failures are known on either architecture.
+- JIT1 on arm64 does not implement every SIMD floating-point operation under
+  softfloat (see "aarch64 notes").
+- JIT1 code is larger and slower than JIT2's; it is the direct descendant of
+  EOS VM and the baseline the other native engines were compared with.
 
 ### JIT2: known problems, not scheduled
 

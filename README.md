@@ -5,6 +5,11 @@ LLVM compilation backends. Native execution supports Linux and macOS on x86_64
 and ARM64. The core templates are header based; runtime support, debug support,
 SoftFloat and LLVM integrations also contain compiled libraries.
 
+**Engine status.** The wasmtime backend is the engine psibase runs services on; LLVM AOT is
+the second engine and is paused. The interpreter, JIT1 and JIT2 are experimental: they are
+kept as independent cross-checks, are largely compatible with only minor known differences,
+and are not for production use. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+
 The standalone repository is [gofractally/psizam](https://github.com/gofractally/psizam).
 Its history was extracted from psiserve and includes subsequent standalone
 runtime, packaging and validation improvements. It is under release
