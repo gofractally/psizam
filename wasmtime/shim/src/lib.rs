@@ -220,7 +220,11 @@ pub unsafe extern "C" fn pzwt_engine_new(
             .max_memory_size(1usize << 32)
             .table_elements(config.pool_table_elements as usize)
             .max_core_instance_size(4 << 20)
-            .max_unused_warm_slots(slots);
+            .max_unused_warm_slots(slots)
+            // A freed slot's first bytes are zeroed in place rather than
+            // unmapped and faulted back in by the next instance.
+            .linear_memory_keep_resident(256 << 10)
+            .table_keep_resident(64 << 10);
         c.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
     }
 
