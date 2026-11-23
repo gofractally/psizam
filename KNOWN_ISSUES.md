@@ -5,7 +5,7 @@
 | Engine | Status |
 |---|---|
 | wasmtime backend (`wasmtime/`) | **The engine.** psibase runs services on it and changes are qualified on it. |
-| LLVM AOT | The second engine. Paused: not currently built or tested by psibase. |
+| LLVM AOT | The second engine. Robust, and faster than wasmtime at run time for some modules; its cost is compile time (seconds for a service against tens of milliseconds). Paused for now: not currently built or tested by psibase. Choosing the engine per application is a possible later direction. |
 | Interpreter, JIT1, JIT2 | **Experimental.** Kept as cross-checks for the two above, not for use in production. |
 
 The interpreter, JIT1 and JIT2 are largely compatible with each other and with
