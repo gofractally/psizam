@@ -42,6 +42,11 @@ JIT2 fault can surface as a failing service test.
   stack mode cannot represent: it pops an operand at its first use. Such a
   function is expected to compute wrong values. Not tested. psibase disables
   exception handling, and arm64 has no stack mode, so neither is affected.
+- **SIMD float operations keep NaN payloads, x86-64.** With a NaN operand,
+  `f32x4.add` and its siblings return the operand's payload (`0x7f812345`
+  in, `0x7fc12345` out) where JIT1, LLVM AOT and wasmtime return the canonical
+  NaN (`0x7fc00000`). arm64 JIT2 canonicalizes. psibase's engine-agreement
+  test leaves JIT2 out of its SIMD float case on x86-64 for this reason.
 - **Wide add and subtract are slow.** `i64.add128`/`i64.sub128` become five IR
   instructions (two adds, a carry compare, an extend, an add) instead of
   add/adc. Correct on both architectures; `i64.mul_wide_*` is one multiply plus
