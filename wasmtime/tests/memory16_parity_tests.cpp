@@ -96,7 +96,7 @@ TEST_CASE("memory16: shipping identity binds the canonical fork and shim ABI", "
    const auto identity = wt::build_identity();
    std::cout << "Wasmtime build identity: " << identity << '\n';
    CHECK(identity.find("git+https://github.com/gofractally/wasmtime") != std::string_view::npos);
-   CHECK(identity.find("cfbe29d331f2255b787f653a348a137eb28e678a") != std::string_view::npos);
+   CHECK(identity.find("408bb1609b388e80951145795f9cb3190b4492fa") != std::string_view::npos);
    CHECK(identity.find(" ABI 5 ") != std::string_view::npos);
    CHECK(identity.find(" memory16-v1;") != std::string_view::npos);
 }

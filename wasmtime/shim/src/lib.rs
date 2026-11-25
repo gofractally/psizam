@@ -314,6 +314,28 @@ pub unsafe extern "C" fn pzwt_engine_delete(engine: *mut PzwtEngine) {
 
 pub struct PzwtModule(Module);
 
+/// A binary module as this engine compiles it. Where the module is rewritten
+/// to account for stack use it gets a counter and wrapped functions; where
+/// the compiler accounts for it the module only gains its costs, and its code
+/// is untouched unless the strict float profile has to rewrite it.
+fn prepare(engine: &PzwtEngine, wasm: &[u8], costs: Option<&[u32]>) -> Result<Vec<u8>, String> {
+    match engine.placement {
+        stack_meter::Placement::Rewrite => {
+            stack_meter::rewrite(wasm, costs, engine.strict_float)
+        }
+        stack_meter::Placement::Compiler => {
+            let unfused;
+            let wasm = if engine.strict_float {
+                unfused = stack_meter::rewrite(wasm, None, true)?;
+                unfused.as_slice()
+            } else {
+                wasm
+            };
+            stack_meter::with_costs(wasm, costs)
+        }
+    }
+}
+
 /// Assembles WebAssembly text into a binary module and hands it to `sink`.
 #[no_mangle]
 pub unsafe extern "C" fn pzwt_wat_to_wasm(
@@ -362,7 +384,7 @@ pub unsafe extern "C" fn pzwt_rewrite(
 ) -> i32 {
     let bytes = std::slice::from_raw_parts(bytes, len);
     let costs = (metered != 0).then(|| cost_slice(costs, costs_len));
-    match stack_meter::rewrite(bytes, costs, strict_float != 0, stack_meter::Placement::Rewrite) {
+    match stack_meter::rewrite(bytes, costs, strict_float != 0) {
         Ok(out) => {
             sink(sink_data, out.as_ptr(), out.len());
             PZWT_OK
@@ -389,12 +411,7 @@ pub unsafe extern "C" fn pzwt_module_new_metered(
 ) -> *mut PzwtModule {
     let bytes = std::slice::from_raw_parts(bytes, len);
     let costs = cost_slice(costs, costs_len);
-    let metered = match stack_meter::rewrite(
-        bytes,
-        Some(costs),
-        (*engine).strict_float,
-        (*engine).placement,
-    ) {
+    let metered = match prepare(&*engine, bytes, Some(costs)) {
         Ok(m) => m,
         Err(e) => {
             set_error(error, PZWT_ERROR, 0, format!("stack accounting: {e}"));
@@ -431,12 +448,7 @@ pub unsafe extern "C" fn pzwt_module_new(
                 return std::ptr::null_mut();
             }
         };
-        rewritten = match stack_meter::rewrite(
-            &binary,
-            None,
-            (*engine).strict_float,
-            (*engine).placement,
-        ) {
+        rewritten = match prepare(&*engine, &binary, None) {
             Ok(m) => m,
             Err(e) => {
                 set_error(error, PZWT_ERROR, 0, format!("preparing the module: {e}"));
@@ -509,7 +521,7 @@ struct Data {
     /// rewriting. With the compiler's accounting the store holds the budget.
     stack: Option<Global>,
     /// Whether the compiler does the stack accounting for this store's engine.
-    /// `stack` is then only the sign that the module is metered.
+    /// The store then holds the budget and `stack` is unused.
     stack_in_compiler: bool,
     /// The engine's dedicated-stack size, for calls made through this store.
     native_stack: usize,
@@ -753,32 +765,29 @@ pub unsafe extern "C" fn pzwt_context_memory_storage(
     }
 }
 
-/// Sets the stack bytes available to wasm in this store. Does nothing for a
-/// module compiled without stack accounting.
+/// Sets the stack bytes available to wasm in this store. Where modules are
+/// rewritten for stack accounting this does nothing for a module compiled
+/// without it; where the compiler does the accounting the store always holds
+/// a budget, and a module compiled without costs simply never spends it.
 #[no_mangle]
 pub unsafe extern "C" fn pzwt_context_set_stack(context: *mut PzwtContext, bytes: u32) {
     let cx = &mut (*context).0;
     if cx.data().stack_in_compiler {
-        if cx.data().stack.is_some() {
-            cx.psizam_set_stack_remaining(u64::from(bytes));
-        }
+        cx.psizam_set_stack_remaining(u64::from(bytes));
     } else if let Some(stack) = cx.data().stack {
         let _ = stack.set(&mut *cx, Val::I32(bytes as i32));
     }
 }
 
-/// Stack bytes still available. Returns `u32::MAX` for a module compiled
-/// without stack accounting.
+/// Stack bytes still available. Where modules are rewritten for stack
+/// accounting this is `u32::MAX` for a module compiled without it; where the
+/// compiler does the accounting it is the store's budget.
 #[no_mangle]
 pub unsafe extern "C" fn pzwt_context_stack(context: *mut PzwtContext) -> u32 {
     let cx = &mut (*context).0;
     if cx.data().stack_in_compiler {
-        return if cx.data().stack.is_some() {
-            // The budget is set from a u32 and only ever decreases.
-            cx.psizam_stack_remaining() as u32
-        } else {
-            u32::MAX
-        };
+        // The budget is set from a u32 and only ever decreases.
+        return cx.psizam_stack_remaining() as u32;
     }
     match cx.data().stack {
         Some(stack) => stack.get(&mut *cx).i32().unwrap_or(0) as u32,
@@ -1012,7 +1021,14 @@ pub unsafe extern "C" fn pzwt_instance_func(
     let Ok(name) = std::str::from_utf8(std::slice::from_raw_parts(name, name_len)) else {
         return std::ptr::null_mut();
     };
-    let Some(func) = (*instance).0.get_func(&mut *cx, name) else {
+    // An engine whose compiler does the stack accounting holds the start
+    // function back itself, exported or not, under the same reserved name.
+    let func = if cx.data().stack_in_compiler && name == stack_meter::START_EXPORT {
+        (*instance).0.psizam_deferred_start(&mut *cx)
+    } else {
+        (*instance).0.get_func(&mut *cx, name)
+    };
+    let Some(func) = func else {
         return std::ptr::null_mut();
     };
     let ty = func.ty(&*cx);
@@ -1066,8 +1082,7 @@ pub unsafe extern "C" fn pzwt_call(
             // The injected overflow check marks the counter, then traps.
             let overflowed = if cx.data().stack_in_compiler {
                 // The compiler's check traps as a stack overflow itself.
-                cx.data().stack.is_some()
-                    && matches!(e.downcast_ref::<Trap>(), Some(Trap::StackOverflow))
+                matches!(e.downcast_ref::<Trap>(), Some(Trap::StackOverflow))
             } else {
                 matches!(e.downcast_ref::<Trap>(), Some(Trap::UnreachableCodeReached))
                     && cx.data().stack.is_some_and(|stack| {
