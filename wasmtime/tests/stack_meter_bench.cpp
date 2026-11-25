@@ -1,8 +1,10 @@
 // What deterministic stack accounting costs on the wasmtime backend.
 //
-// Runs call-heavy and call-free functions from one module compiled with and
-// without the accounting, on the same engine, and prints the time per wasm
-// call. Not a registered test: it measures, it does not assert.
+// Runs call-heavy and call-free functions from one module compiled with its
+// real stack costs and with every cost zero, and prints the time per wasm
+// call. The budget travels as a hidden argument either way, so the
+// difference is the compare against the cost and the subtraction. Not a
+// registered test: it measures, it does not assert.
 
 #include <psizam/backend.hpp>
 #include <psizam/wasmtime_admission.hpp>
@@ -87,26 +89,15 @@ int main(int argc, char** argv)
    const int rounds = argc > 1 ? std::atoi(argv[1]) : 7;
    wt::engine_options options;
    options.native_stack = 64ull << 20;
-   options.stack        = wt::stack_accounting::rewrite;
-   wt::runtime<host> rewriting(options);
-   options.stack = wt::stack_accounting::compiler;
-   wt::runtime<host> compiling(options);
+   wt::runtime<host> rt(options);
 
    psizam::wasm_code code = wt::assemble(module_text);
    bench_options     psizam_options;
    auto              costs = wt::validate_and_cost(code, psizam_options);
 
-   host h;
-   // plain:    no accounting at all.
-   // rewrite:  accounting written into the module (a global, loaded and
-   //           stored on every entry and exit).
-   // compiler: accounting emitted by the compiler (a hidden argument).
-   // carried:  the compiler's calling convention with every cost zero, to
-   //           show what passing the argument costs by itself.
-   wt::instance<host> plain(rewriting, rewriting.compile(code), h);
-   wt::instance<host> rewrite(rewriting, rewriting.compile_metered(code, costs), h);
-   wt::instance<host> compiler(compiling, compiling.compile_metered(code, costs), h);
-   wt::instance<host> carried(compiling, compiling.compile(code), h);
+   host               h;
+   wt::instance<host> free_of_cost(rt, rt.compile(code), h);
+   wt::instance<host> metered(rt, rt.compile_metered(code, costs), h);
 
    struct shape
    {
@@ -121,11 +112,11 @@ int main(int argc, char** argv)
        {"mixed", 100000000, 100000000.0},
        {"spin", 400000000, 0},
    };
-   std::printf("%-6s %9s %9s %9s %9s   %s\n", "shape", "plain s", "rewrite", "compiler", "carried",
-               "added ns/call: rewrite, compiler");
+   std::printf("%-6s %12s %12s %9s %14s\n", "shape", "zero-cost s", "metered s", "ratio",
+               "added ns/call");
    for (const auto& s : shapes)
    {
-      const uint32_t expect = plain.call<uint32_t, uint32_t>(s.name, s.arg);
+      const uint32_t expect = free_of_cost.call<uint32_t, uint32_t>(s.name, s.arg);
       auto           time   = [&](wt::instance<host>& inst)
       {
          return best_seconds(
@@ -137,12 +128,12 @@ int main(int argc, char** argv)
              },
              rounds);
       };
-      const double p = time(plain), r = time(rewrite), c = time(compiler), z = time(carried);
-      std::printf("%-6s %9.4f %9.4f %9.4f %9.4f   ", s.name, p, r, c, z);
+      const double z = time(free_of_cost), m = time(metered);
       if (s.calls > 0)
-         std::printf("%.3f, %.3f\n", (r - p) * 1e9 / s.calls, (c - p) * 1e9 / s.calls);
+         std::printf("%-6s %12.4f %12.4f %9.3f %14.3f\n", s.name, z, m, m / z,
+                     (m - z) * 1e9 / s.calls);
       else
-         std::printf("-\n");
+         std::printf("%-6s %12.4f %12.4f %9.3f %14s\n", s.name, z, m, m / z, "-");
    }
    return 0;
 }

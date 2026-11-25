@@ -52,7 +52,6 @@ namespace abi {
       uint8_t  memory16;
       uint32_t pool_instances;
       uint32_t pool_table_elements;
-      uint8_t  stack_in_compiler;
    };
    struct PzwtError {
       int32_t status;
@@ -93,8 +92,6 @@ namespace abi {
    void        pzwt_engine_delete(PzwtEngine*);
    int32_t     pzwt_wat_to_wasm(const char*, size_t, void (*)(void*, const uint8_t*, size_t), void*,
                                 PzwtError*);
-   int32_t     pzwt_rewrite(const uint8_t*, size_t, const uint32_t*, size_t, uint8_t, uint8_t,
-                            void (*)(void*, const uint8_t*, size_t), void*, PzwtError*);
    PzwtModule* pzwt_module_new(const PzwtEngine*, const uint8_t*, size_t, PzwtError*);
    PzwtModule* pzwt_module_new_metered(const PzwtEngine*, const uint8_t*, size_t, const uint32_t*,
                                        size_t, PzwtError*);
@@ -183,18 +180,6 @@ namespace feature {
 // Numbered as psizam::float_profile is.
 enum class float_profile : uint32_t { strict = 0, performance = 1 };
 
-// Where compile_metered's stack accounting is done. Both follow psizam's byte
-// rule and fail the same call for a given budget.
-enum class stack_accounting : uint8_t {
-   // The module is rewritten: a counter global, and every function loads,
-   // checks and stores it on entry and adds its cost back on exit.
-   rewrite,
-   // The compiler emits it: the budget travels as a hidden argument, a
-   // function compares it with its cost, and nothing is loaded or stored on
-   // a wasm-to-wasm call or return.
-   compiler,
-};
-
 struct engine_options {
    uint32_t      features = feature::simd | feature::relaxed_simd | feature::bulk_memory |
                             feature::sign_extension | feature::saturating_float_to_int;
@@ -220,8 +205,6 @@ struct engine_options {
    // those; compiled modules move between the two with serialize/load.
    uint32_t pool_instances      = 0;
    uint32_t pool_table_elements = 20000;
-   // How compile_metered enforces the stack budget.
-   stack_accounting stack = stack_accounting::compiler;
 };
 
 struct instance_limits {
@@ -422,25 +405,6 @@ inline std::vector<uint8_t> assemble(std::string_view wat)
    return out;
 }
 
-// The module exactly as the engine would compile it: with stack accounting if
-// costs are given, and with relaxed multiply-add unfused under the strict
-// profile. For inspection and tests.
-inline std::vector<uint8_t> rewritten(std::span<const uint8_t> wasm,
-                                      const std::vector<uint32_t>* costs,
-                                      float_profile                fp = float_profile::performance)
-{
-   std::vector<uint8_t> out;
-   abi::PzwtError       e{};
-   auto sink = [](void* self, const uint8_t* data, size_t size) {
-      static_cast<std::vector<uint8_t>*>(self)->assign(data, data + size);
-   };
-   if (abi::pzwt_rewrite(wasm.data(), wasm.size(), costs ? costs->data() : nullptr,
-                         costs ? costs->size() : 0, costs != nullptr,
-                         fp == float_profile::strict, sink, &out, &e))
-      detail::raise(e);
-   return out;
-}
-
 // What this build compiles a module into: the wasmtime version, the shim's
 // module rewriting, and the target. Include it, with the module's own hash and
 // the engine_options used, in any key under which module::serialize output is
@@ -515,8 +479,7 @@ class runtime {
                              options.max_wasm_stack ? options.max_wasm_stack
                                                     : options.native_stack / 2,
                              options.native_stack, options.epoch_interruption, options.memory16,
-                             options.pool_instances, options.pool_table_elements,
-                             options.stack == stack_accounting::compiler};
+                             options.pool_instances, options.pool_table_elements};
       abi::PzwtError  e{};
       auto*           p = abi::pzwt_engine_new(&config, &e);
       if (!p)
