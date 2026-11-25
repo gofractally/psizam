@@ -3,6 +3,16 @@
 // memory afterwards. Both engines get the same stack byte budget.
 //
 //   differential_fuzz [--performance] <file.wasm>...
+//   differential_fuzz --admission-only [--verbose] <file.wasm>...
+//
+// --admission-only executes nothing. It asks one question of each module: if
+// psizam's validator admits it under the node's options, does wasmtime compile
+// it? A module that is admitted and that wasmtime refuses is printed as
+//   SPLIT <file>: <wasmtime's message>
+// and one the embedder's own preflight would have refused (a shared memory) as
+//   PREFLIGHT <file>: <message>
+// With --verbose every other module gets an ADMIT or REFUSE line as well. The
+// last line counts modules, admitted, refused and splits.
 //
 // Modules psizam's validator refuses are skipped: nothing would run them.
 // Exit status is the number of modules that behaved differently (max 255).
@@ -30,6 +40,10 @@ struct options : psizam::default_options {
    static constexpr auto     fp                         = psizam::fp_mode::softfloat;
    static constexpr bool     enable_tail_calls          = false;
    static constexpr bool     enable_exception_handling  = false;
+   // What the node's admission refuses because wasmtime, as the node
+   // configures it, does not compile it (gofractally/psizam#6, #7).
+   static constexpr bool     enable_typed_references      = false;
+   static constexpr bool     enable_const_defined_globals = false;
    static constexpr uint32_t max_memory_section_elements = 1;
    uint32_t              max_stack_bytes = 65536;
    uint32_t              max_pages       = 512;
@@ -102,13 +116,89 @@ int main(int argc, char** argv)
    // Both engines run the same float profile: strict unless asked otherwise.
    engine.fp           = wt::float_profile::strict;
    engine.native_stack = 64ull << 20;
-   int first = 1;
-   if (argc > 1 && std::string(argv[1]) == "--performance")
+   int  first          = 1;
+   bool admission_only = false, verbose = false;
+   for (; first < argc; ++first)
    {
-      engine.fp = wt::float_profile::performance;
-      first     = 2;
+      std::string arg = argv[first];
+      if (arg == "--performance")
+         engine.fp = wt::float_profile::performance;
+      else if (arg == "--admission-only")
+         admission_only = true;
+      else if (arg == "--verbose")
+         verbose = true;
+      else
+         break;
    }
    wt::runtime<none> rt(engine);
+
+   if (admission_only)
+   {
+      size_t seen = 0, admitted = 0, refused = 0, preflight = 0, splits = 0;
+      for (int m = first; m < argc; ++m)
+      {
+         ++seen;
+         std::ifstream     in(argv[m], std::ios::binary);
+         psizam::wasm_code code((std::istreambuf_iterator<char>(in)), {});
+         options           policy;
+         std::vector<uint32_t> costs;
+         std::string           why;
+         try
+         {
+            costs = wt::validate_and_cost(code, policy);
+         }
+         catch (const psizam::exception& e)
+         {
+            why = std::string(e.what()) + ": " + e.detail();
+         }
+         catch (const std::exception& e)
+         {
+            why = e.what();
+         }
+         catch (...)
+         {
+            why = "unknown exception";
+         }
+         if (!why.empty())
+         {
+            ++refused;
+            if (verbose)
+               std::printf("REFUSE %s: %s\n", argv[m], why.c_str());
+            continue;
+         }
+         ++admitted;
+         try
+         {
+            (void)rt.compile_metered(code, costs);
+            if (verbose)
+               std::printf("ADMIT %s\n", argv[m]);
+         }
+         catch (const std::exception& e)
+         {
+            std::string message = e.what();
+            for (auto& c : message)
+               if (c == '\n' || c == '\r')
+                  c = ' ';
+            // The embedder's preflight refuses a shared memory before either
+            // engine sees the module, so that one is not a split.
+            if (message.find("shared memory") != std::string::npos)
+            {
+               ++preflight;
+               std::printf("PREFLIGHT %s: %s\n", argv[m], message.c_str());
+            }
+            else
+            {
+               ++splits;
+               std::printf("SPLIT %s: %s\n", argv[m], message.c_str());
+            }
+         }
+         std::fflush(stdout);
+      }
+      std::printf("modules %zu, admitted %zu, refused %zu, splits %zu (and %zu admitted that the "
+                  "embedder's shared-memory preflight refuses)\n",
+                  seen, admitted, refused, splits, preflight);
+      return splits > 255 ? 255 : int(splits);
+   }
 
    size_t modules = 0, skipped = 0, calls = 0, different = 0;
    for (int m = first; m < argc; ++m)

@@ -27,6 +27,9 @@ set_tests_properties(execution.wasmtime-backend PROPERTIES LABELS "execution;qui
 
 # Runs module files on psizam's JIT2 and on wasmtime and compares every call.
 # Not a registered test: it needs a corpus (for example from `wasm-tools smith`).
+# With --admission-only it executes nothing and reports modules psizam admits and
+# wasmtime refuses; gen_admission_corpus.py writes a corpus for that and
+# run_admission_corpus.py batches it and groups what comes back.
 add_executable(psizam_wasmtime_differential_fuzz differential_fuzz.cpp)
 target_link_libraries(psizam_wasmtime_differential_fuzz PRIVATE psizam psizam-exec psizam-wasmtime)
 
