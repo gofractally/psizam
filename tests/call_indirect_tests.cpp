@@ -144,3 +144,70 @@ TEST_CASE("Typed reference encodings are refused when the option is off", "[type
    CHECK_THROWS_AS(strict_t(typed_ref_null_wasm, get_wasm_allocator(), no_typed_references_options{}),
                    wasm_parse_exception);
 }
+
+// gofractally/psizam#7: modules another engine refuses. Each is a whole
+// module with two empty exported functions `start` and `called`.
+namespace {
+
+std::vector<uint8_t> from_hex(std::string_view hex) {
+   std::vector<uint8_t> out;
+   auto nibble = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
+   for (std::size_t i = 0; i + 1 < hex.size(); i += 2)
+      out.push_back(static_cast<uint8_t>(nibble(hex[i]) * 16 + nibble(hex[i + 1])));
+   return out;
+}
+
+struct strict_host_options {
+   std::uint32_t max_stack_bytes = 1024 * 1024;
+   static constexpr std::uint32_t max_func_local_bytes = 1024 * 1024;
+   static constexpr bool enable_exception_handling    = false;
+   static constexpr bool enable_typed_references      = false;
+   static constexpr bool enable_const_defined_globals = false;
+};
+
+// Invalid under every version of the specification.
+const char* ref_func_out_of_range =
+   "0061736d01000000010d0360017e0060027e7e0060000003030200010606017000d2090b07120205737461727400000663616c6c656400010a070202000b02000b";
+const char* funcref_global_null_extern =
+   "0061736d01000000010d0360017e0060027e7e0060000003030200010606017000d06f0b07120205737461727400000663616c6c656400010a070202000b02000b";
+// Forms of the exception handling proposal.
+const char* legacy_try =
+   "0061736d01000000010d0360017e0060027e7e0060000003040300010207120205737461727400000663616c6c656400010a0d0302000b02000b050006400b0b";
+const char* exnref_local =
+   "0061736d01000000010d0360017e0060027e7e0060000003040300010207120205737461727400000663616c6c656400010a0c0302000b02000b040101690b";
+const char* exnref_block =
+   "0061736d01000000010d0360017e0060027e7e0060000003040300010207120205737461727400000663616c6c656400010a0f0302000b02000b07000269000b1a0b";
+// global.get of a defined global in a constant expression.
+const char* defined_global_in_global =
+   "0061736d01000000010d0360017e0060027e7e006000000303020001060b027f0041010b7f0023000b07120205737461727400000663616c6c656400010a070202000b02000b";
+const char* defined_global_in_elem =
+   "0061736d01000000010d0360017e0060027e7e0060000003030200010606017000d0700b07120205737461727400000663616c6c6564000109070105700123000b0a070202000b02000b";
+
+}
+
+TEST_CASE("The validator refuses what other engines refuse", "[validator_gaps]") {
+   using lenient_t = psizam::backend<nullptr_t, psizam::interpreter, dynamic_options>;
+   using strict_t  = psizam::backend<nullptr_t, psizam::interpreter, strict_host_options>;
+   auto lenient = [](const char* hex) {
+      auto code = from_hex(hex);
+      lenient_t b(code, get_wasm_allocator(), dynamic_options{});
+   };
+   auto strict = [](const char* hex) {
+      auto code = from_hex(hex);
+      strict_t b(code, get_wasm_allocator(), strict_host_options{});
+   };
+   // Never valid: refused whatever the options.
+   CHECK_THROWS_AS(lenient(ref_func_out_of_range), wasm_parse_exception);
+   CHECK_THROWS_AS(lenient(funcref_global_null_extern), wasm_parse_exception);
+   CHECK_THROWS_AS(strict(ref_func_out_of_range), wasm_parse_exception);
+   CHECK_THROWS_AS(strict(funcref_global_null_extern), wasm_parse_exception);
+   // Proposal forms: refused when the proposal is off.
+   CHECK_THROWS_AS(strict(legacy_try), wasm_parse_exception);
+   CHECK_THROWS_AS(strict(exnref_local), wasm_parse_exception);
+   CHECK_THROWS_AS(strict(exnref_block), wasm_parse_exception);
+   CHECK_THROWS_AS(strict(defined_global_in_global), wasm_parse_exception);
+   CHECK_THROWS_AS(strict(defined_global_in_elem), wasm_parse_exception);
+   // Still accepted by default.
+   CHECK_NOTHROW(lenient(defined_global_in_global));
+   CHECK_NOTHROW(lenient(defined_global_in_elem));
+}

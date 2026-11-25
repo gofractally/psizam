@@ -210,6 +210,12 @@ namespace psizam::detail {
    // whose other engines refuse them turns this off, and the parser then
    // refuses them wherever a type can appear (gofractally/psizam#6).
    PARSER_OPTION(enable_typed_references, true, bool)
+   // global.get of a global the module itself defines, in a constant
+   // expression. Valid since WebAssembly 3.0 (it came with the GC
+   // proposal); before that only imported globals could be read there. A
+   // host whose other engines refuse it turns this off
+   // (gofractally/psizam#7).
+   PARSER_OPTION(enable_const_defined_globals, true, bool)
    PARSER_OPTION(enable_bulk_memory, true, bool)
    PARSER_OPTION(enable_sign_ext, true, bool)
    PARSER_OPTION(enable_nontrapping_fptoint, true, bool)
@@ -839,7 +845,8 @@ namespace psizam::detail {
             uint8_t rt = *code++;
             ft.return_types[i] = rt;
             PSIZAM_ASSERT(rt == types::i32 || rt == types::i64 || rt == types::f32 || rt == types::f64 ||
-                          rt == types::funcref || rt == types::externref || rt == types::exnref ||
+                          rt == types::funcref || rt == types::externref ||
+                          (rt == types::exnref && get_enable_exception_handling(_options)) ||
                           (rt == types::v128 && get_enable_simd(_options)),
                           wasm_parse_exception, "invalid function return type");
             return_bytes += (rt == types::v128) ? 16u : 8u;
@@ -972,6 +979,8 @@ namespace psizam::detail {
             case opcodes::get_global: {
                uint32_t global_idx = parse_varuint32(code);
                PSIZAM_ASSERT(global_idx < _mod->globals.size(), wasm_parse_exception, "global.get index out of range in elem");
+               PSIZAM_ASSERT(get_enable_const_defined_globals(_options) || global_idx < _mod->num_imported_globals,
+                             wasm_parse_exception, "global.get of a defined global in a constant expression is not enabled");
                // The global holds a funcref; resolve at instantiation time.
                // For now store the function index from the global's init value.
                auto& gv = _mod->globals[global_idx];
@@ -1025,17 +1034,24 @@ namespace psizam::detail {
                // Storing 0 here made global-initialized null refs compare
                // unequal to null at runtime (fuzz regression 41953).
                ie.value.i64 = static_cast<uint32_t>(UINT32_MAX);
+               // A null of the other reference type is not a value of this one.
+               PSIZAM_ASSERT((*code != types::funcref && *code != types::externref) || *code == type,
+                             wasm_parse_exception, "type mismatch");
                ++code; // consume the reference type byte
                break;
             case opcodes::ref_func: {
                uint32_t func_idx = parse_varuint32(code);
                PSIZAM_ASSERT(type == types::funcref, wasm_parse_exception, "expected funcref for ref.func");
+               PSIZAM_ASSERT(func_idx < _mod->get_functions_total(), wasm_parse_exception,
+                             "ref.func of an undefined function");
                ie.value.i32 = func_idx;
                break;
             }
             case opcodes::get_global: {
                uint32_t global_idx = parse_varuint32(code);
                PSIZAM_ASSERT(global_idx < max_global_idx, wasm_parse_exception, "global.get in init must reference an already-declared global");
+               PSIZAM_ASSERT(get_enable_const_defined_globals(_options) || global_idx < _mod->num_imported_globals,
+                             wasm_parse_exception, "global.get of a defined global in a constant expression is not enabled");
                PSIZAM_ASSERT(!_mod->globals[global_idx].type.mutability, wasm_parse_exception, "global.get in init must reference an immutable global");
                ie.value.i32 = global_idx;
                break;
@@ -1077,6 +1093,8 @@ namespace psizam::detail {
                case opcodes::get_global: {
                   uint32_t global_idx = parse_varuint32(code);
                   PSIZAM_ASSERT(global_idx < max_global_idx, wasm_parse_exception, "global.get in init must reference an already-declared global");
+                  PSIZAM_ASSERT(get_enable_const_defined_globals(_options) || global_idx < _mod->num_imported_globals,
+                                wasm_parse_exception, "global.get of a defined global in a constant expression is not enabled");
                   PSIZAM_ASSERT(!_mod->globals[global_idx].type.mutability, wasm_parse_exception, "global.get in init must reference an immutable global");
                   ++stack_depth;
                   break;
@@ -1114,7 +1132,8 @@ namespace psizam::detail {
             auto count = parse_varuint32(code);
             auto type = *code++;
             PSIZAM_ASSERT(type == types::i32 || type == types::i64 || type == types::f32 || type == types::f64 ||
-                          type == types::funcref || type == types::externref || type == types::exnref ||
+                          type == types::funcref || type == types::externref ||
+                          (type == types::exnref && get_enable_exception_handling(_options)) ||
                           (type == types::v128 && get_enable_simd(_options)),
                           wasm_parse_exception, "invalid local type");
             local_checker.on_local(_options, type, count);
@@ -1525,7 +1544,7 @@ namespace psizam::detail {
                                    first_byte == types::f32 || first_byte == types::f64 ||
                                    (first_byte == types::v128 && get_enable_simd(_options)) ||
                                    first_byte == types::funcref || first_byte == types::externref ||
-                                   first_byte == types::exnref ||
+                                   (first_byte == types::exnref && get_enable_exception_handling(_options)) ||
                                    first_byte == types::pseudo, wasm_parse_exception,
                                    "Invalid type code in block");
                      single_type = first_byte;
@@ -1584,7 +1603,7 @@ namespace psizam::detail {
                                    first_byte == types::f32 || first_byte == types::f64 ||
                                    (first_byte == types::v128 && get_enable_simd(_options)) ||
                                    first_byte == types::funcref || first_byte == types::externref ||
-                                   first_byte == types::exnref ||
+                                   (first_byte == types::exnref && get_enable_exception_handling(_options)) ||
                                    first_byte == types::pseudo, wasm_parse_exception,
                                    "Invalid type code in loop");
                      single_type = first_byte;
@@ -1647,7 +1666,7 @@ namespace psizam::detail {
                                    first_byte == types::f32 || first_byte == types::f64 ||
                                    (first_byte == types::v128 && get_enable_simd(_options)) ||
                                    first_byte == types::funcref || first_byte == types::externref ||
-                                   first_byte == types::exnref ||
+                                   (first_byte == types::exnref && get_enable_exception_handling(_options)) ||
                                    first_byte == types::pseudo, wasm_parse_exception,
                                    "Invalid type code in if");
                      single_type = first_byte;
@@ -1719,6 +1738,7 @@ namespace psizam::detail {
                }
                // ── Exception handling opcodes ──
                case opcodes::try_: {
+                  PSIZAM_ASSERT(get_enable_exception_handling(_options), wasm_parse_exception, "Exception handling not enabled");
                   // try has the same structure as block (block_type immediate)
                   check_in_bounds();
                   uint8_t first_byte = *code;
