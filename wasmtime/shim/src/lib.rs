@@ -58,6 +58,10 @@ pub struct PzwtConfig {
     pub pool_instances: u32,
     /// Table elements each pooled slot can hold.
     pub pool_table_elements: u32,
+    /// Where a metered module's stack accounting is done: 0 rewrites the
+    /// module (a counter global and a wrapper around every function), 1 has
+    /// the compiler emit it. Both fail the same call for a given budget.
+    pub stack_in_compiler: u8,
 }
 
 pub const PZWT_OK: i32 = 0;
@@ -144,7 +148,7 @@ fn report(out: *mut PzwtError, error: &Error) -> i32 {
 /// Bump when the module rewriting in stack_meter.rs changes what is compiled.
 const REWRITE_REVISION: u32 = 1;
 /// The C ABI and memory16-v1 runtime contract are part of artifact identity.
-const SHIM_ABI_REVISION: u32 = 4;
+const SHIM_ABI_REVISION: u32 = 5;
 const MEMORY16_PROFILE_REVISION: u32 = 1;
 
 /// Identifies what this build compiles a module into: the wasmtime version,
@@ -184,6 +188,7 @@ pub struct PzwtEngine {
     epoch_interruption: bool,
     native_stack: usize,
     strict_float: bool,
+    placement: stack_meter::Placement,
 }
 
 #[no_mangle]
@@ -265,6 +270,16 @@ pub unsafe extern "C" fn pzwt_engine_new(
     c.wasm_branch_hinting(false);
     c.wasm_compact_imports(false);
 
+    if config.stack_in_compiler > 1 {
+        set_error(error, PZWT_ERROR, 0, "unknown stack accounting placement".into());
+        return std::ptr::null_mut();
+    }
+    let placement = if config.stack_in_compiler != 0 {
+        stack_meter::Placement::Compiler
+    } else {
+        stack_meter::Placement::Rewrite
+    };
+    c.psizam_stack_meter(placement == stack_meter::Placement::Compiler);
     c.epoch_interruption(config.epoch_interruption != 0);
     if config.max_wasm_stack != 0 {
         // wasmtime requires its async stack size, which this engine never
@@ -279,6 +294,7 @@ pub unsafe extern "C" fn pzwt_engine_new(
             epoch_interruption: config.epoch_interruption != 0,
             native_stack: config.native_stack as usize,
             strict_float: config.float_profile == PZWT_FLOAT_STRICT,
+            placement,
         })),
         Err(e) => {
             report(error, &e);
@@ -346,7 +362,7 @@ pub unsafe extern "C" fn pzwt_rewrite(
 ) -> i32 {
     let bytes = std::slice::from_raw_parts(bytes, len);
     let costs = (metered != 0).then(|| cost_slice(costs, costs_len));
-    match stack_meter::rewrite(bytes, costs, strict_float != 0) {
+    match stack_meter::rewrite(bytes, costs, strict_float != 0, stack_meter::Placement::Rewrite) {
         Ok(out) => {
             sink(sink_data, out.as_ptr(), out.len());
             PZWT_OK
@@ -373,7 +389,12 @@ pub unsafe extern "C" fn pzwt_module_new_metered(
 ) -> *mut PzwtModule {
     let bytes = std::slice::from_raw_parts(bytes, len);
     let costs = cost_slice(costs, costs_len);
-    let metered = match stack_meter::rewrite(bytes, Some(costs), (*engine).strict_float) {
+    let metered = match stack_meter::rewrite(
+        bytes,
+        Some(costs),
+        (*engine).strict_float,
+        (*engine).placement,
+    ) {
         Ok(m) => m,
         Err(e) => {
             set_error(error, PZWT_ERROR, 0, format!("stack accounting: {e}"));
@@ -397,9 +418,12 @@ pub unsafe extern "C" fn pzwt_module_new(
     error: *mut PzwtError,
 ) -> *mut PzwtModule {
     let bytes = std::slice::from_raw_parts(bytes, len);
-    // The strict profile is a rewrite of the module. Text is assembled first.
+    // The strict profile is a rewrite of the module, and an engine whose
+    // compiler meters the stack needs every module to say what its functions
+    // cost. Text is assembled first.
     let rewritten;
-    let bytes = if (*engine).strict_float {
+    let in_compiler = (*engine).placement == stack_meter::Placement::Compiler;
+    let bytes = if (*engine).strict_float || in_compiler {
         let binary = match wat::parse_bytes(bytes) {
             Ok(b) => b,
             Err(e) => {
@@ -407,10 +431,15 @@ pub unsafe extern "C" fn pzwt_module_new(
                 return std::ptr::null_mut();
             }
         };
-        rewritten = match stack_meter::rewrite(&binary, None, true) {
+        rewritten = match stack_meter::rewrite(
+            &binary,
+            None,
+            (*engine).strict_float,
+            (*engine).placement,
+        ) {
             Ok(m) => m,
             Err(e) => {
-                set_error(error, PZWT_ERROR, 0, format!("strict float profile: {e}"));
+                set_error(error, PZWT_ERROR, 0, format!("preparing the module: {e}"));
                 return std::ptr::null_mut();
             }
         };
@@ -476,8 +505,12 @@ pub unsafe extern "C" fn pzwt_module_delete(module: *mut PzwtModule) {
 struct Data {
     host: *mut c_void,
     memory: Option<Memory>,
-    /// The stack counter of a module compiled with stack accounting.
+    /// The stack counter of a module compiled with stack accounting by
+    /// rewriting. With the compiler's accounting the store holds the budget.
     stack: Option<Global>,
+    /// Whether the compiler does the stack accounting for this store's engine.
+    /// `stack` is then only the sign that the module is metered.
+    stack_in_compiler: bool,
     /// The engine's dedicated-stack size, for calls made through this store.
     native_stack: usize,
     limits: StoreLimits,
@@ -588,6 +621,7 @@ pub unsafe extern "C" fn pzwt_store_new(
         host,
         memory: None,
         stack: None,
+        stack_in_compiler: engine.placement == stack_meter::Placement::Compiler,
         native_stack: 0,
         limits: StoreLimitsBuilder::new()
             .memory_size(limits.max_memory_bytes as usize)
@@ -724,7 +758,11 @@ pub unsafe extern "C" fn pzwt_context_memory_storage(
 #[no_mangle]
 pub unsafe extern "C" fn pzwt_context_set_stack(context: *mut PzwtContext, bytes: u32) {
     let cx = &mut (*context).0;
-    if let Some(stack) = cx.data().stack {
+    if cx.data().stack_in_compiler {
+        if cx.data().stack.is_some() {
+            cx.psizam_set_stack_remaining(u64::from(bytes));
+        }
+    } else if let Some(stack) = cx.data().stack {
         let _ = stack.set(&mut *cx, Val::I32(bytes as i32));
     }
 }
@@ -734,6 +772,14 @@ pub unsafe extern "C" fn pzwt_context_set_stack(context: *mut PzwtContext, bytes
 #[no_mangle]
 pub unsafe extern "C" fn pzwt_context_stack(context: *mut PzwtContext) -> u32 {
     let cx = &mut (*context).0;
+    if cx.data().stack_in_compiler {
+        return if cx.data().stack.is_some() {
+            // The budget is set from a u32 and only ever decreases.
+            cx.psizam_stack_remaining() as u32
+        } else {
+            u32::MAX
+        };
+    }
     match cx.data().stack {
         Some(stack) => stack.get(&mut *cx).i32().unwrap_or(0) as u32,
         None => u32::MAX,
@@ -1018,10 +1064,16 @@ pub unsafe extern "C" fn pzwt_call(
         Ok(()) => PZWT_OK,
         Err(e) => {
             // The injected overflow check marks the counter, then traps.
-            let overflowed = matches!(e.downcast_ref::<Trap>(), Some(Trap::UnreachableCodeReached))
-                && cx.data().stack.is_some_and(|stack| {
-                    stack.get(&mut *cx).i32() == Some(stack_meter::OVERFLOW_SENTINEL as i32)
-                });
+            let overflowed = if cx.data().stack_in_compiler {
+                // The compiler's check traps as a stack overflow itself.
+                cx.data().stack.is_some()
+                    && matches!(e.downcast_ref::<Trap>(), Some(Trap::StackOverflow))
+            } else {
+                matches!(e.downcast_ref::<Trap>(), Some(Trap::UnreachableCodeReached))
+                    && cx.data().stack.is_some_and(|stack| {
+                        stack.get(&mut *cx).i32() == Some(stack_meter::OVERFLOW_SENTINEL as i32)
+                    })
+            };
             if overflowed {
                 set_error(error, PZWT_TRAP, PZWT_TRAP_STACK_OVERFLOW, "stack overflow".into());
                 PZWT_TRAP

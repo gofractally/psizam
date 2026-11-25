@@ -462,7 +462,12 @@ stack_outcome run_once(stack_host& h, uint32_t budget, const std::function<void(
 TEST_CASE("wasmtime: stack accounting matches psizam's engines byte for byte")
 {
    // Assemble the text once with wasmtime so both engines get the same binary.
+   const auto placement =
+       GENERATE(wt::stack_accounting::compiler, wt::stack_accounting::rewrite);
+   INFO("stack accounting done by "
+        << (placement == wt::stack_accounting::compiler ? "the compiler" : "rewriting the module"));
    wt::engine_options options;
+   options.stack = placement;
    options.features |= wt::feature::reference_types;
    wt::runtime<stack_host> rt(options);
    rt.add<&stack_host::observe>("env", "observe").add<&stack_host::reenter>("env", "reenter");
@@ -536,7 +541,12 @@ TEST_CASE("wasmtime: stack accounting matches psizam's engines byte for byte")
 
 TEST_CASE("wasmtime: an exhausted stack budget is reported as a stack overflow")
 {
+   const auto placement =
+       GENERATE(wt::stack_accounting::compiler, wt::stack_accounting::rewrite);
+   INFO("stack accounting done by "
+        << (placement == wt::stack_accounting::compiler ? "the compiler" : "rewriting the module"));
    wt::engine_options options;
+   options.stack = placement;
    options.features |= wt::feature::reference_types;
    wt::runtime<stack_host> wide(options);
    wide.add<&stack_host::observe>("env", "observe").add<&stack_host::reenter>("env", "reenter");
@@ -676,7 +686,12 @@ TEST_CASE("wasmtime: stack accounting covers multi-result functions and the star
      (func (export "started") (param i32) (result i32) (global.get $started))
      (start $init)
    ))";
+   const auto placement =
+       GENERATE(wt::stack_accounting::compiler, wt::stack_accounting::rewrite);
+   INFO("stack accounting done by "
+        << (placement == wt::stack_accounting::compiler ? "the compiler" : "rewriting the module"));
    wt::engine_options options;
+   options.stack = placement;
    options.features |= wt::feature::multi_value;
    wt::runtime<stack_host> rt(options);
    rt.add<&stack_host::observe>("env", "observe").add<&stack_host::reenter>("env", "reenter");

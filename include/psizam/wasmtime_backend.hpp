@@ -52,6 +52,7 @@ namespace abi {
       uint8_t  memory16;
       uint32_t pool_instances;
       uint32_t pool_table_elements;
+      uint8_t  stack_in_compiler;
    };
    struct PzwtError {
       int32_t status;
@@ -182,6 +183,18 @@ namespace feature {
 // Numbered as psizam::float_profile is.
 enum class float_profile : uint32_t { strict = 0, performance = 1 };
 
+// Where compile_metered's stack accounting is done. Both follow psizam's byte
+// rule and fail the same call for a given budget.
+enum class stack_accounting : uint8_t {
+   // The module is rewritten: a counter global, and every function loads,
+   // checks and stores it on entry and adds its cost back on exit.
+   rewrite,
+   // The compiler emits it: the budget travels as a hidden argument, a
+   // function compares it with its cost, and nothing is loaded or stored on
+   // a wasm-to-wasm call or return.
+   compiler,
+};
+
 struct engine_options {
    uint32_t      features = feature::simd | feature::relaxed_simd | feature::bulk_memory |
                             feature::sign_extension | feature::saturating_float_to_int;
@@ -207,6 +220,8 @@ struct engine_options {
    // those; compiled modules move between the two with serialize/load.
    uint32_t pool_instances      = 0;
    uint32_t pool_table_elements = 20000;
+   // How compile_metered enforces the stack budget.
+   stack_accounting stack = stack_accounting::compiler;
 };
 
 struct instance_limits {
@@ -500,7 +515,8 @@ class runtime {
                              options.max_wasm_stack ? options.max_wasm_stack
                                                     : options.native_stack / 2,
                              options.native_stack, options.epoch_interruption, options.memory16,
-                             options.pool_instances, options.pool_table_elements};
+                             options.pool_instances, options.pool_table_elements,
+                             options.stack == stack_accounting::compiler};
       abi::PzwtError  e{};
       auto*           p = abi::pzwt_engine_new(&config, &e);
       if (!p)

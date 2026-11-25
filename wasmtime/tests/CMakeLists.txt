@@ -54,3 +54,8 @@ target_compile_definitions(psizam_wasmtime_memory16_tests PRIVATE CATCH_CONFIG_N
    MEMORY16_PARITY_START_WASM="${CMAKE_CURRENT_BINARY_DIR}/memory16-host-start.wasm")
 add_test(NAME execution.wasmtime-memory16 COMMAND psizam_wasmtime_memory16_tests)
 set_tests_properties(execution.wasmtime-memory16 PROPERTIES TIMEOUT 300 LABELS "execution;wasmtime;memory16;resource")
+
+# Measures what deterministic stack accounting costs per wasm call. Not a
+# registered test.
+add_executable(psizam_wasmtime_stack_meter_bench stack_meter_bench.cpp)
+target_link_libraries(psizam_wasmtime_stack_meter_bench PRIVATE psizam psizam-exec psizam-wasmtime)

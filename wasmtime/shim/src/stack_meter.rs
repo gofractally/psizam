@@ -13,6 +13,14 @@
 //! The costs come from the caller (psizam's validator computes them). The
 //! global is exported under `STACK_EXPORT` so the host can set the budget
 //! before a call and read what is left during one.
+//!
+//! That is `Placement::Rewrite`. With `Placement::Compiler` the same rule is
+//! enforced by code the compiler emits (wasmtime's `psizam_stack_meter`):
+//! the functions are left as they are and the costs are attached to the
+//! module in a custom section. The module is still prepared the same way
+//! otherwise: its start function is held back, its memory is exported, and
+//! it still gets and exports the global, which then only marks the module as
+//! metered; the budget itself is kept by the store.
 
 use wasm_encoder::reencode::{Error, Reencode};
 use wasm_encoder::{
@@ -36,9 +44,26 @@ pub const MEMORY_EXPORT: &str = "psizam:memory";
 /// a stack overflow from an ordinary `unreachable`. Budgets stay below 2^31.
 pub const OVERFLOW_SENTINEL: u32 = u32::MAX;
 
+/// Where the stack accounting of a metered module is done.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// In the module: a counter global and a wrapper around every function.
+    Rewrite,
+    /// In compiled code, from costs carried in `COSTS_SECTION`. Every module
+    /// compiled by such an engine carries the section, metered or not.
+    Compiler,
+}
+
+/// The custom section a `Placement::Compiler` module carries its costs in:
+/// one little-endian `u32` per defined function. The compiler reads the last
+/// section of this name, so one already in the module has no effect.
+pub const COSTS_SECTION: &str = "psizam.stack-costs";
+
 struct Meter<'a> {
     /// Per-function byte costs, or `None` to leave stack use unmetered.
     costs: Option<&'a [u32]>,
+    /// Whether the accounting is written into the functions themselves.
+    wrap: bool,
     /// Replace relaxed multiply-add with a separate multiply and add.
     unfuse_madd: bool,
     /// Parameter count of each defined function, in code-section order.
@@ -217,7 +242,7 @@ impl Reencode for Meter<'_> {
         }
         let mut f = wasm_encoder::Function::new(locals);
 
-        let metered = match self.costs {
+        let metered = match self.costs.filter(|_| self.wrap) {
             Some(costs) => {
                 let cost = *costs.get(index).ok_or_else(|| {
                     Error::UserError("fewer stack costs than functions".to_string())
@@ -375,7 +400,13 @@ fn strip_start(wasm: &[u8]) -> Result<(Vec<u8>, Option<u32>), String> {
 /// becomes a multiply followed by an add, which is the WebAssembly
 /// deterministic profile's definition; without it the engine's own (fused)
 /// behaviour stands.
-pub fn rewrite(wasm: &[u8], costs: Option<&[u32]>, unfuse_madd: bool) -> Result<Vec<u8>, String> {
+pub fn rewrite(
+    wasm: &[u8],
+    costs: Option<&[u32]>,
+    unfuse_madd: bool,
+    placement: Placement,
+) -> Result<Vec<u8>, String> {
+    let wrap = costs.is_some() && placement == Placement::Rewrite;
     let (stripped, start) = if costs.is_some() {
         strip_start(wasm)?
     } else {
@@ -461,7 +492,7 @@ pub fn rewrite(wasm: &[u8], costs: Option<&[u32]>, unfuse_madd: bool) -> Result<
     let block_types = results
         .iter()
         .map(|r| {
-            if r.len() < 2 || costs.is_none() {
+            if r.len() < 2 || !wrap {
                 return None;
             }
             if let Some(i) = signatures.iter().position(|(params, res)| *params == 0 && res == r) {
@@ -475,8 +506,10 @@ pub fn rewrite(wasm: &[u8], costs: Option<&[u32]>, unfuse_madd: bool) -> Result<
         })
         .collect();
 
+    let function_count = function_types.len();
     let mut meter = Meter {
         costs,
+        wrap,
         unfuse_madd,
         params,
         results,
@@ -497,6 +530,22 @@ pub fn rewrite(wasm: &[u8], costs: Option<&[u32]>, unfuse_madd: bool) -> Result<
         .map_err(|e| e.to_string())?;
     if costs.is_some() && (!meter.added_global || !meter.added_export) {
         return Err("could not place the stack counter in the module".to_string());
+    }
+    if placement == Placement::Compiler {
+        // A module that is not metered costs nothing to call.
+        let zeros;
+        let costs = match costs {
+            Some(costs) => costs,
+            None => {
+                zeros = vec![0u32; function_count];
+                &zeros
+            }
+        };
+        let data: Vec<u8> = costs.iter().flat_map(|cost| cost.to_le_bytes()).collect();
+        module.section(&wasm_encoder::CustomSection {
+            name: COSTS_SECTION.into(),
+            data: data.into(),
+        });
     }
     Ok(module.finish())
 }
