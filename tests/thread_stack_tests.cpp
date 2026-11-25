@@ -127,6 +127,15 @@ void check_guest_entries() {
    }
    ensure(callbacks == 6, "not all nested calls ran");
 
+   // An entry point bound once: the export's index is resolved up front and
+   // the call goes by index, on the alternate stack like a call by name.
+   const auto nested = rt.backend.resolve_export("nested");
+   for (int i = 0; i < 3; ++i)
+      ensure(rt.backend.call_by_index(rt.stacks, rt.h, nested, std::int32_t{40}),
+             "call by index on the alternate stack");
+   ensure(callbacks == 9, "calls by index did not run the guest");
+   ensure(rt.stacks.base == 0 && rt.stacks.size == 0, "manager state escaped a call by index");
+
    // The returned handle must own its mapping after get_typed_function returns.
    // A copied handle keeps it alive after the original handle is released.
    auto function = rt.backend.template get_typed_function<std::int32_t(std::int32_t)>("value");

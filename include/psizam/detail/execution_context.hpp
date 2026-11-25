@@ -1818,6 +1818,14 @@ namespace psizam::detail {
          return execute<TC>(host, std::forward<Visitor>(visitor), func, std::forward<Args>(args)...);
       }
 
+      // The interpreter runs on the caller's stack; the alternate stack is
+      // for engines that execute native code.
+      template <typename TC = psizam::type_converter<standalone_function_t>, typename Visitor, typename... Args>
+      inline std::optional<operand_stack_elem> execute(stack_manager&, void* host, Visitor&& visitor, uint32_t func_index,
+                                                       Args... args) {
+         return execute<TC>(host, std::forward<Visitor>(visitor), func_index, std::forward<Args>(args)...);
+      }
+
       template <typename Visitor, typename... Args>
       inline void execute_start(void* host, Visitor&& visitor) {
          if (_mod->start != std::numeric_limits<uint32_t>::max())
