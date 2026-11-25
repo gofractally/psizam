@@ -173,7 +173,7 @@ fn report(out: *mut PzwtError, error: &Error) -> i32 {
 /// Bump when what the shim attaches to a module before compiling it changes.
 const REWRITE_REVISION: u32 = 2;
 /// The C ABI and memory16-v1 runtime contract are part of artifact identity.
-const SHIM_ABI_REVISION: u32 = 6;
+const SHIM_ABI_REVISION: u32 = 7;
 const MEMORY16_PROFILE_REVISION: u32 = 1;
 
 /// Identifies what this build compiles a module into: the wasmtime version,
@@ -354,7 +354,66 @@ pub unsafe extern "C" fn pzwt_engine_delete(engine: *mut PzwtEngine) {
 
 // ── module ──────────────────────────────────────────────────────────────────
 
-pub struct PzwtModule(Module);
+pub struct PzwtModule(Module, Entries);
+
+// ── entry points ────────────────────────────────────────────────────────────
+//
+// A service is entered through a few exports with fixed names and fixed
+// signatures. They are found once, when the module is compiled or loaded:
+// their names are looked up, their signatures are checked, and where each
+// one is among the module's exports is kept. Entering an instance is then an
+// index into its exports and a statically typed call, with nothing looked up
+// by name and no type examined.
+
+pub const PZWT_ENTRY_START: u32 = 0;
+pub const PZWT_ENTRY_CALLED: u32 = 1;
+pub const PZWT_ENTRY_SERVE: u32 = 2;
+pub const PZWT_ENTRY_PROCESS_TRANSACTION: u32 = 3;
+const ENTRY_COUNT: usize = 4;
+
+/// Name and number of i64 parameters of each entry point, by its number. An
+/// entry point takes only i64 parameters and returns nothing.
+const ENTRIES: [(&str, usize); ENTRY_COUNT] =
+    [("start", 1), ("called", 2), ("serve", 0), ("processTransaction", 0)];
+
+/// Where each entry point is among a module's exports, if the module has it.
+type Entries = [Option<ModuleExport>; ENTRY_COUNT];
+
+/// Finds a module's entry points. One that is exported with any other
+/// signature than its own, or that is not a function, is an error: an entry
+/// point is never called with a signature that was not checked here.
+fn entries_of(module: &Module) -> std::result::Result<Entries, String> {
+    let mut found: Entries = [None; ENTRY_COUNT];
+    for (slot, (name, params)) in found.iter_mut().zip(ENTRIES) {
+        let Some(ty) = module.get_export(name) else {
+            continue;
+        };
+        let matches = match &ty {
+            ExternType::Func(f) => {
+                f.results().len() == 0
+                    && f.params().len() == params
+                    && f.params().all(|param| matches!(param, ValType::I64))
+            }
+            _ => false,
+        };
+        if !matches {
+            return Err(format!("export {name} does not have the signature of that entry point"));
+        }
+        *slot = module.get_export_index(name);
+    }
+    Ok(found)
+}
+
+/// Wraps a compiled or loaded module with its entry points.
+unsafe fn module_with_entries(module: Module, error: *mut PzwtError) -> *mut PzwtModule {
+    match entries_of(&module) {
+        Ok(entries) => Box::into_raw(Box::new(PzwtModule(module, entries))),
+        Err(e) => {
+            set_error(error, PZWT_ERROR, 0, e);
+            std::ptr::null_mut()
+        }
+    }
+}
 
 /// Compiles `wasm`, a binary module, with the stack cost of its functions
 /// attached: `costs` for a metered module, nothing for one whose functions
@@ -373,7 +432,7 @@ unsafe fn compile(
         }
     };
     match Module::new(&engine.engine, &wasm) {
-        Ok(m) => Box::into_raw(Box::new(PzwtModule(m))),
+        Ok(m) => module_with_entries(m, error),
         Err(e) => {
             report(error, &e);
             std::ptr::null_mut()
@@ -472,7 +531,7 @@ pub unsafe extern "C" fn pzwt_module_deserialize(
 ) -> *mut PzwtModule {
     let bytes = std::slice::from_raw_parts(bytes, len);
     match Module::deserialize(&(*engine).engine, bytes) {
-        Ok(m) => Box::into_raw(Box::new(PzwtModule(m))),
+        Ok(m) => module_with_entries(m, error),
         Err(e) => {
             report(error, &e);
             std::ptr::null_mut()
@@ -1031,7 +1090,10 @@ pub unsafe extern "C" fn pzwt_linker_delete(linker: *mut PzwtLinker) {
 
 // ── instance ────────────────────────────────────────────────────────────────
 
-pub struct PzwtInstance(Instance);
+/// An instance, where its module's entry points are, and the function of
+/// each entry point that has been entered: resolved from the export's index
+/// the first time, since a function handle belongs to one instance.
+pub struct PzwtInstance(Instance, Entries, std::cell::Cell<[Option<Func>; ENTRY_COUNT]>);
 
 /// Instantiates `module` in the store behind `context`. Data and element
 /// segments are applied; a start function, if the module has one, runs.
@@ -1054,7 +1116,11 @@ pub unsafe extern "C" fn pzwt_instantiate(
                 .get_memory(&mut *cx, "memory")
                 .or_else(|| instance.psizam_memory0(&*cx).map(|(memory, _)| memory));
             cx.data_mut().memory = memory;
-            Box::into_raw(Box::new(PzwtInstance(instance)))
+            Box::into_raw(Box::new(PzwtInstance(
+                instance,
+                (*module).1,
+                std::cell::Cell::new([None; ENTRY_COUNT]),
+            )))
         }
         Err(e) => {
             report(error, &e);
@@ -1130,6 +1196,87 @@ pub unsafe extern "C" fn pzwt_func_delete(func: *mut PzwtFunc) {
     }
 }
 
+/// Reports how a call into wasm ended.
+unsafe fn finish_call(
+    cx: &mut StoreContextMut<'static, Data>,
+    outcome: Result<()>,
+    error: *mut PzwtError,
+) -> i32 {
+    match outcome {
+        Ok(()) => PZWT_OK,
+        Err(e) => {
+            cx.data_mut().failure_backtrace = frames_of(e.downcast_ref::<WasmBacktrace>());
+            // An exhausted budget is wasmtime's own stack-overflow trap, as is
+            // an exhausted native stack; the native stack is sized so that the
+            // budget always runs out first.
+            let overflowed = matches!(e.downcast_ref::<Trap>(), Some(Trap::StackOverflow));
+            if overflowed {
+                set_error(error, PZWT_TRAP, PZWT_TRAP_STACK_OVERFLOW, "stack overflow".into());
+                PZWT_TRAP
+            } else {
+                report(error, &e)
+            }
+        }
+    }
+}
+
+/// The status `pzwt_call_entry` returns when the module does not export the
+/// entry point. Nothing ran.
+pub const PZWT_NO_ENTRY: i32 = 3;
+
+/// Enters `instance` through entry point number `entry` (`PZWT_ENTRY_*`) with
+/// that entry point's arguments: `a` for `start`; `a` and `b` for `called`;
+/// neither is read for the others. No type is examined: the signature was
+/// checked when the module was compiled or loaded.
+#[no_mangle]
+pub unsafe extern "C" fn pzwt_call_entry(
+    context: *mut PzwtContext,
+    instance: *const PzwtInstance,
+    entry: u32,
+    a: u64,
+    b: u64,
+    error: *mut PzwtError,
+) -> i32 {
+    let cx = &mut (*context).0;
+    let instance = &*instance;
+    if entry as usize >= ENTRY_COUNT {
+        return PZWT_NO_ENTRY;
+    }
+    let mut funcs = instance.2.get();
+    let func = match funcs[entry as usize] {
+        Some(func) => func,
+        None => {
+            let Some(export) = instance.1[entry as usize].as_ref() else {
+                return PZWT_NO_ENTRY;
+            };
+            let Some(Extern::Func(func)) = instance.0.get_module_export(&mut *cx, export) else {
+                return PZWT_NO_ENTRY;
+            };
+            funcs[entry as usize] = Some(func);
+            instance.2.set(funcs);
+            func
+        }
+    };
+    let native_stack = cx.data().native_stack;
+    cx.data_mut().failure_backtrace.clear();
+    // The arguments go straight into the two slots the call reads; an entry
+    // point returns nothing. This is wasmtime's cheapest way into wasm: its
+    // statically typed call measured nearly twice as slow.
+    // SAFETY: `entries_of` checked this export against exactly this signature,
+    // which reads no more than two i64 slots and writes none.
+    let mut values = [ValRaw::i64(a as i64), ValRaw::i64(b as i64)];
+    let outcome = on_native_stack(native_stack, || {
+        func.call_unchecked(&mut *cx, std::ptr::slice_from_raw_parts_mut(values.as_mut_ptr(), 2))
+    });
+    finish_call(cx, outcome, error)
+}
+
+/// Whether the module `instance` was made from exports entry point `entry`.
+#[no_mangle]
+pub unsafe extern "C" fn pzwt_instance_has_entry(instance: *const PzwtInstance, entry: u32) -> u8 {
+    u8::from((*instance).1.get(entry as usize).is_some_and(|e| e.is_some()))
+}
+
 /// Calls an export. `values` holds the arguments from index 0 and receives the
 /// results from index 0; `count` must cover whichever is longer. Types are not
 /// checked here: the caller checked them against `pzwt_instance_func`.
@@ -1147,20 +1294,5 @@ pub unsafe extern "C" fn pzwt_call(
     let func = &(*func).0;
     cx.data_mut().failure_backtrace.clear();
     let outcome = on_native_stack(native_stack, || func.call_unchecked(&mut *cx, values));
-    match outcome {
-        Ok(()) => PZWT_OK,
-        Err(e) => {
-            cx.data_mut().failure_backtrace = frames_of(e.downcast_ref::<WasmBacktrace>());
-            // An exhausted budget is wasmtime's own stack-overflow trap, as is
-            // an exhausted native stack; the native stack is sized so that the
-            // budget always runs out first.
-            let overflowed = matches!(e.downcast_ref::<Trap>(), Some(Trap::StackOverflow));
-            if overflowed {
-                set_error(error, PZWT_TRAP, PZWT_TRAP_STACK_OVERFLOW, "stack overflow".into());
-                PZWT_TRAP
-            } else {
-                report(error, &e)
-            }
-        }
-    }
+    finish_call(cx, outcome, error)
 }

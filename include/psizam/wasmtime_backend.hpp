@@ -139,6 +139,9 @@ namespace abi {
                                 size_t* results_len, size_t capacity);
    void      pzwt_func_delete(PzwtFunc*);
    int32_t   pzwt_call(PzwtContext*, const PzwtFunc*, PzwtValue*, size_t, PzwtError*);
+   int32_t   pzwt_call_entry(PzwtContext*, const PzwtInstance*, uint32_t, uint64_t, uint64_t,
+                             PzwtError*);
+   uint8_t   pzwt_instance_has_entry(const PzwtInstance*, uint32_t);
    }
 }  // namespace abi
 
@@ -200,6 +203,18 @@ namespace feature {
 // form; no module is rewritten for it.
 // Numbered as psizam::float_profile is.
 enum class float_profile : uint32_t { strict = 0, performance = 1 };
+
+// The exports a service is entered through. Each has a fixed signature, which
+// a module that exports it must match exactly or it is not compiled:
+// start (i64), called (i64, i64), serve () and processTransaction (), none
+// returning a value. Numbered as the shim numbers them.
+enum class entry_point : uint32_t { start = 0, called = 1, serve = 2, process_transaction = 3 };
+
+inline std::string_view entry_point_name(entry_point which)
+{
+   constexpr std::string_view names[] = {"start", "called", "serve", "processTransaction"};
+   return names[static_cast<uint32_t>(which)];
+}
 
 struct engine_options {
    uint32_t      features = feature::simd | feature::relaxed_simd | feature::bulk_memory |
@@ -713,8 +728,30 @@ class instance {
       return bind<R(Args...)>(name)(args...);
    }
 
-   // Calls an export, checking only its parameters and discarding whatever it
-   // returns. This is how psizam's engines treat an entry point.
+   // Whether the module exports the entry point.
+   bool has_entry(entry_point which) const
+   {
+      return abi::pzwt_instance_has_entry(instance_.get(), static_cast<uint32_t>(which)) != 0;
+   }
+
+   // Enters the instance through an entry point: `a` is start's argument, `a`
+   // and `b` are called's, the others take none. Nothing is looked up by name
+   // and no type is examined: the entry points were found, and their
+   // signatures checked, when the module was compiled or loaded. Throws
+   // `error` if the module does not export the entry point.
+   void enter(entry_point which, uint64_t a = 0, uint64_t b = 0)
+   {
+      abi::PzwtError e{};
+      const auto     status =
+          abi::pzwt_call_entry(state_->active, instance_.get(), static_cast<uint32_t>(which), a, b, &e);
+      if (status == 3)
+         throw error("no callable export named " + std::string(entry_point_name(which)));
+      if (status)
+         fail(e);
+   }
+
+   // Calls an export by name, checking only its parameters and discarding
+   // whatever it returns. For exports that are not entry points.
    template <typename... Args>
    void call_discarding_results(std::string_view name, Args... args)
    {

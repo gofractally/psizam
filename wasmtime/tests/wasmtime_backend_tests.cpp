@@ -1345,3 +1345,69 @@ TEST_CASE("wasmtime: debug_info registers compiled code with the debugger interf
    CHECK_THROWS_AS(without.load(with.compile(wasm).serialize()), wt::error);
    CHECK_THROWS_AS(with.load(without.compile(wasm).serialize()), wt::error);
 }
+
+TEST_CASE("wasmtime: entry points are found once per module and entered without a lookup")
+{
+   struct none {};
+   constexpr std::string_view text = R"((module
+     (global $sum (mut i64) (i64.const 0))
+     (global $started (mut i64) (i64.const 0))
+     (func (export "start") (param i64) (global.set $started (local.get 0)))
+     (func (export "called") (param i64 i64) (global.set $sum (i64.add (global.get $sum)
+        (i64.add (local.get 0) (local.get 1)))))
+     (func (export "processTransaction") (unreachable))
+     (func (export "sum") (result i64) (global.get $sum))
+     (func (export "started") (result i64) (global.get $started))
+   ))";
+   wt::runtime<none>  rt;
+   none               n;
+   wt::module         compiled = rt.compile(text);
+   wt::instance<none> inst(rt, compiled, n);
+
+   CHECK(inst.has_entry(wt::entry_point::start));
+   CHECK(inst.has_entry(wt::entry_point::called));
+   CHECK(inst.has_entry(wt::entry_point::process_transaction));
+   CHECK_FALSE(inst.has_entry(wt::entry_point::serve));
+
+   inst.enter(wt::entry_point::start, 0x1122334455667788ull);
+   CHECK(inst.call<uint64_t>("started") == 0x1122334455667788ull);
+   for (uint64_t i = 1; i <= 1000; ++i)
+      inst.enter(wt::entry_point::called, i, 0xffffffff00000000ull);
+   CHECK(inst.call<uint64_t>("sum") == 500500 + 1000 * 0xffffffff00000000ull);
+
+   // An absent entry point is an error that names it; nothing runs.
+   CHECK_THROWS_WITH(inst.enter(wt::entry_point::serve),
+                     Catch::Matchers::Contains("no callable export named serve"));
+   // A trap inside one is reported as a trap and the instance stays usable.
+   CHECK(trap_of([&] { inst.enter(wt::entry_point::process_transaction); }) ==
+         wt::trap_kind::unreachable);
+   inst.enter(wt::entry_point::called, 1, 1);
+
+   // A module loaded from its compiled form has the same entry points.
+   auto               artifact = compiled.serialize();
+   wt::instance<none> loaded(rt, rt.load(artifact), n);
+   CHECK(loaded.has_entry(wt::entry_point::called));
+   CHECK_FALSE(loaded.has_entry(wt::entry_point::serve));
+   loaded.enter(wt::entry_point::called, 2, 3);
+   CHECK(loaded.call<uint64_t>("sum") == 5);
+
+   // An entry point's name with any other signature is not compiled: a
+   // result, a different parameter type or count, or an export of that name
+   // that is not a function.
+   for (std::string_view wrong : {
+            R"((module (func (export "called") (param i64 i64) (result i32) (i32.const 0))))",
+            R"((module (func (export "called") (param i64 i32))))",
+            R"((module (func (export "called") (param i64))))",
+            R"((module (func (export "start"))))",
+            R"((module (func (export "serve") (param i64))))",
+            R"((module (func (export "processTransaction") (result i64) (i64.const 0))))",
+            R"((module (memory (export "called") 1)))",
+        })
+   {
+      INFO(wrong);
+      CHECK_THROWS_AS(rt.compile(wrong), wt::error);
+   }
+   // A module with no entry points at all is still a module.
+   wt::instance<none> bare(rt, rt.compile(R"((module (func (export "f"))))"), n);
+   CHECK_FALSE(bare.has_entry(wt::entry_point::called));
+}
