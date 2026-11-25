@@ -21,6 +21,7 @@
 #include <cstring>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -52,6 +53,10 @@ namespace abi {
       uint8_t  memory16;
       uint32_t pool_instances;
       uint32_t pool_table_elements;
+      uint32_t backtrace_max_frames;
+      uint8_t  backtrace;
+      uint8_t  backtrace_details;
+      uint8_t  debug_info;
    };
    struct PzwtError {
       int32_t status;
@@ -85,6 +90,20 @@ namespace abi {
       void*          env;
       uint8_t        needs_memory;
    };
+   // Strings are UTF-8, not NUL-terminated, null when absent, and only valid
+   // during the sink call.
+   struct PzwtFrame {
+      uint32_t    func_index;
+      uint32_t    line;
+      uint32_t    column;
+      uint8_t     has_module_offset;
+      uint64_t    module_offset;
+      const char* func_name;
+      size_t      func_name_len;
+      const char* file;
+      size_t      file_len;
+   };
+   using PzwtFrameSink = void (*)(void*, const PzwtFrame*);
 
    const char* pzwt_identity();
    void        pzwt_string_free(char*);
@@ -109,6 +128,8 @@ namespace abi {
    void        pzwt_context_memory_storage(PzwtContext*, uint8_t** base, size_t* len);
    void        pzwt_context_set_stack(PzwtContext*, uint32_t bytes);
    uint32_t    pzwt_context_stack(PzwtContext*);
+   void        pzwt_context_backtrace(PzwtContext*, PzwtFrameSink, void*);
+   void        pzwt_context_failure_backtrace(PzwtContext*, PzwtFrameSink, void*);
    PzwtLinker* pzwt_linker_new(const PzwtEngine*, const PzwtImport*, size_t, PzwtError*);
    void        pzwt_linker_delete(PzwtLinker*);
    PzwtInstance* pzwt_instantiate(PzwtContext*, const PzwtLinker*, const PzwtModule*, PzwtError*);
@@ -175,8 +196,8 @@ namespace feature {
 
 // Both profiles are deterministic. They differ only in relaxed madd/nmadd:
 // performance fuses (one rounding), strict follows the WebAssembly
-// deterministic profile (two roundings). wasmtime has no setting for the
-// strict form, so under it modules are rewritten before they are compiled.
+// deterministic profile (two roundings). The fork's compiler emits either
+// form; no module is rewritten for it.
 // Numbered as psizam::float_profile is.
 enum class float_profile : uint32_t { strict = 0, performance = 1 };
 
@@ -205,6 +226,48 @@ struct engine_options {
    // those; compiled modules move between the two with serialize/load.
    uint32_t pool_instances      = 0;
    uint32_t pool_table_elements = 20000;
+   // The three debugging aids below are off by default, and none of them
+   // changes what a module computes. Each is a property of the engine: a
+   // module::serialize artifact only loads into a runtime whose
+   // backtrace_details and debug_info match the one that compiled it.
+   //
+   // Capture wasm backtraces: instance::backtrace() from a host function, and
+   // instance::failure_backtrace() after a call that threw. When false, both
+   // return no frames and a failing call walks no stack. When true, every
+   // failing call records up to backtrace_max_frames frames. The text of a
+   // trap's what() is the same either way: it never lists frames.
+   bool backtrace = false;
+   // Also resolve each frame to a source file and line from the module's
+   // DWARF. Needs backtrace; a runtime asked for details without it fails to
+   // construct. Modules then keep their DWARF for as long as they are loaded.
+   bool backtrace_details = false;
+   // The most frames one backtrace holds, innermost first. A stack overflow
+   // can be thousands of frames deep; this bounds what resolving them costs.
+   // Must be nonzero when backtrace is set.
+   uint32_t backtrace_max_frames = 512;
+   // Translate each module's DWARF to native debug information and register
+   // its compiled code with gdb/lldb through the GDB JIT interface
+   // (__jit_debug_descriptor), so a debugger attached to this process sees
+   // wasm functions and their source lines. Compilation is slower and the
+   // registered image is a second copy of the module's code.
+   bool debug_info = false;
+};
+
+// One wasm frame of a backtrace.
+struct frame {
+   // Index in the module's function index space (imports come first).
+   uint32_t function_index = 0;
+   // From the module's name section, exactly as written there (not
+   // demangled). Empty if the module does not name the function.
+   std::string function_name;
+   // Offset of the frame's instruction from the start of the module binary
+   // handed in. No module is rewritten before it is compiled.
+   std::optional<uint64_t> module_offset;
+   // Source position from the module's DWARF: only with backtrace_details,
+   // and only where the DWARF covers the instruction. Otherwise empty and 0.
+   std::string file;
+   uint32_t    line   = 0;
+   uint32_t    column = 0;
 };
 
 struct instance_limits {
@@ -224,6 +287,15 @@ namespace detail {
       if (e.status == 1)
          throw trap(static_cast<trap_kind>(e.trap_code), message);
       throw error(message);
+   }
+
+   inline void collect_frame(void* out, const abi::PzwtFrame* f)
+   {
+      auto& frames = *static_cast<std::vector<frame>*>(out);
+      frames.push_back({f->func_index, std::string(f->func_name, f->func_name_len),
+                        f->has_module_offset ? std::optional<uint64_t>(f->module_offset)
+                                             : std::nullopt,
+                        std::string(f->file, f->file_len), f->line, f->column});
    }
 
    struct memory_view {
@@ -479,7 +551,9 @@ class runtime {
                              options.max_wasm_stack ? options.max_wasm_stack
                                                     : options.native_stack / 2,
                              options.native_stack, options.epoch_interruption, options.memory16,
-                             options.pool_instances, options.pool_table_elements};
+                             options.pool_instances, options.pool_table_elements,
+                             options.backtrace_max_frames, options.backtrace,
+                             options.backtrace_details, options.debug_info};
       abi::PzwtError  e{};
       auto*           p = abi::pzwt_engine_new(&config, &e);
       if (!p)
@@ -714,6 +788,32 @@ class instance {
    // stack_remaining returns UINT32_MAX.
    void     set_stack_remaining(uint32_t bytes) { abi::pzwt_context_set_stack(state_->active, bytes); }
    uint32_t stack_remaining() { return abi::pzwt_context_stack(state_->active); }
+
+   // The wasm frames of this instance now on the calling thread's stack,
+   // innermost first, at most engine_options::backtrace_max_frames. For use
+   // inside a host function this instance called. Empty if the runtime was
+   // made without engine_options::backtrace or the instance is not running.
+   std::vector<frame> backtrace()
+   {
+      std::vector<frame> out;
+      abi::pzwt_context_backtrace(state_->active, detail::collect_frame, &out);
+      return out;
+   }
+
+   // The wasm frames that were on the stack when the most recent call into
+   // this instance failed: where it trapped, or from where the host function
+   // that threw was called. Innermost first, at most
+   // engine_options::backtrace_max_frames. Every call into the instance
+   // clears it first, so it is empty if the most recent call succeeded, if
+   // there has been none, or if the runtime was made without
+   // engine_options::backtrace. This is the only place the frames of a
+   // failure appear; the exception's text does not list them.
+   std::vector<frame> failure_backtrace()
+   {
+      std::vector<frame> out;
+      abi::pzwt_context_failure_backtrace(state_->active, detail::collect_frame, &out);
+      return out;
+   }
 
    interrupter make_interrupter() { return interrupter(abi::pzwt_store_interrupter(store_.get())); }
 

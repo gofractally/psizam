@@ -27,6 +27,11 @@ wasmtime = { git = "https://github.com/gofractally/wasmtime", rev = "f7f7b98cfbd
     "gc-null",
     # Preallocated instance slots (engine option pool_instances).
     "pooling-allocator",
+    # File and line in wasm backtraces (engine option backtrace_details).
+    "addr2line",
+    # The GDB JIT interface: __jit_debug_descriptor and the registration of
+    # compiled code with a native debugger (engine option debug_info).
+    "debug-builtins",
 ] }
 
 # Used to rewrite modules for deterministic stack accounting. Must match the

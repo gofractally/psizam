@@ -30,8 +30,8 @@ pub const PZWT_FEATURE_SATURATING_FLOAT_TO_INT: u32 = 1 << 8;
 
 /// Deterministic float profiles. `Performance` is wasmtime's own deterministic
 /// behaviour (fused relaxed madd). `Strict` is the WebAssembly deterministic
-/// profile (unfused relaxed madd); modules are rewritten before compiling to
-/// get it, since wasmtime has no setting for it.
+/// profile (unfused relaxed madd), which the fork's compiler emits when asked
+/// (`Config::psizam_unfused_madd`); no module is rewritten for it.
 // Numbered as psizam numbers them.
 pub const PZWT_FLOAT_STRICT: u32 = 0;
 pub const PZWT_FLOAT_PERFORMANCE: u32 = 1;
@@ -58,6 +58,20 @@ pub struct PzwtConfig {
     pub pool_instances: u32,
     /// Table elements each pooled slot can hold.
     pub pool_table_elements: u32,
+    /// The most wasm frames one backtrace holds. Must be nonzero when
+    /// `backtrace` is set; ignored otherwise.
+    pub backtrace_max_frames: u32,
+    /// If nonzero, wasm backtraces are captured: on request through
+    /// `pzwt_context_backtrace`, and whenever a call fails. If zero nothing
+    /// is ever captured, so a failing call costs no stack walk.
+    pub backtrace: u8,
+    /// If nonzero, modules keep their DWARF and each captured frame is
+    /// resolved to a source file and line. Requires `backtrace`.
+    pub backtrace_details: u8,
+    /// If nonzero, a module's DWARF is translated to native debug information
+    /// and its compiled code is registered with gdb/lldb through the GDB JIT
+    /// interface (`__jit_debug_descriptor`).
+    pub debug_info: u8,
 }
 
 pub const PZWT_OK: i32 = 0;
@@ -128,15 +142,30 @@ impl std::fmt::Display for HostFailure {
 }
 impl std::error::Error for HostFailure {}
 
+/// The text of an error without the wasm frames wasmtime attaches to it when
+/// backtraces are captured, so that it reads the same whether they are or
+/// not. Everything else wasmtime says, such as the address of a memory fault,
+/// is kept. Frames are reported separately, through `failure_backtrace`.
+fn message(error: &Error) -> String {
+    // wasmtime adds the backtrace as one context of the error.
+    let frames = error.downcast_ref::<WasmBacktrace>().map(|b| b.to_string());
+    let parts: Vec<String> = error
+        .chain()
+        .map(|part| part.to_string())
+        .filter(|part| Some(part) != frames.as_ref())
+        .collect();
+    parts.join(": ")
+}
+
 fn report(out: *mut PzwtError, error: &Error) -> i32 {
     if error.downcast_ref::<HostFailure>().is_some() {
         set_error(out, PZWT_HOST_FAILURE, 0, String::new());
         PZWT_HOST_FAILURE
     } else if let Some(trap) = error.downcast_ref::<Trap>() {
-        set_error(out, PZWT_TRAP, trap_code(trap), format!("{error:#}"));
+        set_error(out, PZWT_TRAP, trap_code(trap), message(error));
         PZWT_TRAP
     } else {
-        set_error(out, PZWT_ERROR, 0, format!("{error:#}"));
+        set_error(out, PZWT_ERROR, 0, message(error));
         PZWT_ERROR
     }
 }
@@ -144,7 +173,7 @@ fn report(out: *mut PzwtError, error: &Error) -> i32 {
 /// Bump when what the shim attaches to a module before compiling it changes.
 const REWRITE_REVISION: u32 = 2;
 /// The C ABI and memory16-v1 runtime contract are part of artifact identity.
-const SHIM_ABI_REVISION: u32 = 5;
+const SHIM_ABI_REVISION: u32 = 6;
 const MEMORY16_PROFILE_REVISION: u32 = 1;
 
 /// Identifies what this build compiles a module into: the wasmtime version,
@@ -199,8 +228,35 @@ pub unsafe extern "C" fn pzwt_engine_new(
         set_error(error, PZWT_ERROR, 0, "unknown memory16 override".into());
         return std::ptr::null_mut();
     }
+    if config.backtrace > 1 || config.backtrace_details > 1 || config.debug_info > 1 {
+        set_error(error, PZWT_ERROR, 0, "unknown debugging option value".into());
+        return std::ptr::null_mut();
+    }
+    let backtrace_frames = if config.backtrace != 0 {
+        let Some(frames) = std::num::NonZeroUsize::new(config.backtrace_max_frames as usize) else {
+            set_error(error, PZWT_ERROR, 0, "backtrace capture needs a nonzero frame limit".into());
+            return std::ptr::null_mut();
+        };
+        Some(frames)
+    } else if config.backtrace_details != 0 {
+        set_error(error, PZWT_ERROR, 0, "backtrace details need backtrace capture".into());
+        return std::ptr::null_mut();
+    } else {
+        None
+    };
     let has = |bit: u32| config.features & bit != 0;
     let mut c = Config::new();
+
+    // Debugging aids, each stated so that neither wasmtime's defaults nor its
+    // WASMTIME_BACKTRACE_DETAILS environment variable decide them. With no
+    // frame limit wasmtime captures nothing when a call fails.
+    c.wasm_backtrace_max_frames(backtrace_frames);
+    c.wasm_backtrace_details(if config.backtrace_details != 0 {
+        WasmBacktraceDetails::Enable
+    } else {
+        WasmBacktraceDetails::Disable
+    });
+    c.debug_info(config.debug_info != 0);
 
     // This only supplies a profile for untagged source. The fork preserves
     // each module's declared/resolved profile in its own memory metadata, so
@@ -440,6 +496,8 @@ struct Data {
     native_stack: usize,
     limits: StoreLimits,
     interrupt: Arc<AtomicBool>,
+    /// The wasm frames of the most recent call if it failed, innermost first.
+    failure_backtrace: Vec<Frame>,
 }
 
 /// What every call takes: a live borrow of a store. The store hands one out
@@ -555,6 +613,7 @@ pub unsafe extern "C" fn pzwt_store_new(
             .trap_on_grow_failure(false)
             .build(),
         interrupt: Arc::new(AtomicBool::new(false)),
+        failure_backtrace: Vec::new(),
     };
     let mut store = Box::new(Store::new(&engine.engine, data));
     store.limiter(|d| &mut d.limits);
@@ -692,6 +751,121 @@ pub unsafe extern "C" fn pzwt_context_stack(context: *mut PzwtContext) -> u32 {
     let cx = &mut (*context).0;
     // The budget is set from a u32 and only ever decreases.
     cx.psizam_stack_remaining() as u32
+}
+
+// ── backtraces ──────────────────────────────────────────────────────────────
+
+/// One wasm frame, copied out of a `WasmBacktrace`.
+struct Frame {
+    func_index: u32,
+    func_name: Option<String>,
+    module_offset: Option<usize>,
+    file: Option<String>,
+    line: u32,
+    column: u32,
+}
+
+/// The frames of a backtrace, innermost first; none if there is no backtrace.
+fn frames_of(backtrace: Option<&WasmBacktrace>) -> Vec<Frame> {
+    let Some(backtrace) = backtrace else {
+        return Vec::new();
+    };
+    backtrace
+        .frames()
+        .iter()
+        .map(|frame| {
+            // DWARF lists inlined functions innermost first, so the first
+            // symbol is the source position of the frame's own instruction.
+            let symbol = frame.symbols().first();
+            Frame {
+                func_index: frame.func_index(),
+                func_name: frame.func_name().map(str::to_owned),
+                module_offset: frame.module_offset(),
+                file: symbol.and_then(|s| s.file()).map(str::to_owned),
+                line: symbol.and_then(|s| s.line()).unwrap_or(0),
+                column: symbol.and_then(|s| s.column()).unwrap_or(0),
+            }
+        })
+        .collect()
+}
+
+/// A wasm frame as handed to a `PzwtFrameSink`. The strings are UTF-8, not
+/// NUL-terminated, and only valid during the sink call.
+#[repr(C)]
+pub struct PzwtFrame {
+    /// Index of the function in the module's function index space.
+    pub func_index: u32,
+    /// 1-based source line and column; zero when not known.
+    pub line: u32,
+    pub column: u32,
+    /// Nonzero if `module_offset` is known.
+    pub has_module_offset: u8,
+    /// Offset of the frame's instruction from the start of the module binary
+    /// that was compiled.
+    pub module_offset: u64,
+    /// The function's name from the module's name section, as written there
+    /// (not demangled). Null if the module does not name it.
+    pub func_name: *const u8,
+    pub func_name_len: usize,
+    /// Source file from the module's DWARF. Null unless the engine was made
+    /// with `backtrace_details` and the DWARF covers the frame.
+    pub file: *const u8,
+    pub file_len: usize,
+}
+
+pub type PzwtFrameSink = unsafe extern "C" fn(*mut c_void, *const PzwtFrame);
+
+unsafe fn emit_frames(frames: &[Frame], sink: PzwtFrameSink, sink_data: *mut c_void) {
+    let text = |s: &Option<String>| match s {
+        Some(s) => (s.as_ptr(), s.len()),
+        None => (std::ptr::null(), 0),
+    };
+    for frame in frames {
+        let (func_name, func_name_len) = text(&frame.func_name);
+        let (file, file_len) = text(&frame.file);
+        let out = PzwtFrame {
+            func_index: frame.func_index,
+            line: frame.line,
+            column: frame.column,
+            has_module_offset: u8::from(frame.module_offset.is_some()),
+            module_offset: frame.module_offset.unwrap_or(0) as u64,
+            func_name,
+            func_name_len,
+            file,
+            file_len,
+        };
+        sink(sink_data, &out);
+    }
+}
+
+/// Hands `sink` the wasm frames now on this thread's stack that belong to the
+/// store behind `context`, innermost first, at most the engine's
+/// `backtrace_max_frames`. Meant for a host function, which passes the context
+/// it was given. Hands over nothing if the engine was made without
+/// `backtrace`, or if no wasm of this store is running.
+#[no_mangle]
+pub unsafe extern "C" fn pzwt_context_backtrace(
+    context: *mut PzwtContext,
+    sink: PzwtFrameSink,
+    sink_data: *mut c_void,
+) {
+    let backtrace = WasmBacktrace::capture(&(*context).0);
+    emit_frames(&frames_of(Some(&backtrace)), sink, sink_data);
+}
+
+/// Hands `sink` the wasm frames that were on the stack when the most recent
+/// `pzwt_call` in this store failed: where it trapped, or the host function
+/// that reported failure was called from. Innermost first, at most the
+/// engine's `backtrace_max_frames`. Every `pzwt_call` clears them when it
+/// starts, so this hands over nothing if the most recent call succeeded, if
+/// none was made, or if the engine was made without `backtrace`.
+#[no_mangle]
+pub unsafe extern "C" fn pzwt_context_failure_backtrace(
+    context: *mut PzwtContext,
+    sink: PzwtFrameSink,
+    sink_data: *mut c_void,
+) {
+    emit_frames(&(*context).0.data().failure_backtrace, sink, sink_data);
 }
 
 // ── host functions ──────────────────────────────────────────────────────────
@@ -971,10 +1145,12 @@ pub unsafe extern "C" fn pzwt_call(
     let values = std::ptr::slice_from_raw_parts_mut(values, count);
     let native_stack = cx.data().native_stack;
     let func = &(*func).0;
+    cx.data_mut().failure_backtrace.clear();
     let outcome = on_native_stack(native_stack, || func.call_unchecked(&mut *cx, values));
     match outcome {
         Ok(()) => PZWT_OK,
         Err(e) => {
+            cx.data_mut().failure_backtrace = frames_of(e.downcast_ref::<WasmBacktrace>());
             // An exhausted budget is wasmtime's own stack-overflow trap, as is
             // an exhausted native stack; the native stack is sized so that the
             // budget always runs out first.

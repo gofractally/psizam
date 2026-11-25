@@ -20,7 +20,8 @@ target_include_directories(psizam_wasmtime_backend_tests PRIVATE "${CMAKE_CURREN
 target_link_libraries(psizam_wasmtime_backend_tests PRIVATE
    psizam psizam-exec psizam-wasmtime Catch2::Catch2)
 target_compile_definitions(psizam_wasmtime_backend_tests PRIVATE CATCH_CONFIG_NO_POSIX_SIGNALS
-   FLOAT_PARITY_WASM="${_parity_wasm}")
+   FLOAT_PARITY_WASM="${_parity_wasm}"
+   DEBUG_FIXTURE_WASM="${CMAKE_CURRENT_SOURCE_DIR}/debug_fixture.wasm")
 add_test(NAME execution.wasmtime-backend COMMAND psizam_wasmtime_backend_tests)
 set_tests_properties(execution.wasmtime-backend PROPERTIES LABELS "execution;quick;wasmtime" TIMEOUT 300)
 

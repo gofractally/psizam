@@ -849,3 +849,499 @@ TEST_CASE("wasmtime: pooled instances start from the module's initial state and 
    wt::instance<no_host> again(pooled, module, h);
    CHECK(again.call<uint32_t>("bump") == 12);
 }
+
+// ── debugging aids: wasm backtraces and native debug information ────────────
+
+// The GDB JIT interface, which the wasmtime shim defines. A debugger reads
+// this list to find code compiled at run time.
+extern "C" {
+struct jit_code_entry {
+   jit_code_entry* next_entry;
+   jit_code_entry* prev_entry;
+   const char*     symfile_addr;
+   uint64_t        symfile_size;
+};
+struct jit_descriptor {
+   uint32_t        version;
+   uint32_t        action_flag;
+   jit_code_entry* relevant_entry;
+   jit_code_entry* first_entry;
+};
+extern jit_descriptor __jit_debug_descriptor;
+}
+
+namespace {
+
+struct trace_host {
+   wt::instance<trace_host>* self  = nullptr;
+   int                       calls = 0;
+   std::vector<wt::frame>    frames;
+   void capture()
+   {
+      ++calls;
+      frames = self->backtrace();
+   }
+   void fail() { throw std::logic_error("host failed"); }
+};
+
+wt::runtime<trace_host> trace_runtime(const wt::engine_options& options)
+{
+   wt::runtime<trace_host> rt(options);
+   rt.add<&trace_host::capture>("env", "capture").add<&trace_host::fail>("env", "fail");
+   return rt;
+}
+
+wt::engine_options with_backtrace(uint32_t max_frames = 512)
+{
+   wt::engine_options options;
+   options.backtrace            = true;
+   options.backtrace_max_frames = max_frames;
+   return options;
+}
+
+// capture is function 0 and fail is function 1, so inner, middle and outer
+// are 2, 3 and 4. The functions are named but only outer is exported: the
+// names can only come from the name section.
+constexpr std::string_view host_chain = R"((module
+  (import "env" "capture" (func $capture))
+  (import "env" "fail" (func $fail))
+  (func $inner (param i32)
+    (if (local.get 0) (then (call $fail)) (else (call $capture))))
+  (func $middle (param i32) (call $inner (local.get 0)))
+  (func $outer (export "run") (param i32) (call $middle (local.get 0)))
+))";
+
+// No imports: inner, middle and outer are functions 0, 1 and 2.
+constexpr std::string_view trap_chain = R"((module
+  (func $inner unreachable)
+  (func $middle (call $inner))
+  (func $outer (export "run") (call $middle))
+))";
+
+// Recursion to a chosen depth with a host call at the bottom, and recursion
+// without end.
+constexpr std::string_view deep = R"((module
+  (import "env" "capture" (func $capture))
+  (func $down (export "down") (param i32)
+    (if (local.get 0)
+      (then (call $down (i32.sub (local.get 0) (i32.const 1))))
+      (else (call $capture))))
+  (func $forever (export "forever") (call $forever))
+))";
+
+void require_chain(const std::vector<wt::frame>& frames, uint32_t first_index)
+{
+   REQUIRE(frames.size() == 3);
+   const char* names[] = {"inner", "middle", "outer"};
+   for (uint32_t i = 0; i < 3; ++i)
+   {
+      CHECK(frames[i].function_name == names[i]);
+      CHECK(frames[i].function_index == first_index + i);
+      CHECK(frames[i].module_offset.has_value());
+      // No details were asked for.
+      CHECK(frames[i].file.empty());
+      CHECK(frames[i].line == 0);
+   }
+   // Each frame is at a different instruction, later functions further on.
+   CHECK(*frames[0].module_offset < *frames[1].module_offset);
+   CHECK(*frames[1].module_offset < *frames[2].module_offset);
+}
+
+std::set<const jit_code_entry*> registered_images()
+{
+   std::set<const jit_code_entry*> out;
+   for (auto* e = __jit_debug_descriptor.first_entry; e; e = e->next_entry)
+      out.insert(e);
+   return out;
+}
+
+// The entries registered since `before` whose image mentions `text`.
+size_t new_images_naming(const std::set<const jit_code_entry*>& before, std::string_view text)
+{
+   size_t count = 0;
+   for (auto* e = __jit_debug_descriptor.first_entry; e; e = e->next_entry)
+      if (!before.contains(e) &&
+          std::string_view(e->symfile_addr, e->symfile_size).find(text) != std::string_view::npos)
+         ++count;
+   return count;
+}
+
+// The line of the call to capture() in debug_fixture.c.
+constexpr uint32_t debug_fixture_call_line = 18;
+
+}  // namespace
+
+TEST_CASE("wasmtime: a host function can capture the wasm frames that called it")
+{
+   auto                     rt = trace_runtime(with_backtrace());
+   trace_host               h;
+   wt::instance<trace_host> inst(rt, rt.compile(host_chain), h);
+   h.self = &inst;
+
+   // Nothing is running, so there is nothing to capture.
+   CHECK(inst.backtrace().empty());
+
+   inst.call<void, uint32_t>("run", 0);
+   REQUIRE(h.calls == 1);
+   require_chain(h.frames, 2);
+   // The call succeeded: no failure was recorded.
+   CHECK(inst.failure_backtrace().empty());
+}
+
+TEST_CASE("wasmtime: a failed call leaves the backtrace of where it failed")
+{
+   auto       rt = trace_runtime(with_backtrace());
+   trace_host h;
+   {
+      wt::instance<trace_host> inst(rt, rt.compile(trap_chain), h);
+      CHECK(inst.failure_backtrace().empty());
+      CHECK(trap_of([&] { inst.call("run"); }) == wt::trap_kind::unreachable);
+      require_chain(inst.failure_backtrace(), 0);
+      // Reading it does not consume it.
+      require_chain(inst.failure_backtrace(), 0);
+   }
+   {
+      // A host function that throws: the frames it was called from.
+      wt::instance<trace_host> inst(rt, rt.compile(host_chain), h);
+      h.self = &inst;
+      CHECK_THROWS_AS((inst.call<void, uint32_t>("run", 1)), std::logic_error);
+      require_chain(inst.failure_backtrace(), 2);
+      // Every call starts with none, so after one that succeeds a failure
+      // from somewhere else cannot be given this one's frames.
+      inst.call<void, uint32_t>("run", 0);
+      CHECK(inst.failure_backtrace().empty());
+   }
+}
+
+TEST_CASE("wasmtime: backtraces are off unless the engine options ask for them")
+{
+   // Not even wasmtime's own environment switch turns anything on.
+   setenv("WASMTIME_BACKTRACE_DETAILS", "1", 1);
+   CHECK_FALSE(wt::engine_options{}.backtrace);
+   CHECK_FALSE(wt::engine_options{}.backtrace_details);
+   CHECK_FALSE(wt::engine_options{}.debug_info);
+   CHECK(wt::engine_options{}.backtrace_max_frames == 512);
+
+   auto       rt = trace_runtime({});
+   trace_host h;
+   {
+      wt::instance<trace_host> inst(rt, rt.compile(host_chain), h);
+      h.self = &inst;
+      inst.call<void, uint32_t>("run", 0);
+      REQUIRE(h.calls == 1);
+      CHECK(h.frames.empty());
+      CHECK_THROWS_AS((inst.call<void, uint32_t>("run", 1)), std::logic_error);
+      CHECK(inst.failure_backtrace().empty());
+   }
+   {
+      wt::instance<trace_host> inst(rt, rt.compile(trap_chain), h);
+      try
+      {
+         inst.call("run");
+         FAIL("expected a trap");
+      }
+      catch (const wt::trap& t)
+      {
+         CHECK(t.kind == wt::trap_kind::unreachable);
+         // The message names no frames either.
+         CHECK(std::string_view(t.what()).find("inner") == std::string_view::npos);
+      }
+      CHECK(inst.failure_backtrace().empty());
+   }
+
+   // Capture without details: frames, but no source positions, even for a
+   // module that has DWARF.
+   {
+      auto                     plain = trace_runtime(with_backtrace());
+      wt::instance<trace_host> inst(plain, plain.compile(psizam::read_wasm(DEBUG_FIXTURE_WASM)), h);
+      h.self = &inst;
+      h.frames.clear();
+      CHECK(inst.call<uint32_t, uint32_t>("debug_fixture_entry", 1) == 2);
+      REQUIRE(h.frames.size() == 1);
+      CHECK(h.frames[0].function_name == "debug_fixture_entry");
+      CHECK(h.frames[0].file.empty());
+      CHECK(h.frames[0].line == 0);
+   }
+
+   // Options that cannot be honoured are refused, not adjusted.
+   wt::engine_options details_only;
+   details_only.backtrace_details = true;
+   CHECK_THROWS_AS(wt::runtime<trace_host>(details_only), wt::error);
+   CHECK_THROWS_AS(wt::runtime<trace_host>(with_backtrace(0)), wt::error);
+}
+
+TEST_CASE("wasmtime: a backtrace holds no more frames than the engine's limit")
+{
+   trace_host h;
+   {
+      auto                     rt = trace_runtime(with_backtrace(16));
+      wt::instance<trace_host> inst(rt, rt.compile(deep), h);
+      h.self = &inst;
+
+      // Below the limit every frame is there: `down` once per level.
+      inst.call<void, uint32_t>("down", 9);
+      CHECK(h.frames.size() == 10);
+      // Above it, the innermost 16.
+      inst.call<void, uint32_t>("down", 99);
+      REQUIRE(h.frames.size() == 16);
+      for (auto& f : h.frames)
+         CHECK(f.function_name == "down");
+
+      // Recursion that runs out of native stack has thousands of frames.
+      CHECK(trap_of([&] { inst.call("forever"); }) == wt::trap_kind::stack_overflow);
+      auto frames = inst.failure_backtrace();
+      REQUIRE(frames.size() == 16);
+      for (auto& f : frames)
+         CHECK(f.function_name == "forever");
+   }
+   {
+      // The same with deterministic stack accounting, where the overflow is
+      // the byte budget running out.
+      auto options           = with_backtrace(16);
+      auto              rt   = trace_runtime(options);
+      psizam::wasm_code code = wt::assemble(deep);
+      stack_options     psizam_options;
+      auto              costs = wt::validate_and_cost(code, psizam_options);
+      wt::instance<trace_host> inst(rt, rt.compile_metered(code, costs), h);
+      h.self = &inst;
+      inst.set_stack_remaining(1 << 20);
+      CHECK(trap_of([&] { inst.call("forever"); }) == wt::trap_kind::stack_overflow);
+      auto frames = inst.failure_backtrace();
+      REQUIRE(frames.size() == 16);
+      for (auto& f : frames)
+         CHECK(f.function_name == "forever");
+   }
+   {
+      // A wider limit is honoured too.
+      auto                     rt = trace_runtime(with_backtrace(1000));
+      wt::instance<trace_host> inst(rt, rt.compile(deep), h);
+      h.self = &inst;
+      inst.call<void, uint32_t>("down", 599);
+      CHECK(h.frames.size() == 600);
+      CHECK(trap_of([&] { inst.call("forever"); }) == wt::trap_kind::stack_overflow);
+      CHECK(inst.failure_backtrace().size() == 1000);
+   }
+}
+
+TEST_CASE("wasmtime: backtrace details give the source file and line from the module's DWARF")
+{
+   auto options              = with_backtrace();
+   options.backtrace_details = true;
+   auto       rt             = trace_runtime(options);
+   auto       module         = rt.compile(psizam::read_wasm(DEBUG_FIXTURE_WASM));
+   trace_host h;
+   wt::instance<trace_host> inst(rt, module, h);
+   h.self = &inst;
+
+   CHECK(inst.call<uint32_t, uint32_t>("debug_fixture_entry", 41) == 42);
+   REQUIRE(h.frames.size() == 1);
+   CHECK(h.frames[0].function_name == "debug_fixture_entry");
+   CHECK(h.frames[0].function_index == 1);
+   CHECK(h.frames[0].file == "./debug_fixture.c");
+   CHECK(h.frames[0].line == debug_fixture_call_line);
+
+   // Details are part of how a module is compiled: its artifact does not
+   // load into a runtime without them.
+   auto plain = trace_runtime(with_backtrace());
+   CHECK_THROWS_AS(plain.load(module.serialize()), wt::error);
+   // Capturing and its frame limit are not: artifacts move freely between
+   // runtimes that differ only in those.
+   auto off      = trace_runtime({});
+   auto artifact = off.compile(host_chain).serialize();
+   {
+      wt::instance<trace_host> inst(plain, plain.load(artifact), h);
+      h.self = &inst;
+      inst.call<void, uint32_t>("run", 0);
+      require_chain(h.frames, 2);
+   }
+
+   // What the frame of a module compiled some other way says of its source.
+   struct position {
+      std::string file;
+      uint32_t    line;
+      bool operator==(const position&) const = default;
+   };
+   const position    placed{"./debug_fixture.c", debug_fixture_call_line};
+   psizam::wasm_code code = psizam::read_wasm(DEBUG_FIXTURE_WASM);
+   stack_options     psizam_options;
+   const auto        costs = wt::validate_and_cost(code, psizam_options);
+   REQUIRE(costs.size() == 1);
+   REQUIRE(costs[0] > 0);
+   auto position_with = [&](wt::float_profile fp, bool metered) {
+      auto o  = options;
+      o.fp    = fp;
+      auto rt = trace_runtime(o);
+      wt::instance<trace_host> inst(rt, metered ? rt.compile_metered(code, costs) : rt.compile(code),
+                                    h);
+      h.self = &inst;
+      h.frames.clear();
+      inst.set_stack_remaining(1 << 20);
+      CHECK(inst.call<uint32_t, uint32_t>("debug_fixture_entry", 41) == 42);
+      // A metered module really is metered: the call spent some of the budget
+      // and gave it back.
+      if (metered)
+         CHECK(inst.stack_remaining() == 1 << 20);
+      REQUIRE(h.frames.size() == 1);
+      CHECK(h.frames[0].function_name == "debug_fixture_entry");
+      CHECK(h.frames[0].function_index == 1);
+      return position{h.frames[0].file, h.frames[0].line};
+   };
+   using wt::float_profile;
+   // No module is rewritten before it is compiled, under either float
+   // profile and metered or not, so its DWARF always describes it.
+   CHECK(position_with(float_profile::performance, true) == placed);
+   CHECK(position_with(float_profile::performance, false) == placed);
+   CHECK(position_with(float_profile::strict, true) == placed);
+   CHECK(position_with(float_profile::strict, false) == placed);
+}
+
+namespace {
+// One export per way a call can fail, each a call deep so there are frames.
+constexpr std::string_view failures = R"((module
+  (import "env" "fail" (func $fail))
+  (type $binary (func (param i32 i32) (result i32)))
+  (memory 1)
+  (table 1 funcref)
+  (elem (i32.const 0) $nothing)
+  (global $zero (mut i32) (i32.const 0))
+  (func $nothing)
+  (func $unreachable unreachable)
+  (func $load (drop (i32.load (i32.add (global.get $zero) (i32.const 70000)))))
+  (func $divide (drop (i32.div_u (i32.const 1) (global.get $zero))))
+  (func $indirect
+    (drop (call_indirect (type $binary) (i32.const 1) (i32.const 2) (global.get $zero))))
+  (func $forever (call $forever))
+  (func $host (call $fail))
+  (func (export "unreachable") (call $unreachable))
+  (func (export "load") (call $load))
+  (func (export "divide") (call $divide))
+  (func (export "indirect") (call $indirect))
+  (func (export "forever") (call $forever))
+  (func (export "host") (call $host))
+))";
+
+struct failure {
+   std::string text;
+   int         kind   = -1;  // trap_kind, or -1 for the host's own exception
+   size_t      frames = 0;
+};
+
+failure fail(const wt::engine_options& options, bool metered, std::string_view name)
+{
+   auto              rt   = trace_runtime(options);
+   psizam::wasm_code code = wt::assemble(failures);
+   stack_options     psizam_options;
+   trace_host        h;
+   wt::instance<trace_host> inst(
+       rt, metered ? rt.compile_metered(code, wt::validate_and_cost(code, psizam_options))
+                   : rt.compile(code),
+       h);
+   inst.set_stack_remaining(1 << 16);
+   failure out;
+   try
+   {
+      inst.call(name);
+      FAIL("expected " << name << " to fail");
+   }
+   catch (const wt::trap& t)
+   {
+      out.text = t.what();
+      out.kind = static_cast<int>(t.kind);
+   }
+   catch (const std::logic_error& e)
+   {
+      out.text = e.what();
+   }
+   out.frames = inst.failure_backtrace().size();
+   return out;
+}
+}  // namespace
+
+TEST_CASE("wasmtime: the text of a failure is the same with backtraces on and off")
+{
+   using kind = wt::trap_kind;
+   const std::pair<const char*, int> cases[] = {
+       {"unreachable", int(kind::unreachable)},
+       {"load", int(kind::memory_out_of_bounds)},
+       {"divide", int(kind::integer_division_by_zero)},
+       {"indirect", int(kind::bad_signature)},
+       {"forever", int(kind::stack_overflow)},
+       {"host", -1},
+   };
+   {
+      for (bool metered : {false, true})
+         for (auto [name, expected] : cases)
+         {
+            INFO(name << (metered ? ", metered" : ", not metered"));
+            wt::engine_options off;
+            auto on       = off;
+            on.backtrace  = true;
+            auto detailed = on;
+            detailed.backtrace_details = true;
+
+            const auto without = fail(off, metered, name);
+            const auto with    = fail(on, metered, name);
+            const auto most    = fail(detailed, metered, name);
+            CHECK(without.kind == expected);
+            CHECK(with.kind == expected);
+            CHECK_FALSE(without.text.empty());
+            // The frames were captured, and are not in the text.
+            CHECK(without.frames == 0);
+            CHECK(with.frames > 0);
+            CHECK(with.text == without.text);
+            CHECK(most.text == without.text);
+            CHECK(with.text.find("backtrace") == std::string::npos);
+            // What wasmtime adds besides frames is still there.
+            if (std::string_view(name) == "load")
+               CHECK(without.text.find("memory fault at wasm address 0x11170 in linear memory of "
+                                       "size 0x10000") != std::string::npos);
+            // Not metered, the recursion runs out of native stack; metered,
+            // out of budget. The text is the same.
+            if (std::string_view(name) == "forever")
+               CHECK(without.text == "stack overflow");
+         }
+   }
+}
+
+TEST_CASE("wasmtime: debug_info registers compiled code with the debugger interface")
+{
+   const auto wasm = psizam::read_wasm(DEBUG_FIXTURE_WASM);
+   trace_host h;
+   REQUIRE(__jit_debug_descriptor.version == 1);
+
+   // Off: compiling and running a module with DWARF registers nothing.
+   {
+      const auto               before = registered_images();
+      auto                     rt     = trace_runtime({});
+      wt::instance<trace_host> inst(rt, rt.compile(wasm), h);
+      h.self = &inst;
+      CHECK(inst.call<uint32_t, uint32_t>("debug_fixture_entry", 1) == 2);
+      CHECK(registered_images() == before);
+   }
+
+   const auto before = registered_images();
+   {
+      wt::engine_options options;
+      options.debug_info = true;
+      auto                     rt = trace_runtime(options);
+      wt::instance<trace_host> inst(rt, rt.compile(wasm), h);
+      h.self = &inst;
+      // The module still runs, and its image is on the debugger's list. The
+      // image is an ELF file whose symbols and DWARF name the function.
+      CHECK(inst.call<uint32_t, uint32_t>("debug_fixture_entry", 1) == 2);
+      CHECK(new_images_naming(before, "debug_fixture_entry") == 1);
+      for (auto* e = __jit_debug_descriptor.first_entry; e; e = e->next_entry)
+         if (!before.contains(e))
+            CHECK(std::string_view(e->symfile_addr, e->symfile_size).starts_with("\x7f" "ELF"));
+   }
+   // Dropping the module takes its image off the list again.
+   CHECK(registered_images() == before);
+
+   // Debug information is part of how a module is compiled: an artifact made
+   // with it does not load into a runtime without it, nor the reverse.
+   wt::engine_options options;
+   options.debug_info = true;
+   auto with = trace_runtime(options), without = trace_runtime({});
+   CHECK_THROWS_AS(without.load(with.compile(wasm).serialize()), wt::error);
+   CHECK_THROWS_AS(with.load(without.compile(wasm).serialize()), wt::error);
+}
