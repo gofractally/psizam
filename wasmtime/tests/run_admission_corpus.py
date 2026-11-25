@@ -14,6 +14,7 @@ modules are in it and its smallest module in hex. Standard library only.
 import argparse
 import collections
 import os
+import sys
 import re
 import subprocess
 
@@ -48,8 +49,21 @@ def main():
     ap.add_argument("--batch", type=int, default=200)
     ap.add_argument("--timeout", type=int, default=120, help="seconds for a batch, and for one file on a rerun")
     ap.add_argument("--log", help="write one line per module here")
+    ap.add_argument("--generate", metavar="GENERATOR",
+                    help="write the whole catalogue (seed 1) into --dir with this generator first")
+    ap.add_argument("--expect", action="append", default=[], metavar="FAMILY/TWIST",
+                    help="a split that is known and accepted (repeatable); with --check any other split fails")
+    ap.add_argument("--check", action="store_true",
+                    help="exit 1 if a module crashed or hung the tool, or split and is not expected")
     args = ap.parse_args()
 
+    if args.generate:
+        os.makedirs(args.dir, exist_ok=True)
+        for f in os.listdir(args.dir):
+            if f.endswith(".wasm"):
+                os.remove(os.path.join(args.dir, f))
+        subprocess.run([sys.executable, args.generate, "--seed", "1", "--count", "0", "--out", args.dir],
+                       check=True, stdout=subprocess.DEVNULL)
     files = sorted(os.path.join(args.dir, f) for f in os.listdir(args.dir) if f.endswith(".wasm"))
     results, broken = {}, []
     for at in range(0, len(files), args.batch):
@@ -92,6 +106,18 @@ def main():
         print("  hex: %s" % open(smallest, "rb").read().hex())
         print("  twists: %s" % " ".join(os.path.basename(f).split("__")[2][:-5] for _, f, _ in members[:40])
               + (" ..." if len(members) > 40 else ""))
+
+    if args.check:
+        unexpected = []
+        for f, (verdict, message) in sorted(results.items()):
+            if verdict == "SPLIT":
+                parts = os.path.basename(f)[:-5].split("__")
+                if "%s/%s" % (parts[1], parts[2]) not in args.expect:
+                    unexpected.append((f, message))
+        for f, message in unexpected:
+            print("UNEXPECTED SPLIT %s: %s" % (os.path.basename(f), message))
+        if unexpected or broken or not files:
+            sys.exit(1)
 
 
 if __name__ == "__main__":

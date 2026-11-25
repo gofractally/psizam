@@ -33,6 +33,23 @@ set_tests_properties(execution.wasmtime-backend PROPERTIES LABELS "execution;qui
 add_executable(psizam_wasmtime_differential_fuzz differential_fuzz.cpp)
 target_link_libraries(psizam_wasmtime_differential_fuzz PRIVATE psizam psizam-exec psizam-wasmtime)
 
+# Every module of the structured corpus (one deliberate twist each, about
+# 8,000 modules) that psizam admits under a strict host's options must compile
+# on wasmtime: a module one engine accepts and the other refuses is a split
+# between nodes. The three accepted exceptions are size limits that psizam's
+# parser leaves to its host (gofractally/psibase#2262).
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME execution.admission-corpus
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/run_admission_corpus.py
+                   --tool $<TARGET_FILE:psizam_wasmtime_differential_fuzz>
+                   --generate ${CMAKE_CURRENT_SOURCE_DIR}/gen_admission_corpus.py
+                   --dir ${CMAKE_CURRENT_BINARY_DIR}/admission-corpus --check
+                   --expect typeform/func-1001-params
+                   --expect body/locals-50001 --expect body/locals-1000000)
+  set_tests_properties(execution.admission-corpus PROPERTIES LABELS "execution;quick;wasmtime" TIMEOUT 300)
+endif()
+
 # One fixture and byte oracle for the native and Wasmtime implementations.
 add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/memory16-parity.wasm"
    COMMAND "${PSIZAM_WAT2WASM}" --enable-threads "${PROJECT_SOURCE_DIR}/tests/memory16.wat"

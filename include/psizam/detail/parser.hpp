@@ -216,6 +216,12 @@ namespace psizam::detail {
    // host whose other engines refuse it turns this off
    // (gofractally/psizam#7).
    PARSER_OPTION(enable_const_defined_globals, true, bool)
+   // 64-bit memories (the memory64 proposal). A host whose other engines
+   // have it off turns this off (gofractally/psizam#7).
+   PARSER_OPTION(enable_memory64, true, bool)
+   // Arithmetic in constant expressions (the extended-const proposal:
+   // i32/i64 add, sub, mul). Off for a host whose other engines have it off.
+   PARSER_OPTION(enable_extended_const, true, bool)
    PARSER_OPTION(enable_bulk_memory, true, bool)
    PARSER_OPTION(enable_sign_ext, true, bool)
    PARSER_OPTION(enable_nontrapping_fptoint, true, bool)
@@ -636,6 +642,9 @@ namespace psizam::detail {
             }
             case external_kind::Memory: {
                parse_memory_type(code, entry.type.mem_t);
+               // The same limit as for memories the module defines.
+               PSIZAM_ASSERT(_mod->memories.size() < get_max_memory_section_elements(_options),
+                             wasm_parse_exception, "only one memory is permitted");
                _mod->memories.push_back(entry.type.mem_t);
                _mod->num_imported_memories++;
                break;
@@ -705,6 +714,10 @@ namespace psizam::detail {
          if (*code == 0x40) {
             ++code;
             PSIZAM_ASSERT(*code == 0x00, wasm_parse_exception, "expected 0x00 after 0x40 in table type");
+            // A table with an initialiser expression came with typed
+            // function references.
+            PSIZAM_ASSERT(get_enable_typed_references(_options), wasm_parse_exception,
+                          "typed references not enabled");
             ++code;
             has_init_expr = true;
          }
@@ -754,6 +767,8 @@ namespace psizam::detail {
          PSIZAM_ASSERT(!is_memory16_profile(_mod->execution_profile) || !(raw_flags & 0x02),
                        wasm_parse_exception, "memory16 requires unshared memory");
          mt.is_memory64    = (raw_flags & 0x04) != 0;
+         PSIZAM_ASSERT(!mt.is_memory64 || get_enable_memory64(_options), wasm_parse_exception,
+                       "memory64 not enabled");
          mt.limits.flags   = (raw_flags & 0x01) != 0;  // has_maximum
          if (mt.is_memory64) {
             uint64_t initial64 = parse_varuint64(code);
@@ -805,7 +820,10 @@ namespace psizam::detail {
          entry.kind  = (external_kind)(*code++);
          entry.index = parse_varuint32(code);
          switch(entry.kind) {
-            case external_kind::Function: PSIZAM_ASSERT(entry.index < _mod->get_functions_total(), wasm_parse_exception, "function export out of range"); break;
+            case external_kind::Function:
+               PSIZAM_ASSERT(entry.index < _mod->get_functions_total(), wasm_parse_exception, "function export out of range");
+               declare_function(entry.index);
+               break;
             case external_kind::Table: PSIZAM_ASSERT(entry.index < _mod->tables.size(), wasm_parse_exception, "table export out of range"); break;
             case external_kind::Memory: PSIZAM_ASSERT(entry.index < _mod->memories.size(), wasm_parse_exception, "memory export out of range"); break;
             case external_kind::Global:
@@ -953,6 +971,7 @@ namespace psizam::detail {
             for (uint32_t i = 0; i < size; i++) {
                uint32_t index    = parse_varuint32(code);
                PSIZAM_ASSERT(index < _mod->get_functions_total(), wasm_parse_exception,  "elem for undefined function");
+               declare_function(index);
                elems.at(i).type  = fast_functions.at(index);
                elems.at(i).index = index;
             }
@@ -974,6 +993,7 @@ namespace psizam::detail {
                PSIZAM_ASSERT(expected_reftype == types::funcref, wasm_parse_exception, "type mismatch");
                te.index = parse_varuint32(code);
                PSIZAM_ASSERT(te.index < _mod->get_functions_total(), wasm_parse_exception, "elem for undefined function");
+               declare_function(te.index);
                te.type = fast_functions.at(te.index);
                break;
             case opcodes::get_global: {
@@ -981,6 +1001,10 @@ namespace psizam::detail {
                PSIZAM_ASSERT(global_idx < _mod->globals.size(), wasm_parse_exception, "global.get index out of range in elem");
                PSIZAM_ASSERT(get_enable_const_defined_globals(_options) || global_idx < _mod->num_imported_globals,
                              wasm_parse_exception, "global.get of a defined global in a constant expression is not enabled");
+               PSIZAM_ASSERT(!_mod->globals[global_idx].type.mutability, wasm_parse_exception,
+                             "global.get in a constant expression must reference an immutable global");
+               PSIZAM_ASSERT(_mod->globals[global_idx].type.content_type == expected_reftype, wasm_parse_exception,
+                             "type mismatch");
                // The global holds a funcref; resolve at instantiation time.
                // For now store the function index from the global's init value.
                auto& gv = _mod->globals[global_idx];
@@ -1037,6 +1061,11 @@ namespace psizam::detail {
                // A null of the other reference type is not a value of this one.
                PSIZAM_ASSERT((*code != types::funcref && *code != types::externref) || *code == type,
                              wasm_parse_exception, "type mismatch");
+               // Any other heap type (a type index, or one of the GC,
+               // exception or continuation proposals) is a typed reference.
+               PSIZAM_ASSERT(*code == types::funcref || *code == types::externref ||
+                             get_enable_typed_references(_options),
+                             wasm_parse_exception, "typed references not enabled");
                ++code; // consume the reference type byte
                break;
             case opcodes::ref_func: {
@@ -1044,6 +1073,7 @@ namespace psizam::detail {
                PSIZAM_ASSERT(type == types::funcref, wasm_parse_exception, "expected funcref for ref.func");
                PSIZAM_ASSERT(func_idx < _mod->get_functions_total(), wasm_parse_exception,
                              "ref.func of an undefined function");
+               declare_function(func_idx);
                ie.value.i32 = func_idx;
                break;
             }
@@ -1083,6 +1113,8 @@ namespace psizam::detail {
 
          // Extended const expression — continue parsing remaining instructions,
          // then store the entire expression as raw bytes for evaluation at instantiation.
+         PSIZAM_ASSERT(get_enable_extended_const(_options), wasm_parse_exception,
+                       "extended constant expressions not enabled");
          PSIZAM_ASSERT(type == types::i32 || type == types::i64, wasm_parse_exception, "extended const expressions only produce i32 or i64");
          uint32_t stack_depth = 1; // first instruction already pushed one value
          while (*code != opcodes::end) {
@@ -1777,6 +1809,7 @@ namespace psizam::detail {
                   nested_checker.on_control(_options);
                } break;
                case opcodes::catch_: {
+                  PSIZAM_ASSERT(get_enable_exception_handling(_options), wasm_parse_exception, "Exception handling not enabled");
                   check_in_bounds();
                   uint32_t tag_index = parse_varuint32(code);
                   PSIZAM_ASSERT(tag_index < _mod->tags.size(), wasm_parse_exception, "invalid tag index");
@@ -1829,6 +1862,7 @@ namespace psizam::detail {
                   op_stack.start_unreachable();
                } break;
                case opcodes::catch_all_: {
+                  PSIZAM_ASSERT(get_enable_exception_handling(_options), wasm_parse_exception, "Exception handling not enabled");
                   check_in_bounds();
                   auto& old_index = pc_stack.back();
                   if (!old_index.expected_results.empty()) {
@@ -1845,6 +1879,7 @@ namespace psizam::detail {
                   nested_checker.on_control(_options);
                } break;
                case opcodes::delegate_: {
+                  PSIZAM_ASSERT(get_enable_exception_handling(_options), wasm_parse_exception, "Exception handling not enabled");
                   check_in_bounds();
                   uint32_t label = parse_varuint32(code);
                   auto [depth_change,rt,rc] = compute_depth_change(label);
@@ -2217,6 +2252,13 @@ namespace psizam::detail {
                   uint32_t vec_len = parse_varuint32(code);
                   PSIZAM_ASSERT(vec_len == 1, wasm_parse_exception, "select t* must have exactly one type");
                   uint8_t valtype = *code++;
+                  // Checked here and not left to the operands: after an
+                  // unconditional branch the operand stack accepts anything.
+                  PSIZAM_ASSERT(valtype == types::i32 || valtype == types::i64 || valtype == types::f32 ||
+                                valtype == types::f64 || valtype == types::funcref || valtype == types::externref ||
+                                (valtype == types::v128 && get_enable_simd(_options)) ||
+                                (valtype == types::exnref && get_enable_exception_handling(_options)),
+                                wasm_parse_exception, "invalid value type for select");
                   op_stack.pop(types::i32);
                   op_stack.pop(valtype);
                   op_stack.pop(valtype);
@@ -2289,6 +2331,11 @@ namespace psizam::detail {
                   uint32_t func_idx = parse_varuint32(code);
                   PSIZAM_ASSERT(func_idx < _mod->get_functions_total(),
                                 wasm_parse_exception, "ref.func function index out of range");
+                  // A function may be referenced in a body only if the
+                  // module declares it outside the bodies: in an element
+                  // segment, an export or a global's initial value.
+                  PSIZAM_ASSERT(func_idx < _declared_functions.size() && _declared_functions[func_idx],
+                                wasm_parse_exception, "undeclared function reference");
                   op_stack.push(types::funcref);
                   code_writer.emit_ref_func(func_idx);
                } break;
@@ -3208,6 +3255,8 @@ namespace psizam::detail {
                         auto src_table = parse_varuint32(code);
                         PSIZAM_ASSERT(dst_table < _mod->tables.size(), wasm_parse_exception, "table.copy dst table index out of range");
                         PSIZAM_ASSERT(src_table < _mod->tables.size(), wasm_parse_exception, "table.copy src table index out of range");
+                        PSIZAM_ASSERT(_mod->tables[dst_table].element_type == _mod->tables[src_table].element_type,
+                                      wasm_parse_exception, "type mismatch");
                         op_stack.pop(types::i32);
                         op_stack.pop(types::i32);
                         op_stack.pop(types::i32);
@@ -3549,6 +3598,8 @@ namespace psizam::detail {
       template <uint8_t id>
       requires (id == section_id::tag_section)
       inline void parse_section(wasm_code_ptr& code, std::vector<tag_type>& elems) {
+         // The section itself belongs to the proposal, also when it is empty.
+         PSIZAM_ASSERT(get_enable_exception_handling(_options), wasm_parse_exception, "Exception handling not enabled");
          parse_section_impl(code, elems, get_max_section_elements(_options),
                             [&](wasm_code_ptr& code, tag_type& tt, std::size_t /*idx*/) {
             PSIZAM_ASSERT(get_enable_exception_handling(_options), wasm_parse_exception, "Exception handling not enabled");
@@ -3610,6 +3661,13 @@ namespace psizam::detail {
       std::vector<uint32_t> type_aliases;
       std::vector<uint32_t> fast_functions;
       std::vector<bool>     _table_non_null;
+      // Functions the module references outside function bodies.
+      std::vector<bool>     _declared_functions;
+      void declare_function(uint32_t index) {
+         if (index >= _declared_functions.size())
+            _declared_functions.resize(std::size_t(index) + 1);
+         _declared_functions[index] = true;
+      }
       std::unordered_map<uint32_t, std::vector<branch_hint>> _branch_hints_temp;
    };
 } // namespace psizam::detail

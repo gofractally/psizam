@@ -44,6 +44,8 @@ struct options : psizam::default_options {
    // configures it, does not compile it (gofractally/psizam#6, #7).
    static constexpr bool     enable_typed_references      = false;
    static constexpr bool     enable_const_defined_globals = false;
+   static constexpr bool     enable_memory64            = false;
+   static constexpr bool     enable_extended_const      = false;
    static constexpr uint32_t max_memory_section_elements = 1;
    uint32_t              max_stack_bytes = 65536;
    uint32_t              max_pages       = 512;
