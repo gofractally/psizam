@@ -98,3 +98,49 @@ BACKEND_TEST_CASE( "Test call_indirect patterns", "[call_indirect]") {
    // memory.grow + use: 0x12345678
    CHECK(bkend.call_with_return("env", "test_grow_and_use")->to_ui32() == 0x12345678u);
 }
+
+// gofractally/psizam#6: the two-byte reference types of the typed function
+// references proposal are read as funcref/externref by default; a host whose
+// other engines refuse them turns them off, and then no place a type can
+// appear accepts them.
+namespace {
+
+struct no_typed_references_options {
+   std::uint32_t max_stack_bytes = 1024 * 1024;
+   static constexpr std::uint32_t max_func_local_bytes = 1024 * 1024;
+   static constexpr bool enable_typed_references = false;
+};
+
+// (func block (result (ref func)) unreachable end drop)
+wasm_code typed_ref_block_wasm = {
+   0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+   0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+   0x03, 0x02, 0x01, 0x00,
+   0x0a, 0x0a, 0x01, 0x08, 0x00, 0x02, 0x64, 0x70, 0x00, 0x0b, 0x1a, 0x0b};
+// (table 1 (ref null func))
+wasm_code typed_ref_table_wasm = {
+   0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+   0x04, 0x05, 0x01, 0x63, 0x70, 0x00, 0x01};
+// (type (func)) (func ref.null 0 drop)
+wasm_code typed_ref_null_wasm = {
+   0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+   0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+   0x03, 0x02, 0x01, 0x00,
+   0x0a, 0x07, 0x01, 0x05, 0x00, 0xd0, 0x00, 0x1a, 0x0b};
+
+}
+
+TEST_CASE("Typed reference encodings are refused when the option is off", "[typed_references]") {
+   using lenient_t = psizam::backend<nullptr_t, psizam::interpreter, dynamic_options>;
+   using strict_t  = psizam::backend<nullptr_t, psizam::interpreter, no_typed_references_options>;
+   // Accepted by default, as before.
+   CHECK_NOTHROW(lenient_t(typed_ref_block_wasm, get_wasm_allocator(), dynamic_options{}));
+   CHECK_NOTHROW(lenient_t(typed_ref_table_wasm, get_wasm_allocator(), dynamic_options{}));
+   // Refused in a block type, in a declaration and as ref.null's heap type.
+   CHECK_THROWS_AS(strict_t(typed_ref_block_wasm, get_wasm_allocator(), no_typed_references_options{}),
+                   wasm_parse_exception);
+   CHECK_THROWS_AS(strict_t(typed_ref_table_wasm, get_wasm_allocator(), no_typed_references_options{}),
+                   wasm_parse_exception);
+   CHECK_THROWS_AS(strict_t(typed_ref_null_wasm, get_wasm_allocator(), no_typed_references_options{}),
+                   wasm_parse_exception);
+}

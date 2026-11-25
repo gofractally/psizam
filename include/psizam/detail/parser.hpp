@@ -204,6 +204,12 @@ namespace psizam::detail {
    PARSER_OPTION(enable_relaxed_simd, true, bool)
    PARSER_OPTION(enable_atomics, true, bool)
    PARSER_OPTION(enable_tail_calls, true, bool)
+   // The two-byte reference types of the typed function references
+   // proposal (0x63/0x64 followed by a heap type). The runtime does not
+   // implement that proposal: it reads them as funcref or externref. A host
+   // whose other engines refuse them turns this off, and the parser then
+   // refuses them wherever a type can appear (gofractally/psizam#6).
+   PARSER_OPTION(enable_typed_references, true, bool)
    PARSER_OPTION(enable_bulk_memory, true, bool)
    PARSER_OPTION(enable_sign_ext, true, bool)
    PARSER_OPTION(enable_nontrapping_fptoint, true, bool)
@@ -675,6 +681,8 @@ namespace psizam::detail {
          uint8_t b = *code++;
          if (b == types::funcref || b == types::externref) return b;
          if (b == 0x64 || b == 0x63) {
+            PSIZAM_ASSERT(get_enable_typed_references(_options), wasm_parse_exception,
+                          "typed references not enabled");
             if (non_null && b == 0x64) *non_null = true;
             uint8_t heap = *code++;
             if (heap == 0x70) return types::funcref;
@@ -1522,6 +1530,8 @@ namespace psizam::detail {
                                    "Invalid type code in block");
                      single_type = first_byte;
                   } else if (first_byte == 0x63 || first_byte == 0x64) {
+                     PSIZAM_ASSERT(get_enable_typed_references(_options), wasm_parse_exception,
+                                   "typed references not enabled");
                      // typed reference blocktype: 0x63 heap (ref null HT) / 0x64 heap (ref HT)
                      code++; // consume 0x63/0x64
                      uint8_t heap = *code++;
@@ -1579,6 +1589,8 @@ namespace psizam::detail {
                                    "Invalid type code in loop");
                      single_type = first_byte;
                   } else if (first_byte == 0x63 || first_byte == 0x64) {
+                     PSIZAM_ASSERT(get_enable_typed_references(_options), wasm_parse_exception,
+                                   "typed references not enabled");
                      code++;
                      uint8_t heap = *code++;
                      if (heap >= 0x80) { while (*code++ & 0x80) {} }
@@ -1640,6 +1652,8 @@ namespace psizam::detail {
                                    "Invalid type code in if");
                      single_type = first_byte;
                   } else if (first_byte == 0x63 || first_byte == 0x64) {
+                     PSIZAM_ASSERT(get_enable_typed_references(_options), wasm_parse_exception,
+                                   "typed references not enabled");
                      code++;
                      uint8_t heap = *code++;
                      if (heap >= 0x80) { while (*code++ & 0x80) {} }
@@ -2226,6 +2240,12 @@ namespace psizam::detail {
                   uint8_t ref_type;
                   if (first == types::externref) ref_type = types::externref;
                   else if (first == types::funcref) ref_type = types::funcref;
+                  else if (!get_enable_typed_references(_options)) {
+                     // A concrete heap type (a type index) belongs to the
+                     // typed function references proposal.
+                     PSIZAM_ASSERT(false, wasm_parse_exception, "typed references not enabled");
+                     ref_type = types::funcref;
+                  }
                   else if (first < 0x80) ref_type = types::funcref; // positive single-byte type index
                   else {
                      // multi-byte LEB128 type index — consume continuation
