@@ -335,7 +335,7 @@ namespace psizam::detail {
             _num_vregs = func.next_vreg;
             _vreg_map = scratch.alloc<int8_t>(_num_vregs);
             _xmm_map = scratch.alloc<int8_t>(_num_vregs);
-            _spill_map = scratch.alloc<int16_t>(_num_vregs);
+            _spill_map = scratch.alloc<int32_t>(_num_vregs);
             for (uint32_t v = 0; v < _num_vregs; ++v) {
                _vreg_map[v] = -1;
                _xmm_map[v] = -1;
@@ -361,7 +361,7 @@ namespace psizam::detail {
                   if (_vreg_map[v] == R15_PHYS) {
                      _vreg_map[v] = -1;
                      if (_spill_map[v] < 0)
-                        _spill_map[v] = static_cast<int16_t>(_num_spill_slots++);
+                        _spill_map[v] = static_cast<int32_t>(_num_spill_slots++);
                   }
                }
                // Also evict from the interval data so future queries are consistent
@@ -369,7 +369,7 @@ namespace psizam::detail {
                   if (func.intervals[iv].phys_reg == R15_PHYS) {
                      func.intervals[iv].phys_reg = -1;
                      if (func.intervals[iv].spill_slot < 0)
-                        func.intervals[iv].spill_slot = static_cast<int16_t>(_num_spill_slots - 1);
+                        func.intervals[iv].spill_slot = static_cast<int32_t>(_num_spill_slots - 1);
                   }
                }
                // Ensure R15 is saved/restored as callee-saved (bit 4 = R15)
@@ -3994,7 +3994,7 @@ namespace psizam::detail {
                if (is32) this->emit(opcode, phys_to_reg32(pr_s), dest_reg);
                else      this->emit(opcode, phys_to_reg64(pr_s), dest_reg);
             } else {
-               int16_t sp = get_vreg_spill(src_vreg);
+               int32_t sp = get_vreg_spill(src_vreg);
                if (sp >= 0) {
                   // Memory operand: op [rbp+spill], dest_reg — 1 instruction
                   this->emit(opcode, *(rbp + get_spill_offset(sp)), dest_reg);
@@ -4031,7 +4031,7 @@ namespace psizam::detail {
                else      { emit_op(rax, inst.rr.src2); this->emit_mov(rax, phys_to_reg64(pr_d)); }
             } else {
                // dest != src2: safe to load src1 into dest first
-               int16_t sp1 = get_vreg_spill(inst.rr.src1);
+               int32_t sp1 = get_vreg_spill(inst.rr.src1);
                if (sp1 >= 0) {
                   if (is32) this->emit_mov(*(rbp + get_spill_offset(sp1)), phys_to_reg32(pr_d));
                   else      this->emit_mov(*(rbp + get_spill_offset(sp1)), phys_to_reg64(pr_d));
@@ -4510,14 +4510,14 @@ namespace psizam::detail {
       // uses direct emit() calls instead.
 
       // Get the spill slot for a vreg (-1 if in register or XMM)
-      int16_t get_vreg_spill(uint32_t vreg) const {
+      int32_t get_vreg_spill(uint32_t vreg) const {
          if (!_spill_map || vreg >= _num_vregs) return -1;
          return _spill_map[vreg];
       }
 
       // Get rbp-relative offset for a spill slot
       // Spill slots are after body locals: rbp - (body_locals + slot + 1) * 8
-      int32_t get_spill_offset(int16_t slot) const {
+      int32_t get_spill_offset(int32_t slot) const {
          return -static_cast<int32_t>((_body_locals + static_cast<uint32_t>(slot) + 1) * 8);
       }
 
@@ -4581,7 +4581,7 @@ namespace psizam::detail {
       }
 
       // Find the spill slot for a vreg (search intervals)
-      int16_t get_spill_slot(uint32_t vreg) const {
+      int32_t get_spill_slot(uint32_t vreg) const {
          // Linear search — could be optimized with a vreg→spill_slot map
          // but this is only called for spilled vregs (rare path)
          return -1; // TODO: look up from intervals
@@ -7317,7 +7317,7 @@ namespace psizam::detail {
       // Register allocation mapping
       int8_t* _vreg_map = nullptr;    // vreg → phys_reg (-1 = spilled/none)
       int8_t* _xmm_map = nullptr;    // vreg → phys_xmm (-1 = spilled/none)
-      int16_t* _spill_map = nullptr;  // vreg → spill_slot (-1 = in register)
+      int32_t* _spill_map = nullptr;  // vreg → spill_slot (-1 = in register)
       uint32_t _num_vregs = 0;
       uint32_t _num_spill_slots = 0;
       uint32_t _body_locals = 0;

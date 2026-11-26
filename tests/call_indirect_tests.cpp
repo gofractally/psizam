@@ -211,3 +211,75 @@ TEST_CASE("The validator refuses what other engines refuse", "[validator_gaps]")
    CHECK_NOTHROW(lenient(defined_global_in_global));
    CHECK_NOTHROW(lenient(defined_global_in_elem));
 }
+
+// gofractally/psizam#3: a function with more values live at once than a
+// 16-bit spill slot index can number. JIT2 returned a wrong result past
+// 32,767 (the index wrapped and two values shared a slot).
+namespace {
+
+void leb_u(std::vector<uint8_t>& out, uint32_t v) {
+   do {
+      uint8_t b = v & 0x7f;
+      v >>= 7;
+      out.push_back(v ? (b | 0x80) : b);
+   } while (v);
+}
+void leb_s(std::vector<uint8_t>& out, int32_t v) {
+   for (;;) {
+      uint8_t b = v & 0x7f;
+      v >>= 7;
+      if ((v == 0 && !(b & 0x40)) || (v == -1 && (b & 0x40))) {
+         out.push_back(b);
+         return;
+      }
+      out.push_back(b | 0x80);
+   }
+}
+
+// (func (export "sum") (result i32) (local i32)
+//    (i32.add (local.get 0) (i32.const k)) for k = 0 .. n-1, all left on the
+//    stack: n computed values live at once, then n-1 additions.
+std::vector<uint8_t> many_live_values(uint32_t n) {
+   std::vector<uint8_t> body = {0x01, 0x01, 0x7f};  // one i32 local
+   for (uint32_t i = 0; i < n; ++i) {
+      body.push_back(0x20);
+      body.push_back(0x00);
+      body.push_back(0x41);
+      leb_s(body, static_cast<int32_t>(i));
+      body.push_back(0x6a);
+   }
+   for (uint32_t i = 1; i < n; ++i)
+      body.push_back(0x6a);
+   body.push_back(0x0b);
+   std::vector<uint8_t> code;
+   leb_u(code, 1);
+   leb_u(code, static_cast<uint32_t>(body.size()));
+   code.insert(code.end(), body.begin(), body.end());
+   std::vector<uint8_t> m = {0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+                             0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f,        // type () -> i32
+                             0x03, 0x02, 0x01, 0x00,                          // one function
+                             0x07, 0x07, 0x01, 0x03, 's',  'u',  'm',  0x00, 0x00};  // export
+   m.push_back(0x0a);
+   leb_u(m, static_cast<uint32_t>(code.size()));
+   m.insert(m.end(), code.begin(), code.end());
+   return m;
+}
+
+struct deep_stack_options {
+   std::uint32_t max_stack_bytes = 8 * 1024 * 1024;
+   static constexpr std::uint32_t max_func_local_bytes = 8 * 1024 * 1024;
+};
+
+}
+
+BACKEND_TEST_CASE("More values live at once than 16 bits can number", "[spill_slots]") {
+   using backend_t = psizam::backend<nullptr_t, TestType, deep_stack_options>;
+   for (uint32_t n : {1000u, 32000u, 33000u, 40000u, 70000u}) {
+      auto     code = many_live_values(n);
+      backend_t bkend(code, get_wasm_allocator(), deep_stack_options{});
+      // 0 + 1 + ... + (n-1), modulo 2^32
+      const uint32_t expected = static_cast<uint32_t>(uint64_t(n) * (n - 1) / 2);
+      INFO("values " << n);
+      CHECK(bkend.call_with_return("env", "sum")->to_ui32() == expected);
+   }
+}

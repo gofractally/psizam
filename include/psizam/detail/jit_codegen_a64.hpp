@@ -193,7 +193,7 @@ namespace psizam::detail {
          if (func.interval_count > 0 && func.intervals) {
             _num_vregs = func.next_vreg;
             _vreg_map = scratch.alloc<int8_t>(_num_vregs);
-            _spill_map = scratch.alloc<int16_t>(_num_vregs);
+            _spill_map = scratch.alloc<int32_t>(_num_vregs);
             for (uint32_t v = 0; v < _num_vregs; ++v) {
                _vreg_map[v] = -1;
                _spill_map[v] = -1;
@@ -218,7 +218,7 @@ namespace psizam::detail {
                      if (_vreg_map[v] != reg) continue;
                      _vreg_map[v] = -1;
                      if (_spill_map[v] < 0)
-                        _spill_map[v] = static_cast<int16_t>(_num_spill_slots++);
+                        _spill_map[v] = static_cast<int32_t>(_num_spill_slots++);
                   }
                   for (uint32_t iv = 0; iv < func.interval_count; ++iv) {
                      auto& interval = func.intervals[iv];
@@ -1173,7 +1173,7 @@ namespace psizam::detail {
       void load_vreg_x1(uint32_t vreg) { load_vreg_to(X1, vreg); }
       void store_x0_vreg(uint32_t vreg) { store_from_to_vreg(X0, vreg); }
 
-      int32_t get_spill_offset(int16_t slot) const {
+      int32_t get_spill_offset(int32_t slot) const {
          // FP-relative: offset from frame pointer (negative)
          return static_cast<int32_t>((_body_locals + static_cast<uint32_t>(slot)) * 8) - _frame_size;
       }
@@ -4867,7 +4867,7 @@ namespace psizam::detail {
       uint32_t _br_table_case = 0;
       uint32_t _br_table_size = 0;
       int8_t* _vreg_map = nullptr;
-      int16_t* _spill_map = nullptr;
+      int32_t* _spill_map = nullptr;
       uint32_t _num_vregs = 0;
       uint32_t _num_spill_slots = 0;
       uint32_t _body_locals = 0;

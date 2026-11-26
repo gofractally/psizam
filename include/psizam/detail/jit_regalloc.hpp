@@ -495,7 +495,7 @@ namespace psizam::detail {
             // see ir_live_interval::crosses_setjmp.
             if (interval.crosses_setjmp) {
                interval.phys_reg = -1;
-               interval.spill_slot = static_cast<int16_t>(next_spill_slot++);
+               interval.spill_slot = static_cast<int32_t>(next_spill_slot++);
                continue;
             }
 
@@ -602,13 +602,13 @@ namespace psizam::detail {
                   auto& victim = func.intervals[active[evict_idx]];
                   assigned = victim.phys_reg;
                   victim.phys_reg = -1;
-                  victim.spill_slot = static_cast<int16_t>(next_spill_slot++);
+                  victim.spill_slot = static_cast<int32_t>(next_spill_slot++);
                   interval.phys_reg = static_cast<int8_t>(assigned);
                   active[evict_idx] = i;
                } else {
                   // New interval is colder; defer XMM assignment to the second pass
                   interval.phys_reg = -1;
-                  interval.spill_slot = static_cast<int16_t>(next_spill_slot++);
+                  interval.spill_slot = static_cast<int32_t>(next_spill_slot++);
                }
             }
          }
@@ -636,7 +636,7 @@ namespace psizam::detail {
             // no XMM assignment would survive a longjmp return to catch.
             if (interval.crosses_setjmp) {
                interval.phys_xmm = -1;
-               interval.spill_slot = static_cast<int16_t>(next_spill_slot);
+               interval.spill_slot = static_cast<int32_t>(next_spill_slot);
                next_spill_slot += (interval.type == types::v128) ? 2 : 1;
                continue;
             }
@@ -715,13 +715,13 @@ namespace psizam::detail {
                } else {
                   // All callee-saved GPRs taken — fall back to memory spill
                   interval.phys_xmm = -1;
-                  interval.spill_slot = static_cast<int16_t>(next_spill_slot);
+                  interval.spill_slot = static_cast<int32_t>(next_spill_slot);
                   next_spill_slot += (interval.type == types::v128) ? 2 : 1;
                }
             } else {
                // v128 or no call crossing: memory spill
                interval.phys_xmm = -1;
-               interval.spill_slot = static_cast<int16_t>(next_spill_slot);
+               interval.spill_slot = static_cast<int32_t>(next_spill_slot);
                next_spill_slot += (interval.type == types::v128) ? 2 : 1;
             }
          }
@@ -733,7 +733,7 @@ namespace psizam::detail {
             auto& iv = func.intervals[i];
             iv.spill_slot = -1;
             if (iv.start != UINT32_MAX && iv.phys_reg < 0 && iv.phys_xmm < 0) {
-               iv.spill_slot = static_cast<int16_t>(next_spill_slot);
+               iv.spill_slot = static_cast<int32_t>(next_spill_slot);
                next_spill_slot += iv.type == types::v128 ? 2 : 1;
             }
          }

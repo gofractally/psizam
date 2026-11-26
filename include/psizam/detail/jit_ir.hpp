@@ -452,7 +452,7 @@ namespace psizam::detail {
       uint32_t end;
       int8_t   phys_reg;
       int8_t   phys_xmm;
-      int16_t  spill_slot;
+      int32_t  spill_slot;
       uint8_t  type;
       // True if the live range crosses an ir_op::eh_setjmp. Standard
       // setjmp/longjmp preserves callee-saved GPRs, but a callee-saved reg
