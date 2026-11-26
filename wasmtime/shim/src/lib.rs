@@ -677,11 +677,24 @@ pub unsafe extern "C" fn pzwt_store_new(
     let mut store = Box::new(Store::new(&engine.engine, data));
     store.limiter(|d| &mut d.limits);
     if engine.epoch_interruption {
-        // Every engine tick reaches every store. Only the store whose flag was
-        // raised stops; the rest move their deadline one tick on.
+        // How a store is interrupted (pzwt_interrupter_fire): its flag is
+        // raised, then the engine's epoch is incremented once. Every tick of
+        // an engine reaches every store of that engine; only the store whose
+        // flag is raised stops, the rest move their deadline one tick on.
+        //
+        // One tick is enough because of two orders. The flag is raised
+        // BEFORE the tick, so a store that looks because of this tick sees
+        // it. And the fork measures `Continue(1)` from the epoch the store
+        // read before it called this callback, not from the epoch afterwards
+        // (gofractally/wasmtime, `new_epoch` in vm/libcalls.rs): a store that
+        // was answering an EARLIER tick, for another store, when its own flag
+        // was raised and its own tick arrived, looks again. With stock
+        // wasmtime that tick was absorbed and the store ran on for ever
+        // (gofractally/psibase#2263). Do not move this to an engine without
+        // that change.
         store.set_epoch_deadline(1);
         store.epoch_deadline_callback(|state| {
-            if state.data().interrupt.load(Ordering::Relaxed) {
+            if state.data().interrupt.load(Ordering::SeqCst) {
                 Ok(UpdateDeadline::Interrupt)
             } else {
                 Ok(UpdateDeadline::Continue(1))
@@ -732,7 +745,8 @@ pub unsafe extern "C" fn pzwt_store_interrupter(store: *mut PzwtStore) -> *mut P
 #[no_mangle]
 pub unsafe extern "C" fn pzwt_interrupter_fire(interrupter: *const PzwtInterrupter) {
     let interrupter = &*interrupter;
-    interrupter.flag.store(true, Ordering::Relaxed);
+    // Flag first, then the tick: see where the store's callback is set.
+    interrupter.flag.store(true, Ordering::SeqCst);
     interrupter.engine.increment_epoch();
 }
 

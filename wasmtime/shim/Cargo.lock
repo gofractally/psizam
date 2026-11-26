@@ -119,7 +119,7 @@ dependencies = [
 [[package]]
 name = "cranelift-assembler-x64"
 version = "0.138.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "cranelift-assembler-x64-meta",
 ]
@@ -127,7 +127,7 @@ dependencies = [
 [[package]]
 name = "cranelift-assembler-x64-meta"
 version = "0.138.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "cranelift-srcgen",
 ]
@@ -135,7 +135,7 @@ dependencies = [
 [[package]]
 name = "cranelift-bforest"
 version = "0.138.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "cranelift-entity",
  "wasmtime-internal-core",
@@ -144,7 +144,7 @@ dependencies = [
 [[package]]
 name = "cranelift-bitset"
 version = "0.138.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "serde",
  "serde_derive",
@@ -154,7 +154,7 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen"
 version = "0.138.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "bumpalo",
  "cranelift-assembler-x64",
@@ -184,7 +184,7 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen-meta"
 version = "0.138.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "cranelift-assembler-x64-meta",
  "cranelift-codegen-shared",
@@ -196,12 +196,12 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen-shared"
 version = "0.138.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 
 [[package]]
 name = "cranelift-control"
 version = "0.138.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "arbitrary",
 ]
@@ -209,7 +209,7 @@ dependencies = [
 [[package]]
 name = "cranelift-entity"
 version = "0.138.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "cranelift-bitset",
  "serde",
@@ -220,7 +220,7 @@ dependencies = [
 [[package]]
 name = "cranelift-frontend"
 version = "0.138.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "cranelift-codegen",
  "hashbrown 0.17.2",
@@ -232,12 +232,12 @@ dependencies = [
 [[package]]
 name = "cranelift-isle"
 version = "0.138.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 
 [[package]]
 name = "cranelift-native"
 version = "0.138.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "cranelift-codegen",
  "libc",
@@ -248,7 +248,7 @@ dependencies = [
 [[package]]
 name = "cranelift-srcgen"
 version = "0.138.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 
 [[package]]
 name = "crc32fast"
@@ -616,7 +616,7 @@ dependencies = [
 [[package]]
 name = "pulley-interpreter"
 version = "51.0.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "cranelift-bitset",
  "log",
@@ -627,7 +627,7 @@ dependencies = [
 [[package]]
 name = "pulley-macros"
 version = "51.0.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -888,7 +888,7 @@ dependencies = [
 [[package]]
 name = "wasmtime"
 version = "51.0.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "addr2line",
  "async-trait",
@@ -927,7 +927,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-environ"
 version = "51.0.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "anyhow",
  "cpp_demangle",
@@ -956,12 +956,12 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-component-util"
 version = "51.0.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 
 [[package]]
 name = "wasmtime-internal-core"
 version = "51.0.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "hashbrown 0.17.2",
  "libm",
@@ -971,7 +971,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-cranelift"
 version = "51.0.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "cranelift-codegen",
  "cranelift-control",
@@ -996,7 +996,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-fiber"
 version = "51.0.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "cc",
  "libc",
@@ -1009,7 +1009,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-jit-debug"
 version = "51.0.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "cc",
  "wasmtime-internal-versioned-export-macros",
@@ -1018,7 +1018,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-jit-icache-coherence"
 version = "51.0.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "libc",
  "wasmtime-internal-core",
@@ -1028,7 +1028,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-unwinder"
 version = "51.0.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "cranelift-codegen",
  "log",
@@ -1039,7 +1039,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-versioned-export-macros"
 version = "51.0.0"
-source = "git+https://github.com/gofractally/wasmtime?rev=f7f7b98cfbd36feaaed7ca5704a449c3b4488521#f7f7b98cfbd36feaaed7ca5704a449c3b4488521"
+source = "git+https://github.com/gofractally/wasmtime?rev=e1d95084993d9bcf80fc3e26c80bb6acb5be7954#e1d95084993d9bcf80fc3e26c80bb6acb5be7954"
 dependencies = [
  "proc-macro2",
  "quote",
