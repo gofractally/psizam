@@ -81,6 +81,9 @@ pub const PZWT_TRAP: i32 = 1;
 pub const PZWT_HOST_FAILURE: i32 = 2;
 /// Anything else: validation, link, or instantiation errors.
 pub const PZWT_ERROR: i32 = 3;
+/// A compilation was abandoned because its `PzwtCancel` was set. Nothing is
+/// wrong with the module; nothing was produced or cached.
+pub const PZWT_CANCELLED: i32 = 4;
 
 pub const PZWT_TRAP_OTHER: i32 = 0;
 pub const PZWT_TRAP_STACK_OVERFLOW: i32 = 1;
@@ -164,6 +167,9 @@ fn report(out: *mut PzwtError, error: &Error) -> i32 {
     } else if let Some(trap) = error.downcast_ref::<Trap>() {
         set_error(out, PZWT_TRAP, trap_code(trap), message(error));
         PZWT_TRAP
+    } else if error.is::<CompileCancelled>() {
+        set_error(out, PZWT_CANCELLED, 0, message(error));
+        PZWT_CANCELLED
     } else {
         set_error(out, PZWT_ERROR, 0, message(error));
         PZWT_ERROR
@@ -173,7 +179,7 @@ fn report(out: *mut PzwtError, error: &Error) -> i32 {
 /// Bump when what the shim attaches to a module before compiling it changes.
 const REWRITE_REVISION: u32 = 2;
 /// The C ABI and memory16-v1 runtime contract are part of artifact identity.
-const SHIM_ABI_REVISION: u32 = 7;
+const SHIM_ABI_REVISION: u32 = 8;
 const MEMORY16_PROFILE_REVISION: u32 = 1;
 
 /// Identifies what this build compiles a module into: the wasmtime version,
@@ -422,6 +428,7 @@ unsafe fn compile(
     engine: &PzwtEngine,
     wasm: &[u8],
     costs: Option<&[u32]>,
+    cancel: *const PzwtCancel,
     error: *mut PzwtError,
 ) -> *mut PzwtModule {
     let wasm = match stack_meter::with_costs(wasm, costs) {
@@ -431,12 +438,48 @@ unsafe fn compile(
             return std::ptr::null_mut();
         }
     };
-    match Module::new(&engine.engine, &wasm) {
+    let mut builder = CodeBuilder::new(&engine.engine);
+    if let Some(cancel) = cancel.as_ref() {
+        builder.cancel_handle(&cancel.0);
+    }
+    let compiled = builder.wasm_binary(&wasm, None).and_then(|b| b.compile_module());
+    match compiled {
         Ok(m) => module_with_entries(m, error),
         Err(e) => {
             report(error, &e);
             std::ptr::null_mut()
         }
+    }
+}
+
+/// A flag with which one thread abandons a compilation that another thread is
+/// in. Compiling a module is not bounded by the size of the module, so an
+/// embedder that has stopped waiting sets the flag; the compilation then
+/// fails with `PZWT_CANCELLED` soon afterwards: no further function is
+/// started, and the functions in the compiler give up between its passes or
+/// inside register allocation. A compilation whose flag is never set produces
+/// exactly what it produces without one.
+///
+/// A flag that has been set stays set. Use a new one for the next compilation.
+pub struct PzwtCancel(CompileCancel);
+
+#[no_mangle]
+pub extern "C" fn pzwt_cancel_new() -> *mut PzwtCancel {
+    Box::into_raw(Box::new(PzwtCancel(CompileCancel::new())))
+}
+
+/// Asks every compilation that was given `cancel` to stop. May be called from
+/// any thread, any number of times, before, during or after the compilation.
+#[no_mangle]
+pub unsafe extern "C" fn pzwt_cancel_set(cancel: *const PzwtCancel) {
+    (*cancel).0.cancel();
+}
+
+/// The compilations given `cancel` must have returned.
+#[no_mangle]
+pub unsafe extern "C" fn pzwt_cancel_delete(cancel: *mut PzwtCancel) {
+    if !cancel.is_null() {
+        drop(Box::from_raw(cancel));
     }
 }
 
@@ -465,7 +508,8 @@ pub unsafe extern "C" fn pzwt_wat_to_wasm(
 /// binary module. `costs` gives the byte cost of each defined function, in
 /// order; the instance then follows the budget set with
 /// `pzwt_context_set_stack`, and its start function, if it has one, is held
-/// back for the host to run once a budget is set.
+/// back for the host to run once a budget is set. `cancel` may be null; see
+/// `PzwtCancel`.
 #[no_mangle]
 pub unsafe extern "C" fn pzwt_module_new_metered(
     engine: *const PzwtEngine,
@@ -473,6 +517,7 @@ pub unsafe extern "C" fn pzwt_module_new_metered(
     len: usize,
     costs: *const u32,
     costs_len: usize,
+    cancel: *const PzwtCancel,
     error: *mut PzwtError,
 ) -> *mut PzwtModule {
     let bytes = std::slice::from_raw_parts(bytes, len);
@@ -481,20 +526,22 @@ pub unsafe extern "C" fn pzwt_module_new_metered(
     } else {
         std::slice::from_raw_parts(costs, costs_len)
     };
-    compile(&*engine, bytes, Some(costs), error)
+    compile(&*engine, bytes, Some(costs), cancel, error)
 }
 
 /// Compiles a module, binary or text, whose functions cost no stack budget.
+/// `cancel` may be null; see `PzwtCancel`.
 #[no_mangle]
 pub unsafe extern "C" fn pzwt_module_new(
     engine: *const PzwtEngine,
     bytes: *const u8,
     len: usize,
+    cancel: *const PzwtCancel,
     error: *mut PzwtError,
 ) -> *mut PzwtModule {
     let bytes = std::slice::from_raw_parts(bytes, len);
     match wat::parse_bytes(bytes) {
-        Ok(binary) => compile(&*engine, &binary, None, error),
+        Ok(binary) => compile(&*engine, &binary, None, cancel, error),
         Err(e) => {
             set_error(error, PZWT_ERROR, 0, e.to_string());
             std::ptr::null_mut()

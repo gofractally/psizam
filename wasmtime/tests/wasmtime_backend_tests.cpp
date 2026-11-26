@@ -1411,3 +1411,72 @@ TEST_CASE("wasmtime: entry points are found once per module and entered without 
    wt::instance<none> bare(rt, rt.compile(R"((module (func (export "f"))))"), n);
    CHECK_FALSE(bare.has_entry(wt::entry_point::called));
 }
+
+namespace {
+// Many functions with a little arithmetic each: seconds of compiling in all.
+std::string many_functions(int count)
+{
+   std::string wat = "(module\n";
+   for (int i = 0; i < count; ++i)
+   {
+      wat += "(func (param i64 i64) (result i64) (local i64)";
+      for (int j = 0; j < 40; ++j)
+         wat += " (local.set 2 (i64.add (i64.mul (local.get 0) (i64.const " +
+                std::to_string(i * 41 + j + 3) + ")) (i64.rotl (local.get 1) (local.get 2))))";
+      wat += " (local.get 2))\n";
+   }
+   wat += "(func (export \"f\") (result i32) (i32.const 7)))";
+   return wat;
+}
+}  // namespace
+
+TEST_CASE("wasmtime: a compilation can be abandoned from another thread")
+{
+   struct none {};
+   wt::runtime<none> rt;
+   auto              small = wt::assemble(R"((module (func (export "f") (result i32) (i32.const 7))))");
+
+   SECTION("a flag set before the compilation starts stops it at once")
+   {
+      wt::compile_cancel cancel;
+      cancel.cancel();
+      CHECK_THROWS_AS(rt.compile(small, &cancel), wt::compile_cancelled);
+      const std::vector<uint32_t> costs(1, 16);
+      CHECK_THROWS_AS(rt.compile_metered(small, costs, &cancel), wt::compile_cancelled);
+      // The module is fine, and so is the runtime.
+      CHECK(rt.compile(small).serialize() == rt.compile(small).serialize());
+   }
+
+   SECTION("a flag that is never set changes nothing")
+   {
+      wt::compile_cancel cancel;
+      CHECK(rt.compile(small, &cancel).serialize() == rt.compile(small).serialize());
+   }
+
+   SECTION("a flag set while functions are being compiled stops the compilation")
+   {
+      auto big = wt::assemble(many_functions(20000));
+
+      auto begin = std::chrono::steady_clock::now();
+      auto whole = rt.compile(big).serialize();
+      auto uncancelled = std::chrono::steady_clock::now() - begin;
+
+      wt::compile_cancel cancel;
+      std::chrono::steady_clock::time_point set;
+      std::thread                           canceller([&] {
+         std::this_thread::sleep_for(uncancelled / 10);
+         set = std::chrono::steady_clock::now();
+         cancel.cancel();
+      });
+      CHECK_THROWS_AS(rt.compile(big, &cancel), wt::compile_cancelled);
+      auto noticed = std::chrono::steady_clock::now() - set;
+      canceller.join();
+      // The functions here are small, so the wait is for the ones in flight.
+      CHECK(noticed < uncancelled / 2);
+      CHECK(noticed < std::chrono::seconds(1));
+
+      // Nothing of the abandoned attempt is left behind: the same bytes
+      // compile to the same artifact afterwards.
+      CHECK(rt.compile(big).serialize() == whole);
+   }
+}

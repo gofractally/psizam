@@ -5,6 +5,28 @@
 meant for embedders. `tests/` holds the backend's tests. See also
 [docs/wasmtime-memory16.md](../docs/wasmtime-memory16.md).
 
+## Abandoning a compilation
+
+Compiling is not bounded by the size of the module: a small adversarial
+function can keep the compiler busy for a long time. An embedder that bounds
+how long it waits creates a `compile_cancel`, passes it to `compile` or
+`compile_metered`, and calls `cancel()` from another thread when it stops
+waiting. The compilation then throws `compile_cancelled`:
+
+- no further function is started, and the functions already in the compiler
+  give up between its passes or inside register allocation, so the wait after
+  `cancel()` is short but not zero;
+- nothing is produced or cached, and the runtime is unaffected: the same bytes
+  can be compiled again, with a new `compile_cancel` (one that has been set
+  stays set);
+- `compile_cancelled` says nothing about the module. Do not record the module
+  as refused because of it;
+- a `compile_cancel` that is never set changes nothing: the artifact is
+  byte-identical to one compiled without it.
+
+Not covered: assembling text into a binary, validation, and the three large
+sorts inside the register allocator are not interrupted.
+
 ## Debugging aids
 
 Three `engine_options` fields help with debugging guest code. All are off by

@@ -37,6 +37,7 @@ namespace abi {
    extern "C" {
    struct PzwtEngine;
    struct PzwtModule;
+   struct PzwtCancel;
    struct PzwtStore;
    struct PzwtContext;
    struct PzwtLinker;
@@ -111,9 +112,13 @@ namespace abi {
    void        pzwt_engine_delete(PzwtEngine*);
    int32_t     pzwt_wat_to_wasm(const char*, size_t, void (*)(void*, const uint8_t*, size_t), void*,
                                 PzwtError*);
-   PzwtModule* pzwt_module_new(const PzwtEngine*, const uint8_t*, size_t, PzwtError*);
+   PzwtCancel* pzwt_cancel_new();
+   void        pzwt_cancel_set(const PzwtCancel*);
+   void        pzwt_cancel_delete(PzwtCancel*);
+   PzwtModule* pzwt_module_new(const PzwtEngine*, const uint8_t*, size_t, const PzwtCancel*,
+                               PzwtError*);
    PzwtModule* pzwt_module_new_metered(const PzwtEngine*, const uint8_t*, size_t, const uint32_t*,
-                                       size_t, PzwtError*);
+                                       size_t, const PzwtCancel*, PzwtError*);
    int32_t     pzwt_module_serialize(const PzwtModule*, void (*)(void*, const uint8_t*, size_t),
                                      void*, PzwtError*);
    PzwtModule* pzwt_module_deserialize(const PzwtEngine*, const uint8_t*, size_t, PzwtError*);
@@ -170,6 +175,12 @@ enum class trap_kind : int32_t {
 // No instance could be created, and no wasm ran: the module does not link, or
 // the runtime's instance pool has no free slot or cannot hold this module.
 struct instantiation_error : error {
+   using error::error;
+};
+
+// A compilation was abandoned because its compile_cancel was set. Nothing is
+// wrong with the module: nothing was produced, and it can be compiled again.
+struct compile_cancelled : error {
    using error::error;
 };
 
@@ -301,6 +312,8 @@ namespace detail {
       abi::pzwt_string_free(e.message);
       if (e.status == 1)
          throw trap(static_cast<trap_kind>(e.trap_code), message);
+      if (e.status == 4)
+         throw compile_cancelled(message);
       throw error(message);
    }
 
@@ -501,6 +514,27 @@ inline std::string_view build_identity()
    return abi::pzwt_identity();
 }
 
+// ── compile_cancel ──────────────────────────────────────────────────────────
+
+// Lets one thread abandon a compilation another thread is in. Compiling is
+// not bounded by the size of the module, so whoever has stopped waiting calls
+// cancel(); the compilation then throws compile_cancelled soon afterwards.
+// Once set it stays set: use a new one for the next compilation. It must
+// outlive the compilations it was given to.
+class compile_cancel {
+  public:
+   compile_cancel() : p_(abi::pzwt_cancel_new()) {}
+   // From any thread, any number of times.
+   void                   cancel() const noexcept { abi::pzwt_cancel_set(p_.get()); }
+   const abi::PzwtCancel* get() const noexcept { return p_.get(); }
+
+  private:
+   struct deleter {
+      void operator()(abi::PzwtCancel* p) const noexcept { abi::pzwt_cancel_delete(p); }
+   };
+   std::unique_ptr<abi::PzwtCancel, deleter> p_;
+};
+
 // ── module ──────────────────────────────────────────────────────────────────
 
 class module {
@@ -593,17 +627,20 @@ class runtime {
 
    // Compiles wasm (binary or text). Validation here is wasmtime's; the
    // embedder's own admission rules must already have passed.
-   module compile(std::span<const uint8_t> wasm) const
+   // With a `cancel`, the compilation throws compile_cancelled soon after
+   // another thread sets it.
+   module compile(std::span<const uint8_t> wasm, const compile_cancel* cancel = nullptr) const
    {
       abi::PzwtError e{};
-      auto*          p = abi::pzwt_module_new(engine_.get(), wasm.data(), wasm.size(), &e);
+      auto*          p = abi::pzwt_module_new(engine_.get(), wasm.data(), wasm.size(),
+                                              cancel ? cancel->get() : nullptr, &e);
       if (!p)
          detail::raise(e);
       return module(p);
    }
-   module compile(std::string_view wat) const
+   module compile(std::string_view wat, const compile_cancel* cancel = nullptr) const
    {
-      return compile(std::span(reinterpret_cast<const uint8_t*>(wat.data()), wat.size()));
+      return compile(std::span(reinterpret_cast<const uint8_t*>(wat.data()), wat.size()), cancel);
    }
 
    // Compiles a binary module with deterministic stack accounting. `costs`
@@ -611,11 +648,13 @@ class runtime {
    // validator computes them (see wasmtime_admission.hpp). Instances of the
    // result overflow at exactly the point psizam's engines do, whatever the
    // native frame sizes are; set the budget with instance::set_stack_remaining.
-   module compile_metered(std::span<const uint8_t> wasm, std::span<const uint32_t> costs) const
+   module compile_metered(std::span<const uint8_t> wasm,
+                          std::span<const uint32_t> costs,
+                          const compile_cancel*     cancel = nullptr) const
    {
       abi::PzwtError e{};
       auto* p = abi::pzwt_module_new_metered(engine_.get(), wasm.data(), wasm.size(), costs.data(),
-                                             costs.size(), &e);
+                                             costs.size(), cancel ? cancel->get() : nullptr, &e);
       if (!p)
          detail::raise(e);
       return module(p);
