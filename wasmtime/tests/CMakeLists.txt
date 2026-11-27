@@ -81,6 +81,11 @@ set_tests_properties(execution.wasmtime-memory16 PROPERTIES TIMEOUT 300 LABELS "
 add_executable(psizam_wasmtime_stack_meter_bench stack_meter_bench.cpp)
 target_link_libraries(psizam_wasmtime_stack_meter_bench PRIVATE psizam psizam-exec psizam-wasmtime)
 
+# Measures native stack bytes per budget byte for the functions of a module
+# (gofractally/psibase#2279). Not a registered test.
+add_executable(psizam_wasmtime_stack_ratio_probe stack_ratio_probe.cpp)
+target_link_libraries(psizam_wasmtime_stack_ratio_probe PRIVATE psizam psizam-exec psizam-wasmtime)
+
 # Measures the cost of entering an instance: an export called by name, a
 # handle bound once, and an entry point. Not a registered test.
 add_executable(psizam_wasmtime_entry_call_bench entry_call_bench.cpp)
